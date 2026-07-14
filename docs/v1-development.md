@@ -82,6 +82,26 @@ Git 工具是受控的只读例外，只允许固定的 `git status --short` 和
 - 覆盖提案不写盘、未经批准的 `apply_change` 拒绝、批准后应用、拒绝零副作用、外部修改冲突、创建、跨会话隔离、撤销和策略边界。
 - v1 与 v1.1 当前共 12 项测试：`pytest -q`。
 
+## v1.2：受控执行与可靠性
+
+### 目标
+
+在不提供任意 Shell、网络或后台运行的前提下，让 Agent 能提出、审批和执行有限的本地验证命令，并让运行、任务、上下文和成本具有可恢复的记录。
+
+### 实现
+
+- 新增 `execution.py` 与命令提案表。命令必须先通过 `propose_command` 创建，再经 CLI `/approve <id>` 二次确认；`run_command` 会拒绝未批准或跨会话的提案。
+- 仅提供固定模板：Python `pytest`、Node 的 `npm test`/`npm run build`、`ruff check`、`prettier --check`。模型不能提交自由形式 Shell；npm 模板只在对应脚本存在时可用。
+- 执行器使用不启用 shell 的独立进程组，限制 cwd、超时和合并输出字节数；超时或 Ctrl-C 时终止整个进程组，并持久化失败/取消结果。
+- `task_list_update` 现在写入 SQLite；`task_status_update` 支持 `pending`、`running`、`blocked`、`completed`、`failed`、`cancelled` 状态。
+- 运行记录保存模型输入/输出 token 与可选费用；`/cost` 展示会话汇总。超出上下文窗口的早期消息保存为受限长度的会话摘要并在后续轮次注入。
+- CLI 新增 `/commands`、`/tasks`、`/cost`；`/approve` 和 `/reject` 同时支持变更与命令 ID。
+
+### 验证
+
+- 覆盖命令未经批准拒绝、成功执行、超时、输出截断、cwd/会话隔离，以及 Agent 工具不能绕过审批。
+- 覆盖任务状态、token/费用归档与上下文压缩；当前测试套件共 17 项。
+
 ## 当前架构
 
 ```text
@@ -90,6 +110,7 @@ CLI
      ├─ ToolRegistry (tools.py)
      │   └─ WorkspacePolicy (policy.py)
      ├─ ChangeService (changes.py)
+     ├─ CommandService (execution.py)
      ├─ Evidence (evidence.py)
      ├─ SessionStore / SQLite (session.py)
      └─ EventSink (observability.py)
@@ -101,6 +122,7 @@ CLI
 - `tools.py`：工具定义、输入 Schema、工具执行与标准化结果。
 - `policy.py`：工作区受控读写安全边界。
 - `changes.py`：变更提案、审批、应用、冲突保护与撤销。
+- `execution.py`：固定命令模板、审批、进程执行、超时与输出限制。
 - `evidence.py`：可定位的文件证据。
 - `session.py`：SQLite 状态和轨迹。
 - `observability.py`：脱敏事件日志。

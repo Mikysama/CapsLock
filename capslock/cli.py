@@ -12,6 +12,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from .changes import ChangeService, make_diff
+from .execution import CommandService
 from .config import Settings
 from .environment import load_project_environment
 from .policy import PolicyError, WorkspacePolicy
@@ -49,7 +50,7 @@ def _client(settings: Settings) -> OpenAI:
 
 
 def _agent(workspace: Path, settings: Settings, session_id: str | None = None) -> WorkspaceAgent:
-    return WorkspaceAgent(_client(settings), workspace=workspace, model=settings.model, store=_store(workspace), session_id=session_id, max_turns=settings.max_turns, max_context_messages=settings.max_context_messages)
+    return WorkspaceAgent(_client(settings), workspace=workspace, model=settings.model, store=_store(workspace), session_id=session_id, max_turns=settings.max_turns, max_context_messages=settings.max_context_messages, command_timeout_seconds=settings.command_timeout_seconds, command_output_bytes=settings.command_output_bytes, input_cost_per_million=settings.input_cost_per_million, output_cost_per_million=settings.output_cost_per_million)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -95,7 +96,7 @@ def _chat(agent: WorkspaceAgent, debug: bool) -> int:
         if question in {"/exit", "/quit"}:
             return 0
         if question == "/help":
-            console.print("/status  /context  /session  /changes  /approve <id>  /reject <id>  /undo  /diff  /clear  /cancel  /exit")
+            console.print("/status  /context  /cost  /tasks  /changes  /commands  /approve <id>  /reject <id>  /undo  /diff  /clear  /cancel  /exit")
             continue
         if question in {"/status", "/session"}:
             console.print(f"session={agent.session_id}\nworkspace={agent.workspace}\nmodel={agent.model}\nmax_turns={agent.max_turns}")
@@ -103,17 +104,26 @@ def _chat(agent: WorkspaceAgent, debug: bool) -> int:
         if question == "/context":
             console.print(f"Stored context messages: {len(agent.store.messages(agent.session_id, agent.max_context_messages))}/{agent.max_context_messages}")
             continue
+        if question == "/cost":
+            _render_cost(agent)
+            continue
+        if question == "/tasks":
+            _render_tasks(agent)
+            continue
         if question == "/clear":
             console.print("This session is append-only. Start `capslock chat` to create a fresh session.")
             continue
         if question == "/changes":
             _render_changes(agent)
             continue
+        if question == "/commands":
+            _render_commands(agent)
+            continue
         if question.startswith("/approve "):
-            _approve(agent, question.removeprefix("/approve ").strip())
+            _approve_action(agent, question.removeprefix("/approve ").strip())
             continue
         if question.startswith("/reject "):
-            _reject(agent, question.removeprefix("/reject ").strip())
+            _reject_action(agent, question.removeprefix("/reject ").strip())
             continue
         if question == "/undo":
             _undo(agent)
@@ -152,6 +162,10 @@ def _change_service(agent: WorkspaceAgent) -> ChangeService:
     return ChangeService(agent.store, WorkspacePolicy(agent.workspace), agent.session_id, "cli", agent.events.emit)
 
 
+def _command_service(agent: WorkspaceAgent) -> CommandService:
+    return CommandService(agent.store, WorkspacePolicy(agent.workspace), agent.session_id, "cli", agent.events.emit, timeout_seconds=agent.command_timeout_seconds, output_limit_bytes=agent.command_output_bytes)
+
+
 def _render_changes(agent: WorkspaceAgent, *, pending_only: bool = False) -> None:
     statuses = ("pending",) if pending_only else None
     changes = agent.store.list_changes(agent.session_id, statuses=statuses)
@@ -166,6 +180,14 @@ def _render_changes(agent: WorkspaceAgent, *, pending_only: bool = False) -> Non
     for item in changes:
         if item.status == "pending":
             console.print(Panel(item.diff or "(no textual diff)", title=f"Review {item.id[:12]} · {item.path}", border_style="yellow"))
+
+
+def _approve_action(agent: WorkspaceAgent, action_id: str) -> None:
+    command = _resolve_command(agent, action_id)
+    if command is not None:
+        _approve_command(agent, command.id)
+        return
+    _approve(agent, action_id)
 
 
 def _approve(agent: WorkspaceAgent, change_id: str) -> None:
@@ -194,6 +216,39 @@ def _reject(agent: WorkspaceAgent, change_id: str) -> None:
         console.print(f"[red]Error:[/] {exc}")
 
 
+def _approve_command(agent: WorkspaceAgent, command_id: str) -> None:
+    try:
+        command = _resolve_command(agent, command_id)
+        if command is None:
+            raise AgentRuntimeError("command does not belong to this session or does not exist")
+        console.print(Panel(" ".join(command.argv), title=f"Run {command.id[:12]} · cwd={command.cwd} · timeout={command.timeout_seconds:g}s", border_style="yellow"))
+        if console.input("Run this command? [y/N] ").strip().casefold() not in {"y", "yes"}:
+            console.print("[dim]Command remains pending.[/]")
+            return
+        service = _command_service(agent)
+        service.approve(command.id)
+        result = service.execute(command.id)
+        console.print(f"[green]{result.status}:[/] exit_code={result.exit_code}")
+        if result.stdout:
+            console.print(Panel(result.stdout, title="stdout", border_style="dim"))
+        if result.stderr:
+            console.print(Panel(result.stderr, title="stderr", border_style="red"))
+    except (AgentRuntimeError, ValueError, PolicyError) as exc:
+        console.print(f"[red]Error:[/] {exc}")
+
+
+def _reject_action(agent: WorkspaceAgent, action_id: str) -> None:
+    command = _resolve_command(agent, action_id)
+    if command is not None:
+        try:
+            _command_service(agent).reject(command.id)
+            console.print("[yellow]Discarded command proposal.[/]")
+        except (AgentRuntimeError, ValueError, PolicyError) as exc:
+            console.print(f"[red]Error:[/] {exc}")
+        return
+    _reject(agent, action_id)
+
+
 def _undo(agent: WorkspaceAgent) -> None:
     try:
         change = agent.store.last_applied_change(agent.session_id)
@@ -216,6 +271,33 @@ def _show_git_diff(agent: WorkspaceAgent) -> None:
     console.print(result.data.get("output", "") if result.ok and isinstance(result.data, dict) else result.error)
 
 
+def _render_commands(agent: WorkspaceAgent) -> None:
+    commands = agent.store.list_commands(agent.session_id)
+    if not commands:
+        console.print("[dim]No command proposals in this session.[/]")
+        return
+    table = Table("Command", "Status", "CWD", "Exit", "Command")
+    for item in commands:
+        table.add_row(item.id[:12], item.status, item.cwd, str(item.exit_code) if item.exit_code is not None else "", " ".join(item.argv))
+    console.print(table)
+
+
+def _render_tasks(agent: WorkspaceAgent) -> None:
+    tasks = agent.store.list_tasks(agent.session_id)
+    if not tasks:
+        console.print("[dim]No tasks in this session.[/]")
+        return
+    table = Table("Task", "Status", "Text")
+    for item in tasks:
+        table.add_row(item.id[:12], item.status, item.text)
+    console.print(table)
+
+
+def _render_cost(agent: WorkspaceAgent) -> None:
+    input_tokens, output_tokens, cost = agent.store.session_cost(agent.session_id)
+    console.print(f"input_tokens={input_tokens}\noutput_tokens={output_tokens}\ncost_usd=${cost:.6f}")
+
+
 def _resolve_change(agent: WorkspaceAgent, prefix: str):
     exact = agent.store.get_change(prefix, session_id=agent.session_id)
     if exact is not None:
@@ -226,6 +308,18 @@ def _resolve_change(agent: WorkspaceAgent, prefix: str):
     if not matches:
         raise AgentRuntimeError("change does not belong to this session or does not exist")
     raise AgentRuntimeError("change id prefix is ambiguous; provide more characters")
+
+
+def _resolve_command(agent: WorkspaceAgent, prefix: str):
+    exact = agent.store.get_command(prefix, session_id=agent.session_id)
+    if exact is not None:
+        return exact
+    matches = [item for item in agent.store.list_commands(agent.session_id) if item.id.startswith(prefix)]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        raise AgentRuntimeError("command id prefix is ambiguous; provide more characters")
+    return None
 
 
 def _sessions(store: SessionStore, limit: int) -> int:
@@ -244,6 +338,8 @@ def _doctor(workspace: Path, settings: Settings) -> int:
     table.add_row("Endpoint", settings.base_url)
     table.add_row("API key", "configured" if settings.api_key and not settings.api_key.startswith("your_") else "missing")
     table.add_row("Git", "repository" if (workspace / ".git").exists() else "not a repository (Git tools will be unavailable)")
+    commands = CommandService(_store(workspace), WorkspacePolicy(workspace), "doctor", "doctor", lambda *args, **kwargs: None)
+    table.add_row("Command templates", ", ".join(commands.available_templates()) or "none detected")
     console.print(table)
     return 0
 

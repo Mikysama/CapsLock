@@ -16,6 +16,10 @@ class Settings:
     timeout_seconds: float
     max_turns: int
     max_context_messages: int
+    command_timeout_seconds: float
+    command_output_bytes: int
+    input_cost_per_million: float
+    output_cost_per_million: float
 
     @classmethod
     def load(cls, workspace: Path) -> "Settings":
@@ -32,4 +36,8 @@ class Settings:
             timeout_seconds=float(value("CAPSLOCK_TIMEOUT_SECONDS", 60)),
             max_turns=int(value("CAPSLOCK_MAX_TURNS", 6)),
             max_context_messages=int(value("CAPSLOCK_MAX_CONTEXT_MESSAGES", 24)),
+            command_timeout_seconds=float(value("CAPSLOCK_COMMAND_TIMEOUT_SECONDS", 120)),
+            command_output_bytes=int(value("CAPSLOCK_COMMAND_OUTPUT_BYTES", 100_000)),
+            input_cost_per_million=float(value("CAPSLOCK_INPUT_COST_PER_MILLION", 0)),
+            output_cost_per_million=float(value("CAPSLOCK_OUTPUT_COST_PER_MILLION", 0)),
         )

@@ -40,6 +40,30 @@ class ChangeInfo:
     created_at: str
 
 
+@dataclass(frozen=True)
+class CommandInfo:
+    id: str
+    session_id: str
+    run_id: str
+    template: str
+    argv: tuple[str, ...]
+    cwd: str
+    timeout_seconds: float
+    summary: str
+    status: str
+    exit_code: int | None
+    stdout: str
+    stderr: str
+
+
+@dataclass(frozen=True)
+class TaskInfo:
+    id: str
+    session_id: str
+    text: str
+    status: str
+
+
 class SessionStore:
     def __init__(self, database: str | Path) -> None:
         self.path = Path(database)
@@ -60,7 +84,7 @@ class SessionStore:
               id TEXT PRIMARY KEY, session_id TEXT NOT NULL, question TEXT NOT NULL,
               status TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT,
               duration_ms INTEGER, input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0,
-              error TEXT
+              error TEXT, cost_usd REAL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS tool_calls (
               id INTEGER PRIMARY KEY, run_id TEXT NOT NULL, name TEXT NOT NULL,
@@ -78,9 +102,27 @@ class SessionStore:
               summary TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL,
               approved_at TEXT, applied_at TEXT, undone_at TEXT, error TEXT
             );
+            CREATE TABLE IF NOT EXISTS commands (
+              id TEXT PRIMARY KEY, session_id TEXT NOT NULL, run_id TEXT NOT NULL,
+              template TEXT NOT NULL, argv TEXT NOT NULL, cwd TEXT NOT NULL,
+              timeout_seconds REAL NOT NULL, summary TEXT NOT NULL, status TEXT NOT NULL,
+              created_at TEXT NOT NULL, approved_at TEXT, started_at TEXT, finished_at TEXT,
+              exit_code INTEGER, stdout TEXT NOT NULL DEFAULT '', stderr TEXT NOT NULL DEFAULT '',
+              output_truncated INTEGER NOT NULL DEFAULT 0, error TEXT
+            );
+            CREATE TABLE IF NOT EXISTS tasks (
+              id TEXT PRIMARY KEY, session_id TEXT NOT NULL, text TEXT NOT NULL,
+              status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
             """
         )
+        self._ensure_column("runs", "cost_usd", "REAL DEFAULT 0")
         self._connection.commit()
+
+    def _ensure_column(self, table: str, name: str, definition: str) -> None:
+        columns = {row["name"] for row in self._connection.execute(f"PRAGMA table_info({table})")}
+        if name not in columns:
+            self._connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
 
     def create(self, workspace: Path, model: str) -> SessionInfo:
         session_id, now = uuid.uuid4().hex, _now()
@@ -116,8 +158,8 @@ class SessionStore:
         self._connection.commit()
         return run_id
 
-    def finish_run(self, run_id: str, *, status: str, duration_ms: int, error: str | None = None) -> None:
-        self._connection.execute("UPDATE runs SET status=?, finished_at=?, duration_ms=?, error=? WHERE id=?", (status, _now(), duration_ms, error, run_id))
+    def finish_run(self, run_id: str, *, status: str, duration_ms: int, error: str | None = None, input_tokens: int = 0, output_tokens: int = 0, cost_usd: float = 0) -> None:
+        self._connection.execute("UPDATE runs SET status=?, finished_at=?, duration_ms=?, error=?, input_tokens=?, output_tokens=?, cost_usd=? WHERE id=?", (status, _now(), duration_ms, error, input_tokens, output_tokens, cost_usd, run_id))
         self._connection.commit()
 
     def record_tool_call(self, run_id: str, name: str, arguments: dict[str, Any], ok: bool, summary: str, duration_ms: int) -> None:
@@ -180,9 +222,86 @@ class SessionStore:
         ).fetchone()
         return None if row is None else _change_info(row)
 
+    def create_command(self, *, session_id: str, run_id: str, template: str, argv: list[str], cwd: str, timeout_seconds: float, summary: str) -> CommandInfo:
+        command_id, now = uuid.uuid4().hex, _now()
+        self._connection.execute(
+            "INSERT INTO commands(id,session_id,run_id,template,argv,cwd,timeout_seconds,summary,status,created_at) VALUES(?,?,?,?,?,?,?,?, 'pending', ?)",
+            (command_id, session_id, run_id, template, json.dumps(argv), cwd, timeout_seconds, summary, now),
+        )
+        self._connection.commit()
+        return self.get_command(command_id, session_id=session_id)  # type: ignore[return-value]
+
+    def get_command(self, command_id: str, *, session_id: str | None = None) -> CommandInfo | None:
+        query, values = "SELECT * FROM commands WHERE id=?", [command_id]
+        if session_id is not None:
+            query += " AND session_id=?"
+            values.append(session_id)
+        row = self._connection.execute(query, values).fetchone()
+        return None if row is None else _command_info(row)
+
+    def list_commands(self, session_id: str) -> list[CommandInfo]:
+        return [_command_info(row) for row in self._connection.execute("SELECT * FROM commands WHERE session_id=? ORDER BY created_at", (session_id,)).fetchall()]
+
+    def update_command(self, command_id: str, status: str, *, exit_code: int | None = None, stdout: str = "", stderr: str = "", truncated: bool = False, error: str | None = None) -> None:
+        timestamp = {"approved": "approved_at", "running": "started_at", "completed": "finished_at", "failed": "finished_at", "cancelled": "finished_at"}.get(status)
+        if timestamp:
+            self._connection.execute(f"UPDATE commands SET status=?, {timestamp}=?, exit_code=?, stdout=?, stderr=?, output_truncated=?, error=? WHERE id=?", (status, _now(), exit_code, stdout, stderr, int(truncated), error, command_id))
+        else:
+            self._connection.execute("UPDATE commands SET status=?, error=? WHERE id=?", (status, error, command_id))
+        self._connection.commit()
+
+    def replace_tasks(self, session_id: str, items: list[str]) -> list[TaskInfo]:
+        now = _now()
+        existing = {row["text"]: row for row in self._connection.execute("SELECT * FROM tasks WHERE session_id=? AND status IN ('pending','running','blocked')", (session_id,))}
+        for text in items:
+            if text not in existing:
+                self._connection.execute("INSERT INTO tasks(id,session_id,text,status,created_at,updated_at) VALUES(?,?,?,?,?,?)", (uuid.uuid4().hex, session_id, text, "pending", now, now))
+        for text, row in existing.items():
+            if text not in items:
+                self._connection.execute("UPDATE tasks SET status='cancelled', updated_at=? WHERE id=?", (now, row["id"]))
+        self._connection.commit()
+        return self.list_tasks(session_id)
+
+    def list_tasks(self, session_id: str) -> list[TaskInfo]:
+        return [TaskInfo(row["id"], row["session_id"], row["text"], row["status"]) for row in self._connection.execute("SELECT * FROM tasks WHERE session_id=? ORDER BY created_at", (session_id,))]
+
+    def update_task_status(self, task_id: str, session_id: str, status: str) -> TaskInfo:
+        if status not in {"pending", "running", "blocked", "completed", "failed", "cancelled"}:
+            raise ValueError(f"unsupported task status: {status}")
+        updated = self._connection.execute(
+            "UPDATE tasks SET status=?, updated_at=? WHERE id=? AND session_id=?", (status, _now(), task_id, session_id)
+        ).rowcount
+        if not updated:
+            raise ValueError("task does not belong to this session or does not exist")
+        self._connection.commit()
+        row = self._connection.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+        return TaskInfo(row["id"], row["session_id"], row["text"], row["status"])
+
+    def message_count(self, session_id: str) -> int:
+        return int(self._connection.execute("SELECT count(*) FROM messages WHERE session_id=?", (session_id,)).fetchone()[0])
+
+    def compact_summary(self, session_id: str, keep: int) -> str:
+        rows = self._connection.execute("SELECT role,content FROM messages WHERE session_id=? ORDER BY id", (session_id,)).fetchall()
+        older = rows[:-keep] if len(rows) > keep else []
+        if not older:
+            return self._connection.execute("SELECT summary FROM sessions WHERE id=?", (session_id,)).fetchone()[0]
+        summary = "\n".join(f"{row['role']}: {row['content']}" for row in older)
+        summary = summary[-6000:]
+        self._connection.execute("UPDATE sessions SET summary=?, updated_at=? WHERE id=?", (summary, _now(), session_id))
+        self._connection.commit()
+        return summary
+
+    def session_cost(self, session_id: str) -> tuple[int, int, float]:
+        row = self._connection.execute("SELECT coalesce(sum(input_tokens),0), coalesce(sum(output_tokens),0), coalesce(sum(cost_usd),0) FROM runs WHERE session_id=?", (session_id,)).fetchone()
+        return int(row[0]), int(row[1]), float(row[2])
+
 
 def _change_info(row: sqlite3.Row) -> ChangeInfo:
     return ChangeInfo(
         row["id"], row["session_id"], row["run_id"], row["path"], row["operation"], row["expected_hash"],
         row["before_content"], row["after_content"], row["diff"], row["summary"], row["status"], row["created_at"],
     )
+
+
+def _command_info(row: sqlite3.Row) -> CommandInfo:
+    return CommandInfo(row["id"], row["session_id"], row["run_id"], row["template"], tuple(json.loads(row["argv"])), row["cwd"], row["timeout_seconds"], row["summary"], row["status"], row["exit_code"], row["stdout"], row["stderr"])

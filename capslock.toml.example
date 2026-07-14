@@ -6,3 +6,8 @@ model = "deepseek-v4-flash"
 timeout_seconds = 60
 max_turns = 6
 max_context_messages = 24
+command_timeout_seconds = 120
+command_output_bytes = 100000
+# Optional USD prices per million tokens for /cost.
+input_cost_per_million = 0
+output_cost_per_million = 0

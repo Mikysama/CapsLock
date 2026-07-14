@@ -12,6 +12,7 @@ from typing import Any, Callable
 
 from .changes import ChangeService
 from .evidence import Evidence
+from .execution import CommandService
 from .policy import PolicyError, WorkspacePolicy
 from .session import SessionStore
 
@@ -38,6 +39,8 @@ class RunContext:
     max_turns: int
     event: Callable[..., None]
     store: SessionStore | None = None
+    command_timeout_seconds: float = 120
+    command_output_bytes: int = 100_000
 
 
 @dataclass(frozen=True)
@@ -172,7 +175,20 @@ def task_list_update(context: RunContext, arguments: dict[str, Any]) -> ToolResu
     items = arguments.get("items")
     if not isinstance(items, list) or not all(isinstance(item, str) and item.strip() for item in items):
         raise ValueError("items must be a non-empty list of task strings")
-    return ToolResult(True, {"items": items, "note": "Tasks are session-scoped and are not written to the workspace."})
+    if context.store is None:
+        return ToolResult(True, {"items": items, "note": "Tasks are session-scoped for this run."})
+    tasks = context.store.replace_tasks(context.session_id, items)
+    return ToolResult(True, {"tasks": [{"id": task.id, "text": task.text, "status": task.status} for task in tasks]})
+
+
+def task_status_update(context: RunContext, arguments: dict[str, Any]) -> ToolResult:
+    task_id, status = arguments.get("task_id"), arguments.get("status")
+    if not isinstance(task_id, str) or not isinstance(status, str):
+        raise ValueError("task_id and status must be strings")
+    if context.store is None:
+        raise ValueError("task storage is unavailable")
+    task = context.store.update_task_status(task_id, context.session_id, status)
+    return ToolResult(True, {"id": task.id, "text": task.text, "status": task.status})
 
 
 def _changes(context: RunContext) -> ChangeService:
@@ -185,6 +201,39 @@ def _change_data(change: object) -> dict[str, object]:
     from .session import ChangeInfo
     assert isinstance(change, ChangeInfo)
     return {"change_id": change.id, "path": change.path, "operation": change.operation, "summary": change.summary, "status": change.status, "diff": change.diff}
+
+
+def _commands(context: RunContext) -> CommandService:
+    if context.store is None:
+        raise ValueError("command storage is unavailable")
+    return CommandService(context.store, context.policy, context.session_id, context.run_id, context.event, timeout_seconds=context.command_timeout_seconds, output_limit_bytes=context.command_output_bytes)
+
+
+def _command_data(command: object) -> dict[str, object]:
+    from .session import CommandInfo
+    assert isinstance(command, CommandInfo)
+    return {"command_id": command.id, "template": command.template, "argv": list(command.argv), "cwd": command.cwd, "summary": command.summary, "status": command.status, "exit_code": command.exit_code, "stdout": command.stdout, "stderr": command.stderr}
+
+
+def propose_command(context: RunContext, arguments: dict[str, Any]) -> ToolResult:
+    template, target, cwd = arguments.get("template"), arguments.get("target"), arguments.get("cwd", ".")
+    if not isinstance(template, str) or target is not None and not isinstance(target, str) or not isinstance(cwd, str):
+        raise ValueError("template, target, and cwd must be strings")
+    return ToolResult(True, _command_data(_commands(context).propose(template, target=target, cwd=cwd)))
+
+
+def run_command(context: RunContext, arguments: dict[str, Any]) -> ToolResult:
+    command_id = arguments.get("command_id")
+    if not isinstance(command_id, str):
+        raise ValueError("command_id must be a string")
+    return ToolResult(True, _command_data(_commands(context).execute(command_id)))
+
+
+def discard_command(context: RunContext, arguments: dict[str, Any]) -> ToolResult:
+    command_id = arguments.get("command_id")
+    if not isinstance(command_id, str):
+        raise ValueError("command_id must be a string")
+    return ToolResult(True, _command_data(_commands(context).reject(command_id)))
 
 
 def propose_file_edit(context: RunContext, arguments: dict[str, Any]) -> ToolResult:
@@ -225,8 +274,12 @@ def workspace_tools() -> ToolRegistry:
         Tool("git_status", "Show Git working-tree status. Read-only.", {"type": "object", "properties": {}, "additionalProperties": False}, "read", git_status),
         Tool("git_diff", "Show Git diff, optionally limited to a workspace path. Read-only.", {"type": "object", "properties": {"path": {"type": "string"}}, "additionalProperties": False}, "read", git_diff),
         Tool("task_list_update", "Update the session task list without writing user files.", {"type": "object", "properties": {"items": {"type": "array", "items": {"type": "string"}}}, "required": ["items"], "additionalProperties": False}, "none", task_list_update),
+        Tool("task_status_update", "Update one session task status after work completes, fails, or is blocked.", {"type": "object", "properties": {"task_id": {"type": "string"}, "status": {"type": "string", "enum": ["pending", "running", "blocked", "completed", "failed", "cancelled"]}}, "required": ["task_id", "status"], "additionalProperties": False}, "none", task_status_update),
         Tool("propose_file_edit", "Propose one exact text replacement. This never writes a file; the user must approve before application.", {"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}, "summary": {"type": "string"}}, "required": ["path", "old_text", "new_text"], "additionalProperties": False}, "write", propose_file_edit, reversible=True),
         Tool("propose_file_create", "Propose creation of one text file. This never writes a file; the user must approve before application.", {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}, "summary": {"type": "string"}}, "required": ["path", "content"], "additionalProperties": False}, "write", propose_file_create, reversible=True),
         Tool("apply_change", "Apply an already user-approved change proposal. Never call this before approval.", {"type": "object", "properties": {"change_id": {"type": "string"}}, "required": ["change_id"], "additionalProperties": False}, "write", apply_change, requires_approval=True, reversible=True),
         Tool("discard_change", "Discard a pending change proposal without writing files.", {"type": "object", "properties": {"change_id": {"type": "string"}}, "required": ["change_id"], "additionalProperties": False}, "none", discard_change),
+        Tool("propose_command", "Propose a fixed, approved command template. This never starts a process; the user must approve it in the CLI.", {"type": "object", "properties": {"template": {"type": "string", "enum": ["pytest", "npm_test", "npm_build", "ruff_check", "prettier_check"]}, "target": {"type": "string"}, "cwd": {"type": "string"}}, "required": ["template"], "additionalProperties": False}, "execute", propose_command),
+        Tool("run_command", "Run an already user-approved command proposal. Never call this before approval.", {"type": "object", "properties": {"command_id": {"type": "string"}}, "required": ["command_id"], "additionalProperties": False}, "execute", run_command, requires_approval=True),
+        Tool("discard_command", "Discard a pending command proposal without starting a process.", {"type": "object", "properties": {"command_id": {"type": "string"}}, "required": ["command_id"], "additionalProperties": False}, "none", discard_command),
     ])
