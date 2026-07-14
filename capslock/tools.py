@@ -10,8 +10,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from .changes import ChangeService
 from .evidence import Evidence
 from .policy import PolicyError, WorkspacePolicy
+from .session import SessionStore
 
 
 TEXT_SUFFIXES = {".md", ".txt", ".py", ".js", ".ts", ".tsx", ".json", ".yaml", ".yml", ".toml", ".csv", ".html", ".css", ".sh", ".sql", ".go", ".rs", ".java", ".c", ".h", ".cpp"}
@@ -35,6 +37,7 @@ class RunContext:
     policy: WorkspacePolicy
     max_turns: int
     event: Callable[..., None]
+    store: SessionStore | None = None
 
 
 @dataclass(frozen=True)
@@ -44,6 +47,8 @@ class Tool:
     parameters: dict[str, object]
     risk_level: str
     execute: Callable[[RunContext, dict[str, Any]], ToolResult]
+    requires_approval: bool = False
+    reversible: bool = False
 
     def schema(self) -> dict[str, object]:
         return {"type": "function", "function": {"name": self.name, "description": self.description, "parameters": self.parameters}}
@@ -170,6 +175,47 @@ def task_list_update(context: RunContext, arguments: dict[str, Any]) -> ToolResu
     return ToolResult(True, {"items": items, "note": "Tasks are session-scoped and are not written to the workspace."})
 
 
+def _changes(context: RunContext) -> ChangeService:
+    if context.store is None:
+        raise ValueError("change storage is unavailable")
+    return ChangeService(context.store, context.policy, context.session_id, context.run_id, context.event)
+
+
+def _change_data(change: object) -> dict[str, object]:
+    from .session import ChangeInfo
+    assert isinstance(change, ChangeInfo)
+    return {"change_id": change.id, "path": change.path, "operation": change.operation, "summary": change.summary, "status": change.status, "diff": change.diff}
+
+
+def propose_file_edit(context: RunContext, arguments: dict[str, Any]) -> ToolResult:
+    path, old_text, new_text = arguments.get("path"), arguments.get("old_text"), arguments.get("new_text")
+    summary = arguments.get("summary", "")
+    if not all(isinstance(item, str) for item in (path, old_text, new_text, summary)):
+        raise ValueError("path, old_text, new_text, and summary must be strings")
+    return ToolResult(True, _change_data(_changes(context).propose_edit(path, old_text, new_text, summary)))
+
+
+def propose_file_create(context: RunContext, arguments: dict[str, Any]) -> ToolResult:
+    path, content, summary = arguments.get("path"), arguments.get("content"), arguments.get("summary", "")
+    if not all(isinstance(item, str) for item in (path, content, summary)):
+        raise ValueError("path, content, and summary must be strings")
+    return ToolResult(True, _change_data(_changes(context).propose_create(path, content, summary)))
+
+
+def apply_change(context: RunContext, arguments: dict[str, Any]) -> ToolResult:
+    change_id = arguments.get("change_id")
+    if not isinstance(change_id, str):
+        raise ValueError("change_id must be a string")
+    return ToolResult(True, _change_data(_changes(context).apply(change_id)))
+
+
+def discard_change(context: RunContext, arguments: dict[str, Any]) -> ToolResult:
+    change_id = arguments.get("change_id")
+    if not isinstance(change_id, str):
+        raise ValueError("change_id must be a string")
+    return ToolResult(True, _change_data(_changes(context).reject(change_id)))
+
+
 def workspace_tools() -> ToolRegistry:
     string_path = {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"], "additionalProperties": False}
     return ToolRegistry([
@@ -179,4 +225,8 @@ def workspace_tools() -> ToolRegistry:
         Tool("git_status", "Show Git working-tree status. Read-only.", {"type": "object", "properties": {}, "additionalProperties": False}, "read", git_status),
         Tool("git_diff", "Show Git diff, optionally limited to a workspace path. Read-only.", {"type": "object", "properties": {"path": {"type": "string"}}, "additionalProperties": False}, "read", git_diff),
         Tool("task_list_update", "Update the session task list without writing user files.", {"type": "object", "properties": {"items": {"type": "array", "items": {"type": "string"}}}, "required": ["items"], "additionalProperties": False}, "none", task_list_update),
+        Tool("propose_file_edit", "Propose one exact text replacement. This never writes a file; the user must approve before application.", {"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}, "summary": {"type": "string"}}, "required": ["path", "old_text", "new_text"], "additionalProperties": False}, "write", propose_file_edit, reversible=True),
+        Tool("propose_file_create", "Propose creation of one text file. This never writes a file; the user must approve before application.", {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}, "summary": {"type": "string"}}, "required": ["path", "content"], "additionalProperties": False}, "write", propose_file_create, reversible=True),
+        Tool("apply_change", "Apply an already user-approved change proposal. Never call this before approval.", {"type": "object", "properties": {"change_id": {"type": "string"}}, "required": ["change_id"], "additionalProperties": False}, "write", apply_change, requires_approval=True, reversible=True),
+        Tool("discard_change", "Discard a pending change proposal without writing files.", {"type": "object", "properties": {"change_id": {"type": "string"}}, "required": ["change_id"], "additionalProperties": False}, "none", discard_change),
     ])

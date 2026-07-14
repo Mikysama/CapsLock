@@ -20,11 +20,13 @@ class AgentRuntimeError(RuntimeError):
     pass
 
 
-INSTRUCTIONS = """You are CapsLock, a trustworthy read-only workspace assistant.
-Use workspace tools for claims about local files or Git. Never claim to have changed files,
-run arbitrary commands, used the network, or accessed a path outside the workspace. Tool failures
-are recoverable: explain the limit or try a valid alternative. Cite evidence returned by tools with
-[[evidence:ev_xxx]] markers. If local evidence is insufficient, say so plainly. Keep answers concise."""
+INSTRUCTIONS = """You are CapsLock, a trustworthy workspace assistant.
+Use workspace tools for claims about local files or Git. For edits, first call a propose_file_* tool:
+it only creates a reviewable proposal and never writes a user file. Never call apply_change unless
+the user has explicitly approved the proposal in the CLI. Never claim to have run arbitrary commands,
+used the network, or accessed a path outside the workspace. Tool failures are recoverable: explain the
+limit or try a valid alternative. Cite evidence returned by tools with [[evidence:ev_xxx]] markers.
+If local evidence is insufficient, say so plainly. Keep answers concise."""
 
 
 @dataclass(frozen=True)
@@ -97,7 +99,7 @@ class WorkspaceAgent:
                         arguments, result_text, duration_ms = {}, json.dumps({"ok": False, "error": f"invalid tool arguments: {exc}"}), 0
                         self.store.record_tool_call(run_id, call.function.name, arguments, False, result_text, duration_ms)
                     else:
-                        context = RunContext(self.session_id, run_id, WorkspacePolicy(self.workspace), self.max_turns, self.events.emit)
+                        context = RunContext(self.session_id, run_id, WorkspacePolicy(self.workspace), self.max_turns, self.events.emit, self.store)
                         result, duration_ms = self.tools.invoke(call.function.name, context, arguments)
                         for passage in result.citations:
                             evidence[passage.id] = passage

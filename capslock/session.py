@@ -24,6 +24,22 @@ class SessionInfo:
     updated_at: str
 
 
+@dataclass(frozen=True)
+class ChangeInfo:
+    id: str
+    session_id: str
+    run_id: str
+    path: str
+    operation: str
+    expected_hash: str | None
+    before_content: str | None
+    after_content: str
+    diff: str
+    summary: str
+    status: str
+    created_at: str
+
+
 class SessionStore:
     def __init__(self, database: str | Path) -> None:
         self.path = Path(database)
@@ -54,6 +70,13 @@ class SessionStore:
             CREATE TABLE IF NOT EXISTS citations (
               id INTEGER PRIMARY KEY, run_id TEXT NOT NULL, citation_id TEXT NOT NULL,
               path TEXT NOT NULL, start_line INTEGER NOT NULL, end_line INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS changes (
+              id TEXT PRIMARY KEY, session_id TEXT NOT NULL, run_id TEXT NOT NULL,
+              path TEXT NOT NULL, operation TEXT NOT NULL, expected_hash TEXT,
+              before_content TEXT, after_content TEXT NOT NULL, diff TEXT NOT NULL,
+              summary TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL,
+              approved_at TEXT, applied_at TEXT, undone_at TEXT, error TEXT
             );
             """
         )
@@ -110,3 +133,56 @@ class SessionStore:
             [(run_id, item.id, str(item.path), item.start_line, item.end_line) for item in citations],
         )
         self._connection.commit()
+
+    def create_change(
+        self, *, session_id: str, run_id: str, path: str, operation: str,
+        expected_hash: str | None, before_content: str | None, after_content: str,
+        diff: str, summary: str,
+    ) -> ChangeInfo:
+        change_id, now = uuid.uuid4().hex, _now()
+        self._connection.execute(
+            """INSERT INTO changes(id,session_id,run_id,path,operation,expected_hash,before_content,
+               after_content,diff,summary,status,created_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?, 'pending', ?)""",
+            (change_id, session_id, run_id, path, operation, expected_hash, before_content,
+             after_content, diff, summary, now),
+        )
+        self._connection.commit()
+        return self.get_change(change_id, session_id=session_id)  # type: ignore[return-value]
+
+    def get_change(self, change_id: str, *, session_id: str | None = None) -> ChangeInfo | None:
+        query, values = "SELECT * FROM changes WHERE id = ?", [change_id]
+        if session_id is not None:
+            query += " AND session_id = ?"
+            values.append(session_id)
+        row = self._connection.execute(query, values).fetchone()
+        return None if row is None else _change_info(row)
+
+    def list_changes(self, session_id: str, *, statuses: tuple[str, ...] | None = None) -> list[ChangeInfo]:
+        query, values = "SELECT * FROM changes WHERE session_id = ?", [session_id]
+        if statuses:
+            query += " AND status IN (" + ",".join("?" for _ in statuses) + ")"
+            values.extend(statuses)
+        query += " ORDER BY created_at"
+        return [_change_info(row) for row in self._connection.execute(query, values).fetchall()]
+
+    def update_change_status(self, change_id: str, status: str, *, error: str | None = None) -> None:
+        timestamp_column = {"approved": "approved_at", "applied": "applied_at", "undone": "undone_at"}.get(status)
+        if timestamp_column:
+            self._connection.execute(f"UPDATE changes SET status=?, {timestamp_column}=?, error=? WHERE id=?", (status, _now(), error, change_id))
+        else:
+            self._connection.execute("UPDATE changes SET status=?, error=? WHERE id=?", (status, error, change_id))
+        self._connection.commit()
+
+    def last_applied_change(self, session_id: str) -> ChangeInfo | None:
+        row = self._connection.execute(
+            "SELECT * FROM changes WHERE session_id=? AND status='applied' ORDER BY applied_at DESC LIMIT 1", (session_id,)
+        ).fetchone()
+        return None if row is None else _change_info(row)
+
+
+def _change_info(row: sqlite3.Row) -> ChangeInfo:
+    return ChangeInfo(
+        row["id"], row["session_id"], row["run_id"], row["path"], row["operation"], row["expected_hash"],
+        row["before_content"], row["after_content"], row["diff"], row["summary"], row["status"], row["created_at"],
+    )

@@ -8,10 +8,13 @@ from pathlib import Path
 
 from openai import OpenAI
 from rich.console import Console
+from rich.panel import Panel
 from rich.table import Table
 
+from .changes import ChangeService, make_diff
 from .config import Settings
 from .environment import load_project_environment
+from .policy import PolicyError, WorkspacePolicy
 from .runtime import AgentRuntimeError, WorkspaceAgent
 from .session import SessionStore
 
@@ -82,7 +85,7 @@ def main(argv: list[str] | None = None) -> int:
 
 def _chat(agent: WorkspaceAgent, debug: bool) -> int:
     console.print(f"[bold green]Agent session started[/]  workspace={agent.workspace}  session={agent.session_id[:12]}")
-    console.print("Use /help for commands. The agent is read-only.")
+    console.print("Use /help for commands. File changes are proposed, reviewed, and approved one at a time.")
     while True:
         try:
             question = console.input("\n[bold cyan]You>[/] ").strip()
@@ -92,7 +95,7 @@ def _chat(agent: WorkspaceAgent, debug: bool) -> int:
         if question in {"/exit", "/quit"}:
             return 0
         if question == "/help":
-            console.print("/status  /context  /session  /clear  /cancel  /exit")
+            console.print("/status  /context  /session  /changes  /approve <id>  /reject <id>  /undo  /diff  /clear  /cancel  /exit")
             continue
         if question in {"/status", "/session"}:
             console.print(f"session={agent.session_id}\nworkspace={agent.workspace}\nmodel={agent.model}\nmax_turns={agent.max_turns}")
@@ -103,6 +106,21 @@ def _chat(agent: WorkspaceAgent, debug: bool) -> int:
         if question == "/clear":
             console.print("This session is append-only. Start `capslock chat` to create a fresh session.")
             continue
+        if question == "/changes":
+            _render_changes(agent)
+            continue
+        if question.startswith("/approve "):
+            _approve(agent, question.removeprefix("/approve ").strip())
+            continue
+        if question.startswith("/reject "):
+            _reject(agent, question.removeprefix("/reject ").strip())
+            continue
+        if question == "/undo":
+            _undo(agent)
+            continue
+        if question == "/diff":
+            _show_git_diff(agent)
+            continue
         if question == "/cancel":
             console.print("No background run is active. Press Ctrl-C while a request is running to cancel it.")
             continue
@@ -112,6 +130,7 @@ def _chat(agent: WorkspaceAgent, debug: bool) -> int:
             with console.status("[bold green]Agent is analyzing the workspace...[/]"):
                 answer = agent.ask(question)
             _render(answer, debug)
+            _render_changes(agent, pending_only=True)
         except AgentRuntimeError as exc:
             console.print(f"[red]Error:[/] {exc}")
 
@@ -127,6 +146,86 @@ def _render(answer: object, debug: bool) -> None:
     if debug:
         for event in answer.events:
             console.print(f"  [dim]{event.kind}: {event.data}[/]")
+
+
+def _change_service(agent: WorkspaceAgent) -> ChangeService:
+    return ChangeService(agent.store, WorkspacePolicy(agent.workspace), agent.session_id, "cli", agent.events.emit)
+
+
+def _render_changes(agent: WorkspaceAgent, *, pending_only: bool = False) -> None:
+    statuses = ("pending",) if pending_only else None
+    changes = agent.store.list_changes(agent.session_id, statuses=statuses)
+    if not changes:
+        if not pending_only:
+            console.print("[dim]No change proposals in this session.[/]")
+        return
+    table = Table("Change", "Status", "Operation", "Path", "Summary")
+    for item in changes:
+        table.add_row(item.id[:12], item.status, item.operation, item.path, item.summary)
+    console.print(table)
+    for item in changes:
+        if item.status == "pending":
+            console.print(Panel(item.diff or "(no textual diff)", title=f"Review {item.id[:12]} · {item.path}", border_style="yellow"))
+
+
+def _approve(agent: WorkspaceAgent, change_id: str) -> None:
+    if not change_id:
+        console.print("[red]Error:[/] provide a change id from /changes")
+        return
+    try:
+        change = _resolve_change(agent, change_id)
+        console.print(Panel(change.diff or "(no textual diff)", title=f"Apply {change.id[:12]} · {change.path}", border_style="yellow"))
+        if console.input("Apply this change? [y/N] ").strip().casefold() not in {"y", "yes"}:
+            console.print("[dim]Change remains pending.[/]")
+            return
+        service = _change_service(agent)
+        service.approve(change.id)
+        applied = service.apply(change.id)
+        console.print(f"[green]Applied:[/] {applied.path}. Review with /diff; use /undo to revert.")
+    except (AgentRuntimeError, ValueError) as exc:
+        console.print(f"[red]Error:[/] {exc}")
+
+
+def _reject(agent: WorkspaceAgent, change_id: str) -> None:
+    try:
+        _change_service(agent).reject(_resolve_change(agent, change_id).id)
+        console.print("[yellow]Discarded change proposal.[/]")
+    except (ValueError, PolicyError) as exc:
+        console.print(f"[red]Error:[/] {exc}")
+
+
+def _undo(agent: WorkspaceAgent) -> None:
+    try:
+        change = agent.store.last_applied_change(agent.session_id)
+        if change is None:
+            raise ValueError("no applied change is available to undo")
+        reverse = make_diff(Path(change.path), change.after_content, change.before_content or "")
+        console.print(Panel(reverse or "(remove file)", title=f"Undo {change.id[:12]} · {change.path}", border_style="yellow"))
+        if console.input("Undo this change? [y/N] ").strip().casefold() not in {"y", "yes"}:
+            return
+        undone = _change_service(agent).undo_last()
+        console.print(f"[green]Undone:[/] {undone.path}")
+    except (ValueError, PolicyError) as exc:
+        console.print(f"[red]Error:[/] {exc}")
+
+
+def _show_git_diff(agent: WorkspaceAgent) -> None:
+    from .tools import RunContext, workspace_tools
+    context = RunContext(agent.session_id, "cli", WorkspacePolicy(agent.workspace), agent.max_turns, agent.events.emit, agent.store)
+    result, _ = workspace_tools().invoke("git_diff", context, {})
+    console.print(result.data.get("output", "") if result.ok and isinstance(result.data, dict) else result.error)
+
+
+def _resolve_change(agent: WorkspaceAgent, prefix: str):
+    exact = agent.store.get_change(prefix, session_id=agent.session_id)
+    if exact is not None:
+        return exact
+    matches = [item for item in agent.store.list_changes(agent.session_id) if item.id.startswith(prefix)]
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        raise AgentRuntimeError("change does not belong to this session or does not exist")
+    raise AgentRuntimeError("change id prefix is ambiguous; provide more characters")
 
 
 def _sessions(store: SessionStore, limit: int) -> int:

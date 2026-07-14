@@ -1,4 +1,4 @@
-# CapsLock v1 开发计划与实施记录
+# CapsLock v1 开发记录
 
 ## 目标
 
@@ -55,6 +55,33 @@ Git 工具是受控的只读例外，只允许固定的 `git status --short` 和
 
 移除了旧的 `DocumentAgent`、`DocumentLibrary`、仅 Markdown 的 `read_path/search_path` 工具与算术工具。现在项目只维护一套 Agent 运行时和一套工具协议，避免旧新两套能力继续分叉。
 
+## v1.1：受控编辑
+
+### 目标
+
+在 v1 的只读分析基础上增加最小、可审计的文本编辑能力：模型只提出修改，用户在终端逐次确认后才会写入工作区。v1.1 仍不支持任意 Shell、网络、MCP、自动记忆或后台运行。
+
+### 实现
+
+- 新增 `changes.py`，负责编辑提案、审批、哈希校验、应用与撤销；提案先持久化到 SQLite，不会直接修改用户文件。
+- `propose_file_edit` 仅接受文件中唯一匹配的精确文本替换；`propose_file_create` 只创建新文件提案；`apply_change` 仅接受同一会话中已批准的提案。
+- `WorkspacePolicy` 新增写入校验：路径必须在工作区内，拒绝 `.git`、`.capslock`、二进制/不支持后缀、超限文件和符号链接越界；新建文件的父目录必须存在。
+- 应用前重新计算原文件哈希；若提案之后被外部修改，安全失败并要求重新提案。创建文件同样会检测是否已被外部创建。
+- Rich CLI 新增 `/changes`、`/approve <id>`、`/reject <id>`、`/undo`、`/diff`。批准和撤销都会再次展示 diff 并要求明确的 `y/yes` 确认。
+- `changes` 表记录路径、操作类型、原始内容、目标内容、diff、摘要、状态和时间戳；事件日志记录提案、批准、应用、丢弃与撤销。
+
+### 安全与恢复边界
+
+- 编辑提案本身无副作用；`apply_change` 不能绕过审批状态。
+- 一次只应用一项变更。重叠提案在应用时由哈希校验拦截，避免覆盖外部或先前变更。
+- `/undo` 仅可撤销当前会话最近一次成功应用的 CapsLock 变更；若文件在应用后被修改，则拒绝不安全的恢复。
+- 创建文件的撤销仅删除该次由 CapsLock 创建、且内容未被外部修改的文件；用户已有文件不提供删除能力。
+
+### 验证
+
+- 覆盖提案不写盘、未经批准的 `apply_change` 拒绝、批准后应用、拒绝零副作用、外部修改冲突、创建、跨会话隔离、撤销和策略边界。
+- v1 与 v1.1 当前共 12 项测试：`pytest -q`。
+
 ## 当前架构
 
 ```text
@@ -62,6 +89,7 @@ CLI
  └─ WorkspaceAgent (runtime.py)
      ├─ ToolRegistry (tools.py)
      │   └─ WorkspacePolicy (policy.py)
+     ├─ ChangeService (changes.py)
      ├─ Evidence (evidence.py)
      ├─ SessionStore / SQLite (session.py)
      └─ EventSink (observability.py)
@@ -71,7 +99,8 @@ CLI
 
 - `runtime.py`：模型工具循环、引用校验、错误与运行生命周期。
 - `tools.py`：工具定义、输入 Schema、工具执行与标准化结果。
-- `policy.py`：只读工作区安全边界。
+- `policy.py`：工作区受控读写安全边界。
+- `changes.py`：变更提案、审批、应用、冲突保护与撤销。
 - `evidence.py`：可定位的文件证据。
 - `session.py`：SQLite 状态和轨迹。
 - `observability.py`：脱敏事件日志。
@@ -95,25 +124,6 @@ pytest -q
 capslock doctor
 ```
 
-## 后续版本路线
-
-### v1.1：受控编辑
-
-- 文件编辑前展示 diff。
-- 每次写入需要用户确认。
-- 增加 Git diff、回滚提示和写入审计。
-
-### v1.2：受控执行与扩展
-
-- 固定命令白名单与更细粒度权限。
-- MCP / Skill 注册、加载与每工具权限。
-- 更完善的上下文压缩和离线评测集。
-
-### v2：长期运行产品能力
-
-- 长期记忆、混合检索和用户可管理的记忆写入。
-- Web Dashboard、远程渠道、定时任务和主动推送。
-- 子 Agent 与复杂任务编排。
 
 ## 发布维护建议
 

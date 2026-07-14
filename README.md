@@ -1,6 +1,6 @@
 # CapsLock
 
-一个单机、只读、可恢复的工作区 Agent。它可分析本地文本和代码、检索带行号的证据并读取 Git 状态/diff；默认不联网、不运行任意命令、不写入用户文件。
+一个单机、可恢复、受控编辑的工作区 Agent。它可分析本地文本和代码、检索带行号的证据并读取 Git 状态/diff；文件修改始终先生成可审阅的 diff，且必须由用户逐次确认。默认不联网、不运行任意命令。
 
 开发计划、架构决策与实施记录见 [v1 开发文档](docs/v1-development.md)。
 
@@ -62,13 +62,14 @@ capslock ask "公司总部在哪里？"
 
 需要项目级配置时，可复制 `capslock.toml.example` 为 `capslock.toml`；不要把 API key 写入该文件。
 
-Agent 可调用 `list_files`、`read_file`、`search_files`、`git_status`、`git_diff` 和会话内 `task_list_update`。只允许 UTF-8 文本与常见源码格式，单文件最多 512KB、最多扫描 1000 个文件；所有路径必须位于工作区内。它不联网、不写文件，也不执行任意命令。
+Agent 可调用 `list_files`、`read_file`、`search_files`、`git_status`、`git_diff` 和会话内 `task_list_update`。它还可提出精确的文本编辑或新建文件提案；在 CLI 使用 `/changes` 查看 diff，再通过 `/approve <id>` 明确确认，或用 `/reject <id>` 丢弃。`/undo` 可在确认后撤销最近一次由 CapsLock 应用的变更。只允许 UTF-8 文本与常见源码格式，单文件最多 512KB、最多扫描 1000 个文件；所有路径必须位于工作区内。它不联网，也不执行任意命令。
 
 ## 架构
 
 - `runtime.py`：模型循环、证据校验与运行状态。
 - `tools.py`：模型可调用的只读工作区工具与统一结果协议。
-- `policy.py`：工作区路径、文件大小和只读安全边界。
+- `policy.py`：工作区路径、文件大小和受控读写安全边界。
+- `changes.py`：编辑提案、审批、哈希校验、应用与撤销。
 - `evidence.py`：稳定、可定位的文件证据。
 - `session.py`：SQLite 会话、运行、工具调用与引用存储。
 - `cli.py`：命令行交互与可观测性展示。
