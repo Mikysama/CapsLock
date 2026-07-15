@@ -100,7 +100,8 @@ class WebService:
     def __init__(self, store: SessionStore, session_id: str, run_id: str, emit, *, tavily_api_key: str | None, timeout_seconds: float = 20, max_bytes: int = 500_000, max_redirects: int = 3, client: httpx.Client | None = None) -> None:
         self.store, self.session_id, self.run_id, self.emit = store, session_id, run_id, emit
         self.key, self.timeout_seconds, self.max_bytes, self.max_redirects = tavily_api_key, timeout_seconds, max_bytes, max_redirects
-        self.client = client or httpx.Client(timeout=timeout_seconds, follow_redirects=False)
+        self.client = client
+        self._owns_client = False
         self.actions = ExternalActionService(store, session_id, run_id, emit)
 
     def propose_search(self, query: str) -> ExternalActionInfo:
@@ -115,6 +116,12 @@ class WebService:
         return self.actions.propose("web_fetch", {"url": url}, f"Fetch external URL: {url}")
 
     def execute(self, action_id: str) -> ExternalActionInfo:
+        try:
+            return self._execute_action(action_id)
+        finally:
+            self.close()
+
+    def _execute_action(self, action_id: str) -> ExternalActionInfo:
         action = self.actions._action(action_id)
         if action.status != "approved":
             raise ValueError("external action requires explicit approval before execution")
@@ -129,8 +136,20 @@ class WebService:
         self.emit("external_action_finished", action_id=action.id, kind=action.kind, status="completed")
         return self.actions._action(action.id)
 
+    def close(self) -> None:
+        if self._owns_client and self.client is not None:
+            self.client.close()
+            self.client = None
+            self._owns_client = False
+
+    def _client(self) -> httpx.Client:
+        if self.client is None:
+            self.client = httpx.Client(timeout=self.timeout_seconds, follow_redirects=False)
+            self._owns_client = True
+        return self.client
+
     def _search(self, query: str) -> dict[str, object]:
-        response = self.client.post(
+        response = self._client().post(
             TAVILY_SEARCH_URL,
             json={"query": query, "max_results": 8},
             headers={"Accept": "application/json", "Authorization": f"Bearer {self.key or ''}"},
@@ -149,7 +168,7 @@ class WebService:
     def _fetch(self, url: str) -> dict[str, object]:
         current = validate_public_url(url)
         for _ in range(self.max_redirects + 1):
-            response = self.client.get(current, headers={"Accept": "text/html,text/plain;q=0.9"})
+            response = self._client().get(current, headers={"Accept": "text/html,text/plain;q=0.9"})
             if response.is_redirect:
                 location = response.headers.get("location")
                 if not location:

@@ -27,7 +27,7 @@ def clear_config_environment(monkeypatch) -> None:
 
 
 def context(workspace: Path) -> RunContext:
-    return RunContext("session", "run", WorkspacePolicy(workspace), 6, lambda *args, **kwargs: None)
+    return RunContext(session_id="session", run_id="run", policy=WorkspacePolicy(workspace), event=lambda *args, **kwargs: None)
 
 
 def test_search_lists_only_supported_text_files(tmp_path: Path) -> None:

@@ -5,6 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from capslock.model import ModelMessage, ModelResponse
+from capslock.observability import EventSink
 from capslock.policy import WorkspacePolicy
 from capslock.runtime import WorkspaceAgent
 from capslock.session import SessionStore
@@ -26,7 +28,7 @@ def response(content=None, tool_calls=None):
 
 def test_tools_enforce_workspace_and_return_stable_evidence(tmp_path: Path) -> None:
     (tmp_path / "src.py").write_text("def hello():\n    return 'world'\n", encoding="utf-8")
-    context = RunContext("s", "r", WorkspacePolicy(tmp_path), 6, lambda *args, **kwargs: None)
+    context = RunContext(session_id="s", run_id="r", policy=WorkspacePolicy(tmp_path), event=lambda *args, **kwargs: None)
     result, _ = workspace_tools().invoke("read_file", context, {"path": "src.py"})
     assert result.ok and result.citations[0].id.startswith("ev_")
     rejected, _ = workspace_tools().invoke("read_file", context, {"path": "../secret.txt"})
@@ -58,3 +60,24 @@ def test_session_rejects_wrong_workspace(tmp_path: Path) -> None:
     session = store.create(tmp_path, "test")
     with pytest.raises(Exception, match="different workspace"):
         WorkspaceAgent(Client([]), workspace=tmp_path / "other", model="test", store=store, session_id=session.id)
+
+
+def test_internal_model_protocol_and_events_are_scoped_per_run(tmp_path: Path) -> None:
+    class Model:
+        def __init__(self) -> None:
+            self.answers = ["first", "second"]
+
+        def complete(self, **kwargs) -> ModelResponse:
+            return ModelResponse(ModelMessage(self.answers.pop(0)))
+
+    sink = EventSink()
+    store = SessionStore(tmp_path / "state.sqlite3")
+    agent = WorkspaceAgent(Model(), workspace=tmp_path, model="test", store=store, event_sink=sink)
+
+    first = agent.ask("one")
+    second = agent.ask("two")
+
+    assert first.text == "first" and second.text == "second"
+    assert [event.kind for event in first.events] == ["run_started"]
+    assert [event.kind for event in second.events] == ["run_started"]
+    assert first.events[0].data["run_id"] != second.events[0].data["run_id"]

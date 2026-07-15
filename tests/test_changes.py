@@ -70,7 +70,7 @@ def test_model_apply_tool_cannot_bypass_approval(tmp_path: Path) -> None:
     target = tmp_path / "note.txt"
     target.write_text("before", encoding="utf-8")
     store = SessionStore(tmp_path / ".capslock" / "capslock.sqlite3")
-    context = RunContext("session", "run", WorkspacePolicy(tmp_path), 6, lambda *args, **kwargs: None, store)
+    context = RunContext(session_id="session", run_id="run", policy=WorkspacePolicy(tmp_path), event=lambda *args, **kwargs: None, store=store)
     registry = workspace_tools()
     proposed, _ = registry.invoke("propose_file_edit", context, {"path": "note.txt", "old_text": "before", "new_text": "after"})
     change_id = proposed.data["change_id"]

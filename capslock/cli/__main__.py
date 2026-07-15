@@ -1,0 +1,7 @@
+"""Run CapsLock with ``python -m capslock.cli``."""
+
+from .app import main
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

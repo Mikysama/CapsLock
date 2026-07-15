@@ -1,0 +1,58 @@
+"""Workspace-scoped composition root and resource ownership."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+from ..config import Settings
+from ..permissions import PermissionMode
+from ..runtime import WorkspaceAgent
+from ..session import SessionStore
+
+
+class WorkspaceApplication:
+    def __init__(self, *, workspace: Path, settings: Settings, client: Any, session_id: str | None = None) -> None:
+        self.workspace = workspace.resolve()
+        self.settings = settings
+        self.client = client
+        self.store = SessionStore(self.workspace / ".capslock" / "capslock.sqlite3")
+        try:
+            mode = PermissionMode.parse(self.store.workspace_setting("permission_mode", settings.permission_mode) or settings.permission_mode)
+            self.agent = WorkspaceAgent(
+                client,
+                workspace=self.workspace,
+                model=settings.model,
+                store=self.store,
+                session_id=session_id,
+                max_turns=settings.runtime.max_turns,
+                max_context_messages=settings.runtime.max_context_messages,
+                command_timeout_seconds=settings.command.command_timeout_seconds,
+                command_output_bytes=settings.command.command_output_bytes,
+                input_cost_per_million=settings.model_config.input_cost_per_million,
+                output_cost_per_million=settings.model_config.output_cost_per_million,
+                tavily_api_key=settings.web.tavily_api_key,
+                web_timeout_seconds=settings.web.web_timeout_seconds,
+                web_max_bytes=settings.web.web_max_bytes,
+                web_max_redirects=settings.web.web_max_redirects,
+                mcp_timeout_seconds=settings.mcp.mcp_timeout_seconds,
+                mcp_output_bytes=settings.mcp.mcp_output_bytes,
+                permission_mode=mode,
+            )
+        except Exception:
+            self.close()
+            raise
+
+    def close(self) -> None:
+        try:
+            close = getattr(self.client, "close", None)
+            if callable(close):
+                close()
+        finally:
+            self.store.close()
+
+    def __enter__(self) -> "WorkspaceApplication":
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        self.close()

@@ -1,0 +1,175 @@
+"""Single application entry point for approval-gated actions."""
+
+from __future__ import annotations
+
+from typing import Any, Callable
+
+from ..changes import ChangeService
+from ..config import CommandSettings, McpSettings, WebSettings
+from ..domain import ActionInfo, ActionStatus, ActionType, ChangeInfo, CommandInfo, ExternalActionInfo
+from ..execution import CommandService
+from ..external import WebService
+from ..mcp import McpService
+from ..permissions import ApprovalPolicy, PermissionMode
+from ..policy import PolicyError, WorkspacePolicy
+from ..session import SessionStore
+
+
+ActionRecord = ChangeInfo | CommandInfo | ExternalActionInfo
+
+
+class ActionCoordinator:
+    """Coordinate proposal, policy, approval, execution, and reversal."""
+
+    def __init__(
+        self,
+        *,
+        store: SessionStore,
+        policy: WorkspacePolicy,
+        session_id: str,
+        run_id: str,
+        event: Callable[..., None],
+        permission_mode: PermissionMode = PermissionMode.APPROVE_FOR_ME,
+        command: CommandSettings | None = None,
+        web: WebSettings | None = None,
+        mcp: McpSettings | None = None,
+    ) -> None:
+        self.store = store
+        self.policy = policy
+        self.session_id = session_id
+        self.run_id = run_id
+        self.event = event
+        self.permission_mode = permission_mode
+        self.command_config = command or CommandSettings(120, 100_000)
+        self.web_config = web or WebSettings(None, 20, 500_000, 3)
+        self.mcp_config = mcp or McpSettings(30, 100_000)
+        self.approvals = ApprovalPolicy()
+
+    def for_run(self, run_id: str) -> "ActionCoordinator":
+        return ActionCoordinator(
+            store=self.store,
+            policy=self.policy,
+            session_id=self.session_id,
+            run_id=run_id,
+            event=self.event,
+            permission_mode=self.permission_mode,
+            command=self.command_config,
+            web=self.web_config,
+            mcp=self.mcp_config,
+        )
+
+    def propose(self, action_type: ActionType, **payload: Any) -> ActionRecord:
+        if action_type is ActionType.FILE_EDIT:
+            record = self._changes().propose_edit(payload["path"], payload["old_text"], payload["new_text"], payload.get("summary", ""))
+        elif action_type is ActionType.FILE_CREATE:
+            record = self._changes().propose_create(payload["path"], payload["content"], payload.get("summary", ""))
+        elif action_type is ActionType.COMMAND:
+            record = self._commands().propose(payload["template"], target=payload.get("target"), cwd=payload.get("cwd", "."))
+        elif action_type is ActionType.WEB_SEARCH:
+            service = self._web()
+            try:
+                record = service.propose_search(payload["query"])
+            finally:
+                service.close()
+        elif action_type is ActionType.WEB_FETCH:
+            service = self._web()
+            try:
+                record = service.propose_fetch(payload["url"])
+            finally:
+                service.close()
+        elif action_type is ActionType.MCP_CONNECT:
+            record = self._mcp().propose_connect(payload["server"])
+        elif action_type is ActionType.MCP_CALL:
+            record = self._mcp().propose_call(payload["server"], payload["tool"], payload["arguments"])
+        else:  # pragma: no cover - exhaustive StrEnum guard
+            raise ValueError(f"unsupported action type: {action_type}")
+        return self._apply_policy(action_type, record)
+
+    def approve_and_execute(self, action_id: str) -> ActionRecord:
+        action = self.resolve(action_id)
+        if action.type in {ActionType.FILE_EDIT, ActionType.FILE_CREATE}:
+            service = self._changes(action.run_id)
+            service.approve(action.id)
+            return service.apply(action.id)
+        if action.type is ActionType.COMMAND:
+            service = self._commands(action.run_id)
+            service.approve(action.id)
+            return service.execute(action.id)
+        service = self._external_service(action)
+        try:
+            service.actions.approve(action.id)
+            return service.execute(action.id)
+        finally:
+            if isinstance(service, WebService):
+                service.close()
+
+    def execute_auto_approved(self, action_id: str) -> ActionRecord:
+        action = self.resolve(action_id)
+        assessment = self.approvals.assess(action.type)
+        self.event("risk_assessed", action=action.type.value, level=assessment.level, rollback=assessment.rollback)
+        self.event("auto_approved", action=action.type.value, level=assessment.level)
+        return self.approve_and_execute(action.id)
+
+    def execute_approved(self, action_id: str) -> ActionRecord:
+        action = self.resolve(action_id)
+        if action.status is not ActionStatus.APPROVED:
+            raise ValueError("action requires explicit approval before execution")
+        if action.type in {ActionType.FILE_EDIT, ActionType.FILE_CREATE}:
+            return self._changes(action.run_id).apply(action.id)
+        if action.type is ActionType.COMMAND:
+            return self._commands(action.run_id).execute(action.id)
+        service = self._external_service(action)
+        try:
+            return service.execute(action.id)
+        finally:
+            if isinstance(service, WebService):
+                service.close()
+
+    def reject(self, action_id: str) -> ActionRecord:
+        action = self.resolve(action_id)
+        if action.type in {ActionType.FILE_EDIT, ActionType.FILE_CREATE}:
+            return self._changes(action.run_id).reject(action.id)
+        if action.type is ActionType.COMMAND:
+            return self._commands(action.run_id).reject(action.id)
+        service = self._external_service(action)
+        try:
+            return service.actions.reject(action.id)
+        finally:
+            if isinstance(service, WebService):
+                service.close()
+
+    def reverse_last_file_action(self) -> ChangeInfo:
+        return self._changes().undo_last()
+
+    def resolve(self, prefix: str, *, types: set[ActionType] | None = None) -> ActionInfo:
+        action = self.store.resolve_action(self.session_id, prefix, types=types)
+        if action is None:
+            raise PolicyError("action does not belong to this session or does not exist")
+        return action
+
+    def _apply_policy(self, action_type: ActionType, record: ActionRecord) -> ActionRecord:
+        assessment = self.approvals.assess(action_type)
+        self.event("risk_assessed", action=action_type.value, level=assessment.level, rollback=assessment.rollback)
+        if self.approvals.requires_approval(self.permission_mode, action_type):
+            return record
+        if self.permission_mode is PermissionMode.FULL_ACCESS:
+            self.event("auto_approved", action=action_type.value, level=assessment.level)
+        return self.approve_and_execute(record.id)
+
+    def _changes(self, run_id: str | None = None) -> ChangeService:
+        return ChangeService(self.store, self.policy, self.session_id, run_id or self.run_id, self.event)
+
+    def _commands(self, run_id: str | None = None) -> CommandService:
+        config = self.command_config
+        return CommandService(self.store, self.policy, self.session_id, run_id or self.run_id, self.event, timeout_seconds=config.command_timeout_seconds, output_limit_bytes=config.command_output_bytes)
+
+    def _web(self, run_id: str | None = None) -> WebService:
+        config = self.web_config
+        return WebService(self.store, self.session_id, run_id or self.run_id, self.event, tavily_api_key=config.tavily_api_key, timeout_seconds=config.web_timeout_seconds, max_bytes=config.web_max_bytes, max_redirects=config.web_max_redirects)
+
+    def _mcp(self, run_id: str | None = None) -> McpService:
+        config = self.mcp_config
+        return McpService(self.store, self.policy, self.session_id, run_id or self.run_id, self.event, timeout_seconds=config.mcp_timeout_seconds, output_limit_bytes=config.mcp_output_bytes)
+
+    def _external_service(self, action: ActionInfo) -> WebService | McpService:
+        return self._mcp(action.run_id) if action.type in {ActionType.MCP_CONNECT, ActionType.MCP_CALL} else self._web(action.run_id)

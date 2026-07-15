@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from capslock import cli
+from capslock.cli import app as cli
 from capslock.theme import make_console
 
 
@@ -33,7 +33,7 @@ def test_help_and_version_do_not_load_workspace_environment(monkeypatch, capsys)
     with pytest.raises(SystemExit) as version_exit:
         cli.main(["--version"])
     assert version_exit.value.code == 0
-    assert capsys.readouterr().out.strip() == "capslock 1.3.1"
+    assert capsys.readouterr().out.strip() == "capslock 1.3.2"
 
 
 def test_cli_loads_environment_from_selected_workspace(tmp_path: Path, monkeypatch) -> None:
@@ -46,13 +46,13 @@ def test_cli_loads_environment_from_selected_workspace(tmp_path: Path, monkeypat
     (workspace / ".env").write_text("CAPSLOCK_MODEL=workspace-model\n", encoding="utf-8")
     observed = {}
 
-    def doctor(selected_workspace, settings):
+    def doctor(console, selected_workspace, settings):
         observed["workspace"] = selected_workspace
         observed["model"] = settings.model
         return 0
 
     monkeypatch.chdir(launch_directory)
-    monkeypatch.setattr(cli, "_doctor", doctor)
+    monkeypatch.setattr(cli, "doctor", doctor)
 
     assert cli.main(["--workspace", str(workspace), "doctor"]) == 0
     assert observed == {"workspace": workspace.resolve(), "model": "workspace-model"}
@@ -86,9 +86,8 @@ def test_doctor_reports_capabilities_without_leaking_secrets(
         "https://endpoint-user:endpoint-password@example.com/api?token=query-secret",
     )
     terminal = make_console(width=120, color_system=None, force_terminal=False, record=True)
-    monkeypatch.setattr(cli, "console", terminal)
 
-    exit_code = cli.main(["--workspace", str(workspace), "doctor"])
+    exit_code = cli.main(["--workspace", str(workspace), "doctor"], console=terminal)
     output = terminal.export_text()
 
     assert exit_code == 0

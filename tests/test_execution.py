@@ -57,14 +57,14 @@ def test_command_timeout_and_output_truncation(tmp_path: Path, monkeypatch) -> N
     output.approve(proposal.id)
     result = output.execute(proposal.id)
     assert result.status == "completed"
-    row = output.store._connection.execute("SELECT output_truncated FROM commands WHERE id=?", (proposal.id,)).fetchone()
+    row = output.store._connection.execute("SELECT output_truncated FROM command_action_data WHERE action_id=?", (proposal.id,)).fetchone()
     assert row[0] == 1
 
 
 def test_command_tool_cannot_bypass_approval(tmp_path: Path) -> None:
     python_workspace(tmp_path)
     store = SessionStore(tmp_path / ".capslock" / "capslock.sqlite3")
-    context = RunContext("session", "run", WorkspacePolicy(tmp_path), 6, lambda *args, **kwargs: None, store)
+    context = RunContext(session_id="session", run_id="run", policy=WorkspacePolicy(tmp_path), event=lambda *args, **kwargs: None, store=store)
     proposed, _ = workspace_tools().invoke("propose_command", context, {"template": "pytest"})
     executed, _ = workspace_tools().invoke("run_command", context, {"command_id": proposed.data["command_id"]})
     assert not executed.ok and "explicit approval" in executed.error

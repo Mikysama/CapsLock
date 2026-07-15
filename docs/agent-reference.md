@@ -1,6 +1,6 @@
 # CapsLock Agent 工具与指令参考
 
-本参考描述当前 v1.3 的模型工具、终端指令和审批边界。CapsLock 是按需运行的本机 Agent，权限模式可在会话内切换。
+本参考描述当前 v1.3.2 的模型工具、终端指令和审批边界。CapsLock 是按需运行的本机 Agent，权限模式可在会话内切换。
 
 ## 权限模式与风险兜底
 
@@ -12,7 +12,7 @@
 
 使用 `/permissions` 查看当前模式，使用 `/permissions full`、`/permissions approve` 或 `/permissions ask` 即时切换。切换会写入工作区 SQLite，并在后续会话恢复。
 
-交互聊天中输入 `/` 会实时打开 Claude Code 风格的“命令 + 功能说明”竖向双列列表；继续输入（例如 `/perm`）会立即过滤掉不匹配当前前缀的命令。使用 `↑/↓` 选择或 `Tab` 补全，斜杠命令输入会以粗体强调色显示。输入区由整行分隔线与历史记录区分，权限状态显示在右侧。该交互由 `prompt-toolkit` 负责渲染，以兼容 VS Code 和 macOS Terminal。
+交互聊天中输入 `/` 会实时打开 Claude Code 风格的“命令 + 功能说明”竖向双列列表；继续输入（例如 `/perm`）会立即过滤掉不匹配当前前缀的命令。完整父命令会展开子命令，完整叶子命令仍保持候选可见，alias 也参与补全。使用 `↑/↓` 选择或 `Tab` 补全，斜杠命令输入会以粗体强调色显示。输入区使用等宽的上下边框与历史和帮助栏分隔，权限状态显示在右侧。该交互由 `prompt-toolkit` 负责渲染，以兼容 VS Code 和 macOS Terminal。
 
 即使在 `full_access`，CapsLock 仍不会绕过安全兜底：文件变更会保留原内容和 `/undo` 路径；命令保留超时、输出限制、进程组取消和 `/diff` 检查建议；Web 仍执行 SSRF/内容边界检查；MCP 仍限制为显式允许的本地 stdio 工具。无法自动回滚的第三方 MCP 副作用会在风险审计中明确标记。
 
@@ -68,7 +68,8 @@
 
 - `capslock.toml`：项目模型、命令、Web 和 MCP 限制配置；不要存 API key。
 - `.env` 或 shell：`CAPSLOCK_API_KEY`、`CAPSLOCK_TAVILY_API_KEY` 等密钥。
-- `.capslock/capslock.sqlite3`：会话、运行、变更、命令、任务、外部动作和来源审计。
+- `.capslock/capslock.sqlite3`：会话、运行、统一动作生命周期、领域明细、任务和来源审计。
+- `.capslock/backups/`：schema 升级前自动创建的数据库备份。
 - `.capslock/events.jsonl`：脱敏事件流。
 - `capslock.mcp.json`：可提交的项目 MCP 声明，禁止 `env`/凭据。
 - `.capslock/mcp.local.json`：本机私有 MCP 覆盖、路径和环境变量；不得提交。

@@ -8,6 +8,8 @@ from pathlib import Path
 import httpx
 import pytest
 
+from capslock.application import ActionCoordinator
+from capslock.config import WebSettings
 from capslock.external import TAVILY_SEARCH_URL, WebService, is_suspicious, validate_public_url
 from capslock.mcp import McpRegistry, McpService
 from capslock.permissions import PermissionMode
@@ -67,7 +69,17 @@ def test_fetch_rejects_private_urls_and_marks_untrusted_content(tmp_path: Path, 
 
 def test_web_tools_only_propose_actions(tmp_path: Path) -> None:
     store = SessionStore(tmp_path / ".capslock" / "state.sqlite3")
-    context = RunContext("session", "run", WorkspacePolicy(tmp_path), 6, lambda *args, **kwargs: None, store, tavily_api_key="key", permission_mode=PermissionMode.ASK_FOR_APPROVAL)
+    policy = WorkspacePolicy(tmp_path)
+    actions = ActionCoordinator(
+        store=store,
+        policy=policy,
+        session_id="session",
+        run_id="run",
+        event=lambda *args, **kwargs: None,
+        permission_mode=PermissionMode.ASK_FOR_APPROVAL,
+        web=WebSettings("key", 20, 500_000, 3),
+    )
+    context = RunContext(session_id="session", run_id="run", policy=policy, event=lambda *args, **kwargs: None, store=store, actions=actions, permission_mode=PermissionMode.ASK_FOR_APPROVAL)
     result, _ = workspace_tools().invoke("propose_web_search", context, {"query": "security"})
     assert result.ok and result.data["status"] == "pending"
 

@@ -1,0 +1,126 @@
+"""prompt-toolkit input, completion, highlighting, and key bindings."""
+
+from __future__ import annotations
+
+import shutil
+
+from prompt_toolkit import PromptSession
+from prompt_toolkit.completion import Completer, Completion
+from prompt_toolkit.document import Document
+from prompt_toolkit.formatted_text import FormattedText
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.layout.menus import CompletionsMenu, MultiColumnCompletionsMenu
+from prompt_toolkit.lexers import Lexer
+from prompt_toolkit.shortcuts import CompleteStyle
+
+from ..permissions import PermissionMode
+from ..theme import build_prompt_style
+from .commands import command_descriptions, command_menu_completions
+
+
+class SlashCommandCompleter(Completer):
+    def get_completions(self, document: Document, complete_event: object):
+        prefix = document.text_before_cursor
+        if not prefix.startswith("/"):
+            return
+        descriptions = command_descriptions()
+        for command in command_menu_completions(prefix):
+            insertion = f"{command} " if prefix.casefold() == command.casefold() else command
+            yield Completion(
+                insertion,
+                start_position=-len(prefix),
+                display=FormattedText([("class:command-name", command)]),
+                display_meta=descriptions[command],
+            )
+
+
+class SlashCommandLexer(Lexer):
+    def lex_document(self, document: Document):
+        def get_line(line_number: int):
+            line = document.lines[line_number]
+            return [("class:slash-command", line)] if line.startswith("/") else [("class:user-input", line)]
+        return get_line
+
+
+PROMPT_STYLE = build_prompt_style()
+
+
+def prompt_tokens(mode: PermissionMode, width: int | None = None) -> FormattedText:
+    terminal_width = width or shutil.get_terminal_size(fallback=(80, 24)).columns
+    return FormattedText([("class:input-border", "─" * max(20, terminal_width - 1)), ("", "\n"), ("class:prompt", "❯ ")])
+
+
+def permission_rprompt(mode: PermissionMode) -> FormattedText:
+    return FormattedText([("class:permission", f"{mode.value} ")])
+
+
+def prompt_footer(width: int | None = None) -> FormattedText:
+    terminal_width = width or shutil.get_terminal_size(fallback=(80, 24)).columns
+    return FormattedText(
+        [
+            ("class:input-border", "─" * max(20, terminal_width - 1)),
+            ("", "\n"),
+            ("class:footer", "? /help  ·  ↑/↓ 选择  ·  Tab 补全"),
+        ]
+    )
+
+
+def refresh_slash_completion(buffer: object) -> None:
+    prefix = buffer.document.text_before_cursor
+    if prefix.startswith("/"):
+        buffer.start_completion(select_first=False)
+    else:
+        buffer.cancel_completion()
+
+
+SLASH_KEY_BINDINGS = KeyBindings()
+
+
+@SLASH_KEY_BINDINGS.add("backspace")
+def _backspace_and_refresh(event: object) -> None:
+    event.current_buffer.delete_before_cursor()
+    refresh_slash_completion(event.current_buffer)
+
+
+@SLASH_KEY_BINDINGS.add("delete")
+def _delete_and_refresh(event: object) -> None:
+    event.current_buffer.delete()
+    refresh_slash_completion(event.current_buffer)
+
+
+def anchor_completion_menus(container: object) -> None:
+    seen: set[int] = set()
+    def visit(node: object) -> None:
+        if id(node) in seen:
+            return
+        seen.add(id(node))
+        for floating in getattr(node, "floats", ()):
+            if isinstance(floating.content, (CompletionsMenu, MultiColumnCompletionsMenu)):
+                floating.xcursor = False
+                floating.left = 0
+        get_children = getattr(node, "get_children", None)
+        if get_children is not None:
+            for child in get_children():
+                visit(child)
+    visit(container)
+
+
+def prompt_session() -> PromptSession[str]:
+    session = PromptSession(completer=SlashCommandCompleter(), lexer=SlashCommandLexer(), key_bindings=SLASH_KEY_BINDINGS, style=PROMPT_STYLE, complete_while_typing=True, complete_style=CompleteStyle.COLUMN, reserve_space_for_menu=16)
+    anchor_completion_menus(session.app.layout.container)
+    return session
+
+
+def move_selection(selected: int, key: str, option_count: int) -> int:
+    if key.casefold() in {"up", "left", "k"}:
+        return (selected - 1) % option_count
+    if key.casefold() in {"down", "right", "j"}:
+        return (selected + 1) % option_count
+    return selected
+
+
+_prompt_tokens = prompt_tokens
+_permission_rprompt = permission_rprompt
+_refresh_slash_completion = refresh_slash_completion
+_anchor_completion_menus = anchor_completion_menus
+_move_selection = move_selection
