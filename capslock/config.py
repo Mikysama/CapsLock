@@ -20,6 +20,13 @@ class Settings:
     command_output_bytes: int
     input_cost_per_million: float
     output_cost_per_million: float
+    tavily_api_key: str | None
+    web_timeout_seconds: float
+    web_max_bytes: int
+    web_max_redirects: int
+    mcp_timeout_seconds: float
+    mcp_output_bytes: int
+    permission_mode: str
 
     @classmethod
     def load(cls, workspace: Path) -> "Settings":
@@ -40,4 +47,11 @@ class Settings:
             command_output_bytes=int(value("CAPSLOCK_COMMAND_OUTPUT_BYTES", 100_000)),
             input_cost_per_million=float(value("CAPSLOCK_INPUT_COST_PER_MILLION", 0)),
             output_cost_per_million=float(value("CAPSLOCK_OUTPUT_COST_PER_MILLION", 0)),
+            tavily_api_key=os.environ.get("CAPSLOCK_TAVILY_API_KEY") or os.environ.get("TAVILY_API_KEY") or values.get("tavily_api_key"),
+            web_timeout_seconds=float(value("CAPSLOCK_WEB_TIMEOUT_SECONDS", 20)),
+            web_max_bytes=int(value("CAPSLOCK_WEB_MAX_BYTES", 500_000)),
+            web_max_redirects=int(value("CAPSLOCK_WEB_MAX_REDIRECTS", 3)),
+            mcp_timeout_seconds=float(value("CAPSLOCK_MCP_TIMEOUT_SECONDS", 30)),
+            mcp_output_bytes=int(value("CAPSLOCK_MCP_OUTPUT_BYTES", 100_000)),
+            permission_mode=str(value("CAPSLOCK_PERMISSION_MODE", "approve_for_me")),
         )

@@ -13,6 +13,9 @@ from typing import Any, Callable
 from .changes import ChangeService
 from .evidence import Evidence
 from .execution import CommandService
+from .external import WebService
+from .mcp import McpService
+from .permissions import PermissionMode, assess, requires_approval
 from .policy import PolicyError, WorkspacePolicy
 from .session import SessionStore
 
@@ -26,6 +29,7 @@ class ToolResult:
     data: object
     error: str | None = None
     citations: tuple[Evidence, ...] = ()
+    source_ids: tuple[str, ...] = ()
 
     def for_model(self) -> str:
         return json.dumps({"ok": self.ok, "data": self.data, "error": self.error}, ensure_ascii=False)
@@ -41,6 +45,13 @@ class RunContext:
     store: SessionStore | None = None
     command_timeout_seconds: float = 120
     command_output_bytes: int = 100_000
+    tavily_api_key: str | None = None
+    web_timeout_seconds: float = 20
+    web_max_bytes: int = 500_000
+    web_max_redirects: int = 3
+    mcp_timeout_seconds: float = 30
+    mcp_output_bytes: int = 100_000
+    permission_mode: PermissionMode = PermissionMode.APPROVE_FOR_ME
 
 
 @dataclass(frozen=True)
@@ -191,6 +202,13 @@ def task_status_update(context: RunContext, arguments: dict[str, Any]) -> ToolRe
     return ToolResult(True, {"id": task.id, "text": task.text, "status": task.status})
 
 
+def list_external_sources(context: RunContext, arguments: dict[str, Any]) -> ToolResult:
+    if context.store is None:
+        raise ValueError("source storage is unavailable")
+    sources = context.store.list_sources(context.session_id)
+    return ToolResult(True, [{"source_id": item.id, "url": item.url, "title": item.title, "excerpt": item.excerpt, "fetched_at": item.fetched_at, "untrusted": True, "suspicious": item.suspicious} for item in sources], source_ids=tuple(item.id for item in sources))
+
+
 def _changes(context: RunContext) -> ChangeService:
     if context.store is None:
         raise ValueError("change storage is unavailable")
@@ -215,11 +233,67 @@ def _command_data(command: object) -> dict[str, object]:
     return {"command_id": command.id, "template": command.template, "argv": list(command.argv), "cwd": command.cwd, "summary": command.summary, "status": command.status, "exit_code": command.exit_code, "stdout": command.stdout, "stderr": command.stderr}
 
 
+def _web(context: RunContext) -> WebService:
+    if context.store is None:
+        raise ValueError("external action storage is unavailable")
+    return WebService(context.store, context.session_id, context.run_id, context.event, tavily_api_key=context.tavily_api_key, timeout_seconds=context.web_timeout_seconds, max_bytes=context.web_max_bytes, max_redirects=context.web_max_redirects)
+
+
+def _mcp(context: RunContext) -> McpService:
+    if context.store is None:
+        raise ValueError("external action storage is unavailable")
+    return McpService(context.store, context.policy, context.session_id, context.run_id, context.event, timeout_seconds=context.mcp_timeout_seconds, output_limit_bytes=context.mcp_output_bytes)
+
+
+def _external_data(action: object) -> dict[str, object]:
+    from .session import ExternalActionInfo
+    assert isinstance(action, ExternalActionInfo)
+    return {"action_id": action.id, "kind": action.kind, "summary": action.summary, "status": action.status, "result": action.result, "error": action.error}
+
+
+def propose_web_search(context: RunContext, arguments: dict[str, Any]) -> ToolResult:
+    query = arguments.get("query")
+    if not isinstance(query, str):
+        raise ValueError("query must be a string")
+    service = _web(context)
+    return ToolResult(True, _external_data(_auto_external(context, "propose_web_search", service, service.propose_search(query))))
+
+
+def propose_web_fetch(context: RunContext, arguments: dict[str, Any]) -> ToolResult:
+    url = arguments.get("url")
+    if not isinstance(url, str):
+        raise ValueError("url must be a string")
+    service = _web(context)
+    return ToolResult(True, _external_data(_auto_external(context, "propose_web_fetch", service, service.propose_fetch(url))))
+
+
+def propose_mcp_connect(context: RunContext, arguments: dict[str, Any]) -> ToolResult:
+    server = arguments.get("server")
+    if not isinstance(server, str):
+        raise ValueError("server must be a string")
+    service = _mcp(context)
+    return ToolResult(True, _external_data(_auto_external(context, "propose_mcp_connect", service, service.propose_connect(server))))
+
+
+def propose_mcp_call(context: RunContext, arguments: dict[str, Any]) -> ToolResult:
+    server, tool, payload = arguments.get("server"), arguments.get("tool"), arguments.get("arguments")
+    if not isinstance(server, str) or not isinstance(tool, str) or not isinstance(payload, dict):
+        raise ValueError("server, tool, and arguments must be provided")
+    service = _mcp(context)
+    return ToolResult(True, _external_data(_auto_external(context, "propose_mcp_call", service, service.propose_call(server, tool, payload))))
+
+
 def propose_command(context: RunContext, arguments: dict[str, Any]) -> ToolResult:
     template, target, cwd = arguments.get("template"), arguments.get("target"), arguments.get("cwd", ".")
     if not isinstance(template, str) or target is not None and not isinstance(target, str) or not isinstance(cwd, str):
         raise ValueError("template, target, and cwd must be strings")
-    return ToolResult(True, _command_data(_commands(context).propose(template, target=target, cwd=cwd)))
+    service = _commands(context)
+    command = service.propose(template, target=target, cwd=cwd)
+    if context.permission_mode is PermissionMode.FULL_ACCESS:
+        _record_auto_approval(context, "propose_command")
+        service.approve(command.id)
+        command = service.execute(command.id)
+    return ToolResult(True, _command_data(command))
 
 
 def run_command(context: RunContext, arguments: dict[str, Any]) -> ToolResult:
@@ -241,14 +315,44 @@ def propose_file_edit(context: RunContext, arguments: dict[str, Any]) -> ToolRes
     summary = arguments.get("summary", "")
     if not all(isinstance(item, str) for item in (path, old_text, new_text, summary)):
         raise ValueError("path, old_text, new_text, and summary must be strings")
-    return ToolResult(True, _change_data(_changes(context).propose_edit(path, old_text, new_text, summary)))
+    service = _changes(context)
+    change = service.propose_edit(path, old_text, new_text, summary)
+    if context.permission_mode is PermissionMode.FULL_ACCESS:
+        _record_auto_approval(context, "propose_file_edit")
+        service.approve(change.id)
+        change = service.apply(change.id)
+    return ToolResult(True, _change_data(change))
 
 
 def propose_file_create(context: RunContext, arguments: dict[str, Any]) -> ToolResult:
     path, content, summary = arguments.get("path"), arguments.get("content"), arguments.get("summary", "")
     if not all(isinstance(item, str) for item in (path, content, summary)):
         raise ValueError("path, content, and summary must be strings")
-    return ToolResult(True, _change_data(_changes(context).propose_create(path, content, summary)))
+    service = _changes(context)
+    change = service.propose_create(path, content, summary)
+    if context.permission_mode is PermissionMode.FULL_ACCESS:
+        _record_auto_approval(context, "propose_file_create")
+        service.approve(change.id)
+        change = service.apply(change.id)
+    return ToolResult(True, _change_data(change))
+
+
+def _record_auto_approval(context: RunContext, action: str) -> None:
+    risk = assess(action)
+    context.event("risk_assessed", action=action, level=risk.level, rollback=risk.rollback)
+    context.event("auto_approved", action=action, level=risk.level)
+
+
+def _auto_external(context: RunContext, action_name: str, service: object, action: object):
+    risk = assess(action_name)
+    if not requires_approval(context.permission_mode, risk):
+        if context.permission_mode is PermissionMode.FULL_ACCESS:
+            _record_auto_approval(context, action_name)
+        else:
+            context.event("risk_assessed", action=action_name, level=risk.level, rollback=risk.rollback)
+        service.actions.approve(action.id)
+        return service.execute(action.id)
+    return action
 
 
 def apply_change(context: RunContext, arguments: dict[str, Any]) -> ToolResult:
@@ -275,6 +379,7 @@ def workspace_tools() -> ToolRegistry:
         Tool("git_diff", "Show Git diff, optionally limited to a workspace path. Read-only.", {"type": "object", "properties": {"path": {"type": "string"}}, "additionalProperties": False}, "read", git_diff),
         Tool("task_list_update", "Update the session task list without writing user files.", {"type": "object", "properties": {"items": {"type": "array", "items": {"type": "string"}}}, "required": ["items"], "additionalProperties": False}, "none", task_list_update),
         Tool("task_status_update", "Update one session task status after work completes, fails, or is blocked.", {"type": "object", "properties": {"task_id": {"type": "string"}, "status": {"type": "string", "enum": ["pending", "running", "blocked", "completed", "failed", "cancelled"]}}, "required": ["task_id", "status"], "additionalProperties": False}, "none", task_status_update),
+        Tool("list_external_sources", "List the session's untrusted external Web sources for citation and review.", {"type": "object", "properties": {}, "additionalProperties": False}, "read", list_external_sources),
         Tool("propose_file_edit", "Propose one exact text replacement. This never writes a file; the user must approve before application.", {"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}, "summary": {"type": "string"}}, "required": ["path", "old_text", "new_text"], "additionalProperties": False}, "write", propose_file_edit, reversible=True),
         Tool("propose_file_create", "Propose creation of one text file. This never writes a file; the user must approve before application.", {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}, "summary": {"type": "string"}}, "required": ["path", "content"], "additionalProperties": False}, "write", propose_file_create, reversible=True),
         Tool("apply_change", "Apply an already user-approved change proposal. Never call this before approval.", {"type": "object", "properties": {"change_id": {"type": "string"}}, "required": ["change_id"], "additionalProperties": False}, "write", apply_change, requires_approval=True, reversible=True),
@@ -282,4 +387,8 @@ def workspace_tools() -> ToolRegistry:
         Tool("propose_command", "Propose a fixed, approved command template. This never starts a process; the user must approve it in the CLI.", {"type": "object", "properties": {"template": {"type": "string", "enum": ["pytest", "npm_test", "npm_build", "ruff_check", "prettier_check"]}, "target": {"type": "string"}, "cwd": {"type": "string"}}, "required": ["template"], "additionalProperties": False}, "execute", propose_command),
         Tool("run_command", "Run an already user-approved command proposal. Never call this before approval.", {"type": "object", "properties": {"command_id": {"type": "string"}}, "required": ["command_id"], "additionalProperties": False}, "execute", run_command, requires_approval=True),
         Tool("discard_command", "Discard a pending command proposal without starting a process.", {"type": "object", "properties": {"command_id": {"type": "string"}}, "required": ["command_id"], "additionalProperties": False}, "none", discard_command),
+        Tool("propose_web_search", "Propose a Tavily web search. This sends no network request until the user approves it.", {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"], "additionalProperties": False}, "network", propose_web_search),
+        Tool("propose_web_fetch", "Propose fetching an external http/https URL. This sends no network request until user approval.", {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"], "additionalProperties": False}, "network", propose_web_fetch),
+        Tool("propose_mcp_connect", "Propose starting an allowed local stdio MCP server and listing its tools.", {"type": "object", "properties": {"server": {"type": "string"}}, "required": ["server"], "additionalProperties": False}, "network", propose_mcp_connect),
+        Tool("propose_mcp_call", "Propose calling an allowed MCP tool. Never call MCP tools without approval.", {"type": "object", "properties": {"server": {"type": "string"}, "tool": {"type": "string"}, "arguments": {"type": "object"}}, "required": ["server", "tool", "arguments"], "additionalProperties": False}, "network", propose_mcp_call),
     ])

@@ -11,3 +11,11 @@ command_output_bytes = 100000
 # Optional USD prices per million tokens for /cost.
 input_cost_per_million = 0
 output_cost_per_million = 0
+# Put CAPSLOCK_TAVILY_API_KEY (or TAVILY_API_KEY) in .env or the shell, never this file.
+web_timeout_seconds = 20
+web_max_bytes = 500000
+web_max_redirects = 3
+mcp_timeout_seconds = 30
+mcp_output_bytes = 100000
+# full_access | approve_for_me | ask_for_approval
+permission_mode = "approve_for_me"

@@ -1,8 +1,10 @@
 # CapsLock
 
-一个单机、可恢复、受控编辑与执行的工作区 Agent。它可分析本地文本和代码、检索带行号的证据并读取 Git 状态/diff；文件修改和命令执行始终先生成可审阅的提案，且必须由用户逐次确认。默认不联网、不执行任意 Shell。
+一个单机、可恢复、受控编辑、执行与研究的工作区 Agent。它可分析本地文本和代码、检索带行号的证据并读取 Git 状态/diff；文件修改、命令执行、Web 与 MCP 调用始终先生成可审阅的提案，且必须由用户逐次确认。默认不执行任意 Shell。
 
-开发计划、架构决策与实施记录见 [v1 开发文档](docs/v1-development.md)。
+开发计划、架构决策与实施记录见 [v1 开发文档](docs/v1-development.md)；当前工具与 CLI 指令见 [Agent 工具与指令参考](docs/agent-reference.md)。
+
+CapsLock 默认使用 `approve_for_me` 权限模式；可在聊天中通过 `/permissions full|approve|ask` 切换为全自动、高风险确认或每次请求确认。即使全自动模式仍保留风险审计、文件撤销、命令超时/取消和外部访问边界。
 
 ## 安装
 
@@ -62,7 +64,7 @@ capslock ask "公司总部在哪里？"
 
 需要项目级配置时，可复制 `capslock.toml.example` 为 `capslock.toml`；不要把 API key 写入该文件。
 
-Agent 可调用 `list_files`、`read_file`、`search_files`、`git_status`、`git_diff` 和会话任务工具。它还可提出精确的文本编辑、新文件或固定命令模板；在 CLI 使用 `/changes` 或 `/commands` 查看详情，再通过 `/approve <id>` 明确确认，或用 `/reject <id>` 丢弃。`/undo` 可在确认后撤销最近一次由 CapsLock 应用的变更。v1.2 仅允许固定的测试、构建与只读格式检查模板，绝不执行任意 Shell；命令会受 cwd、超时与输出上限控制。只允许 UTF-8 文本与常见源码格式，单文件最多 512KB、最多扫描 1000 个文件；所有路径必须位于工作区内。它不联网。
+Agent 可调用本地工作区、会话任务、固定命令、Web 研究与本地 stdio MCP 工具。Agent 在对话中提出外部请求后，CLI 会展示完整请求 ID、类型、脱敏载荷和摘要，并用编号菜单选择批准、拒绝或稍后处理。Web 请求获批完成后，Agent 会自动读取来源并继续回答。稍后也可通过 `/web`、`/approve <id>`、`/reject <id>` 处理，或用 `/sources` 回查不可信网页来源。Tavily 搜索需要在环境中设置 `CAPSLOCK_TAVILY_API_KEY`（也兼容 `TAVILY_API_KEY`）。v1.3 仅支持公开 `http/https` URL 和显式配置的 stdio MCP，拒绝私网 URL、远程 MCP、OAuth 与任意 Shell。
 
 ## 架构
 
@@ -71,6 +73,8 @@ Agent 可调用 `list_files`、`read_file`、`search_files`、`git_status`、`gi
 - `policy.py`：工作区路径、文件大小和受控读写安全边界。
 - `changes.py`：编辑提案、审批、哈希校验、应用与撤销。
 - `execution.py`：固定命令模板、审批、执行、超时与输出控制。
+- `external.py`：Tavily 搜索、URL 抓取、来源审计与外部动作。
+- `mcp.py`：双层 MCP 配置和受控 stdio 调用。
 - `evidence.py`：稳定、可定位的文件证据。
 - `session.py`：SQLite 会话、运行、工具调用与引用存储。
 - `cli.py`：命令行交互与可观测性展示。

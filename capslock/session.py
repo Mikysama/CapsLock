@@ -64,6 +64,31 @@ class TaskInfo:
     status: str
 
 
+@dataclass(frozen=True)
+class ExternalActionInfo:
+    id: str
+    session_id: str
+    run_id: str
+    kind: str
+    payload: dict[str, Any]
+    summary: str
+    status: str
+    result: dict[str, Any] | None
+    error: str | None
+
+
+@dataclass(frozen=True)
+class SourceInfo:
+    id: str
+    session_id: str
+    run_id: str
+    url: str
+    title: str
+    excerpt: str
+    fetched_at: str
+    suspicious: bool
+
+
 class SessionStore:
     def __init__(self, database: str | Path) -> None:
         self.path = Path(database)
@@ -113,6 +138,20 @@ class SessionStore:
             CREATE TABLE IF NOT EXISTS tasks (
               id TEXT PRIMARY KEY, session_id TEXT NOT NULL, text TEXT NOT NULL,
               status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS workspace_settings (
+              key TEXT PRIMARY KEY, value TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS external_actions (
+              id TEXT PRIMARY KEY, session_id TEXT NOT NULL, run_id TEXT NOT NULL,
+              kind TEXT NOT NULL, payload TEXT NOT NULL, summary TEXT NOT NULL,
+              status TEXT NOT NULL, created_at TEXT NOT NULL, approved_at TEXT,
+              started_at TEXT, finished_at TEXT, result TEXT, error TEXT
+            );
+            CREATE TABLE IF NOT EXISTS sources (
+              id TEXT PRIMARY KEY, session_id TEXT NOT NULL, run_id TEXT NOT NULL,
+              url TEXT NOT NULL, title TEXT NOT NULL, excerpt TEXT NOT NULL,
+              fetched_at TEXT NOT NULL, suspicious INTEGER NOT NULL DEFAULT 0
             );
             """
         )
@@ -295,6 +334,66 @@ class SessionStore:
         row = self._connection.execute("SELECT coalesce(sum(input_tokens),0), coalesce(sum(output_tokens),0), coalesce(sum(cost_usd),0) FROM runs WHERE session_id=?", (session_id,)).fetchone()
         return int(row[0]), int(row[1]), float(row[2])
 
+    def workspace_setting(self, key: str, default: str | None = None) -> str | None:
+        row = self._connection.execute("SELECT value FROM workspace_settings WHERE key=?", (key,)).fetchone()
+        return default if row is None else str(row[0])
+
+    def set_workspace_setting(self, key: str, value: str) -> None:
+        self._connection.execute("INSERT INTO workspace_settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+        self._connection.commit()
+
+    def create_external_action(self, *, session_id: str, run_id: str, kind: str, payload: dict[str, Any], summary: str) -> ExternalActionInfo:
+        action_id, now = uuid.uuid4().hex, _now()
+        self._connection.execute(
+            "INSERT INTO external_actions(id,session_id,run_id,kind,payload,summary,status,created_at) VALUES(?,?,?,?,?,?, 'pending', ?)",
+            (action_id, session_id, run_id, kind, json.dumps(payload, ensure_ascii=False), summary, now),
+        )
+        self._connection.commit()
+        return self.get_external_action(action_id, session_id=session_id)  # type: ignore[return-value]
+
+    def get_external_action(self, action_id: str, *, session_id: str | None = None) -> ExternalActionInfo | None:
+        query, values = "SELECT * FROM external_actions WHERE id=?", [action_id]
+        if session_id is not None:
+            query += " AND session_id=?"
+            values.append(session_id)
+        row = self._connection.execute(query, values).fetchone()
+        return None if row is None else _external_action_info(row)
+
+    def list_external_actions(self, session_id: str) -> list[ExternalActionInfo]:
+        rows = self._connection.execute("SELECT * FROM external_actions WHERE session_id=? ORDER BY created_at", (session_id,)).fetchall()
+        return [_external_action_info(row) for row in rows]
+
+    def update_external_action(self, action_id: str, status: str, *, result: dict[str, Any] | None = None, error: str | None = None) -> None:
+        timestamp = {"approved": "approved_at", "running": "started_at", "completed": "finished_at", "failed": "finished_at", "cancelled": "finished_at", "rejected": "finished_at"}.get(status)
+        if timestamp:
+            self._connection.execute(
+                f"UPDATE external_actions SET status=?, {timestamp}=?, result=?, error=? WHERE id=?",
+                (status, _now(), json.dumps(result, ensure_ascii=False) if result is not None else None, error, action_id),
+            )
+        else:
+            self._connection.execute("UPDATE external_actions SET status=?, result=?, error=? WHERE id=?", (status, json.dumps(result, ensure_ascii=False) if result is not None else None, error, action_id))
+        self._connection.commit()
+
+    def add_source(self, *, session_id: str, run_id: str, url: str, title: str, excerpt: str, suspicious: bool = False) -> SourceInfo:
+        source_id, now = uuid.uuid4().hex, _now()
+        self._connection.execute(
+            "INSERT INTO sources(id,session_id,run_id,url,title,excerpt,fetched_at,suspicious) VALUES(?,?,?,?,?,?,?,?)",
+            (source_id, session_id, run_id, url, title, excerpt, now, int(suspicious)),
+        )
+        self._connection.commit()
+        return self.get_source(source_id, session_id=session_id)  # type: ignore[return-value]
+
+    def get_source(self, source_id: str, *, session_id: str | None = None) -> SourceInfo | None:
+        query, values = "SELECT * FROM sources WHERE id=?", [source_id]
+        if session_id is not None:
+            query += " AND session_id=?"
+            values.append(session_id)
+        row = self._connection.execute(query, values).fetchone()
+        return None if row is None else _source_info(row)
+
+    def list_sources(self, session_id: str) -> list[SourceInfo]:
+        return [_source_info(row) for row in self._connection.execute("SELECT * FROM sources WHERE session_id=? ORDER BY fetched_at", (session_id,)).fetchall()]
+
 
 def _change_info(row: sqlite3.Row) -> ChangeInfo:
     return ChangeInfo(
@@ -305,3 +404,11 @@ def _change_info(row: sqlite3.Row) -> ChangeInfo:
 
 def _command_info(row: sqlite3.Row) -> CommandInfo:
     return CommandInfo(row["id"], row["session_id"], row["run_id"], row["template"], tuple(json.loads(row["argv"])), row["cwd"], row["timeout_seconds"], row["summary"], row["status"], row["exit_code"], row["stdout"], row["stderr"])
+
+
+def _external_action_info(row: sqlite3.Row) -> ExternalActionInfo:
+    return ExternalActionInfo(row["id"], row["session_id"], row["run_id"], row["kind"], json.loads(row["payload"]), row["summary"], row["status"], json.loads(row["result"]) if row["result"] else None, row["error"])
+
+
+def _source_info(row: sqlite3.Row) -> SourceInfo:
+    return SourceInfo(row["id"], row["session_id"], row["run_id"], row["url"], row["title"], row["excerpt"], row["fetched_at"], bool(row["suspicious"]))

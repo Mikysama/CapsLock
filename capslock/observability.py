@@ -23,8 +23,8 @@ class EventSink:
         self.events: list[Event] = []
         self.path = path
 
-    def emit(self, kind: str, **data: Any) -> None:
-        event = Event(kind, data)
+    def emit(self, event_kind: str, **data: Any) -> None:
+        event = Event(event_kind, data)
         self.events.append(event)
         if self.path:
             self.path.parent.mkdir(parents=True, exist_ok=True)
