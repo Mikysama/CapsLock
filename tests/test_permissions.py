@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import capslock.cli as cli
 from prompt_toolkit.document import Document
 
+from capslock import __version__
 from capslock.cli import CAPSLOCK_ART, SlashCommandCompleter, SlashCommandLexer, _command_completions, _matching_command_nodes, _permission_badge, _permission_rprompt, _prompt_tokens, _refresh_slash_completion, _startup_banner
 from capslock.permissions import PermissionMode, assess, requires_approval
 from capslock.policy import WorkspacePolicy
@@ -167,7 +168,7 @@ def test_startup_banner_contains_capslock_symbol_wordmark_and_session_identity()
     assert "⇪⇪⇪  ⇪⇪⇪  ⇪⇪⇪  ⇪⇪⇪" in output
     assert "deepseek-v4-flash" in output
     assert "project" in output
-    assert "v0.1.0" not in output
+    assert f"v{__version__}" in output
     assert len(CAPSLOCK_ART) == 5
     assert {len(line) for line in CAPSLOCK_ART} == {38}
     art_lines = [line for line in output.splitlines() if "⇪" in line]

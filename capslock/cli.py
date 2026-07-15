@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import argparse
 import shutil
-import sys
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 from openai import OpenAI
 from prompt_toolkit import PromptSession
@@ -23,6 +23,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from . import __version__
 from .changes import ChangeService, make_diff
 from .execution import CommandService
 from .external import WebService
@@ -92,7 +93,7 @@ def _startup_banner(agent: WorkspaceAgent, width: int | None = None) -> Panel:
         body.add_column(ratio=3)
         body.add_row(Align.center(Group(identity, Text(""), _capslock_logo()), vertical="middle"), tips)
 
-    title = Text(" CapsLock ", style="agent.bold")
+    title = Text(f" CapsLock v{__version__} ", style="agent.bold")
     return Panel(body, title=title, title_align="left", border_style="border.focus", padding=(1, 2))
 
 
@@ -376,6 +377,7 @@ def _move_selection(selected: int, key: str, option_count: int) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="capslock", description="Trustworthy read-only workspace agent.")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("--workspace", type=Path, default=Path.cwd(), help="Workspace root (default: current directory)")
     parser.add_argument("--debug", action="store_true", help="Show runtime events after each answer")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -407,12 +409,12 @@ def _agent(workspace: Path, settings: Settings, session_id: str | None = None) -
 
 
 def main(argv: list[str] | None = None) -> int:
-    load_project_environment()
     args = build_parser().parse_args(argv)
     workspace = args.workspace.resolve()
     if not workspace.is_dir():
         console.print(f"[error]Error:[/] [path]{workspace}[/]")
         return 2
+    load_project_environment(workspace)
     settings = Settings.load(workspace)
     try:
         if args.command == "doctor":
@@ -960,7 +962,7 @@ def _doctor(workspace: Path, settings: Settings) -> int:
     table.add_row("Workspace", Text(str(workspace), style="path"))
     table.add_row("SQLite", Text(str(workspace / ".capslock" / "capslock.sqlite3"), style="path"))
     table.add_row("Model", Text(settings.model, style="text.secondary"))
-    table.add_row("Endpoint", Text(settings.base_url, style="path"))
+    table.add_row("Endpoint", Text(_safe_endpoint(settings.base_url), style="path"))
     api_ready = bool(settings.api_key and not settings.api_key.startswith("your_"))
     table.add_row("API key", Text("configured" if api_ready else "missing", style="success" if api_ready else "warning"))
     git_ready = (workspace / ".git").exists()
@@ -969,6 +971,19 @@ def _doctor(workspace: Path, settings: Settings) -> int:
     table.add_row("Command templates", Text(", ".join(commands.available_templates()) or "none detected", style="command"))
     console.print(table)
     return 0
+
+
+def _safe_endpoint(endpoint: str) -> str:
+    """Remove credentials and query data before diagnostic display."""
+    parsed = urlsplit(endpoint)
+    if not parsed.hostname:
+        return "<invalid endpoint>"
+    hostname = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
+    try:
+        port = f":{parsed.port}" if parsed.port is not None else ""
+    except ValueError:
+        return "<invalid endpoint>"
+    return urlunsplit((parsed.scheme, f"{hostname}{port}", parsed.path, "", ""))
 
 
 if __name__ == "__main__":

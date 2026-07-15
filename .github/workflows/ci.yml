@@ -1,0 +1,130 @@
+name: CI and release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install development environment
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+      - name: Lint
+        run: python -m ruff check .
+      - name: Test
+        run: python -m pytest -q
+      - name: Check dependencies
+        run: |
+          python -m pip check
+          python -m pip_audit
+      - name: Check repository hygiene
+        run: python scripts/check_repository.py
+      - name: Build isolated distributions
+        run: |
+          rm -rf build dist capslock.egg-info
+          python -m build
+          python -m twine check dist/*
+          wheel=$(find dist -maxdepth 1 -type f -name '*.whl')
+          sdist=$(find dist -maxdepth 1 -type f -name '*.tar.gz')
+          python scripts/verify_release.py --dist "$wheel" --dist "$sdist"
+      - name: Smoke test editable installation outside checkout
+        env:
+          EXPECTED_SOURCE: ${{ github.workspace }}/capslock/__init__.py
+        run: |
+          expected=$(python -c 'from capslock import __version__; print(__version__)')
+          workspace="$RUNNER_TEMP/editable-workspace"
+          mkdir -p "$workspace"
+          cd "$RUNNER_TEMP"
+          python -c 'import os; from pathlib import Path; import capslock; assert Path(capslock.__file__).resolve() == Path(os.environ["EXPECTED_SOURCE"]).resolve()'
+          capslock --version | grep -Fx "capslock $expected"
+          capslock --workspace "$workspace" doctor
+      - name: Smoke test wheel installation outside checkout
+        run: |
+          expected=$(python -c 'from capslock import __version__; print(__version__)')
+          wheel=$(find "$GITHUB_WORKSPACE/dist" -maxdepth 1 -type f -name '*.whl')
+          python -m venv "$RUNNER_TEMP/wheel-venv"
+          "$RUNNER_TEMP/wheel-venv/bin/python" -m pip install --upgrade pip
+          "$RUNNER_TEMP/wheel-venv/bin/python" -m pip install "$wheel"
+          workspace="$RUNNER_TEMP/wheel-workspace"
+          mkdir -p "$workspace"
+          cd "$RUNNER_TEMP"
+          EXPECTED_VERSION="$expected" "$RUNNER_TEMP/wheel-venv/bin/python" -c 'import os; from importlib.metadata import version; from pathlib import Path; import capslock; assert version("capslock") == os.environ["EXPECTED_VERSION"]; assert "site-packages" in Path(capslock.__file__).as_posix()'
+          "$RUNNER_TEMP/wheel-venv/bin/capslock" --version | grep -Fx "capslock $expected"
+          "$RUNNER_TEMP/wheel-venv/bin/capslock" --workspace "$workspace" doctor
+          "$RUNNER_TEMP/wheel-venv/bin/python" -m pip check
+
+  security:
+    name: Repository and secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Reject tracked local artifacts
+        run: python scripts/check_repository.py
+      - name: Scan complete Git history
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_COMMENTS: "false"
+
+  release:
+    name: Create GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [quality, security]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Verify tag and release notes
+        id: release
+        run: |
+          python scripts/verify_release.py --tag "$GITHUB_REF_NAME"
+          notes="docs/releases/${GITHUB_REF_NAME#v}.md"
+          test -f "$notes"
+          echo "notes=$notes" >> "$GITHUB_OUTPUT"
+      - name: Build final distributions
+        run: |
+          python -m pip install --upgrade pip build twine
+          rm -rf build dist capslock.egg-info
+          python -m build
+          python -m twine check dist/*
+          wheel=$(find dist -maxdepth 1 -type f -name '*.whl')
+          sdist=$(find dist -maxdepth 1 -type f -name '*.tar.gz')
+          python scripts/verify_release.py --tag "$GITHUB_REF_NAME" --dist "$wheel" --dist "$sdist"
+      - name: Publish GitHub Release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: ${{ steps.release.outputs.notes }}
+          files: dist/*
+          fail_on_unmatched_files: true

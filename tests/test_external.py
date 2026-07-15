@@ -1,6 +1,8 @@
 import json
+import os
 import socket
 import sys
+import time
 from pathlib import Path
 
 import httpx
@@ -49,7 +51,9 @@ def test_search_requires_approval_and_persists_sources(tmp_path: Path) -> None:
 def test_fetch_rejects_private_urls_and_marks_untrusted_content(tmp_path: Path, monkeypatch) -> None:
     with pytest.raises(PolicyError):
         validate_public_url("http://localhost/test")
-    private = lambda *args, **kwargs: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 80))]
+    def private(*args, **kwargs):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 80))]
+
     with pytest.raises(PolicyError):
         validate_public_url("http://example.com", resolver=private)
     monkeypatch.setattr("capslock.external.validate_public_url", lambda url: url)
@@ -110,3 +114,93 @@ def test_mcp_stdio_connect_and_call(tmp_path: Path) -> None:
     service.actions.approve(call.id)
     result = service.execute(call.id)
     assert result.status == "completed"
+
+
+def test_mcp_timeout_terminates_stdio_subprocess(tmp_path: Path) -> None:
+    (tmp_path / "server.py").write_text(
+        "import os\n"
+        "import time\n"
+        "from pathlib import Path\n"
+        "Path('server.pid').write_text(str(os.getpid()), encoding='utf-8')\n"
+        "time.sleep(30)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "capslock.mcp.json").write_text(
+        json.dumps(
+            {
+                "servers": {
+                    "slow": {
+                        "command": sys.executable,
+                        "args": ["server.py"],
+                        "cwd": ".",
+                        "allowed_tools": [],
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    store = SessionStore(tmp_path / ".capslock" / "state.sqlite3")
+    service = McpService(
+        store,
+        WorkspacePolicy(tmp_path),
+        "session",
+        "run",
+        lambda *args, **kwargs: None,
+        timeout_seconds=0.5,
+    )
+    action = service.propose_connect("slow")
+    service.actions.approve(action.id)
+
+    result = service.execute(action.id)
+
+    assert result.status == "failed"
+    assert result.error == "TimeoutError"
+    pid = int((tmp_path / "server.pid").read_text(encoding="utf-8"))
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail(f"MCP subprocess {pid} survived timeout cleanup")
+
+
+def test_mcp_subprocess_crash_is_recorded_as_failed_action(tmp_path: Path) -> None:
+    (tmp_path / "server.py").write_text(
+        "raise SystemExit('intentional MCP crash')\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "capslock.mcp.json").write_text(
+        json.dumps(
+            {
+                "servers": {
+                    "crash": {
+                        "command": sys.executable,
+                        "args": ["server.py"],
+                        "cwd": ".",
+                        "allowed_tools": [],
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    store = SessionStore(tmp_path / ".capslock" / "state.sqlite3")
+    service = McpService(
+        store,
+        WorkspacePolicy(tmp_path),
+        "session",
+        "run",
+        lambda *args, **kwargs: None,
+        timeout_seconds=2,
+    )
+    action = service.propose_connect("crash")
+    service.actions.approve(action.id)
+
+    result = service.execute(action.id)
+
+    assert result.status == "failed"
+    assert result.error

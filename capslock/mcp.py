@@ -116,7 +116,8 @@ class McpService:
         try:
             result = asyncio.run(self._execute(action))
         except Exception as exc:
-            self.store.update_external_action(action.id, "failed", error=str(exc))
+            error = str(exc) or type(exc).__name__
+            self.store.update_external_action(action.id, "failed", error=error)
             self.emit("external_action_finished", action_id=action.id, kind=action.kind, status="failed")
             return self.actions._action(action.id)
         self.store.update_external_action(action.id, "completed", result=result)
