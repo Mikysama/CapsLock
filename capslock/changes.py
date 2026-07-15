@@ -83,6 +83,7 @@ class ChangeService:
             self.store.update_change_status(change.id, "failed", error="file was created after proposal")
             raise ValueError("file was created after proposal; create a new proposal")
         self.policy.validate_write_content(change.after_content)
+        self.store.update_change_status(change.id, "running")
         path.write_text(change.after_content, encoding="utf-8")
         self.store.update_change_status(change.id, "applied")
         self.emit("change_applied", change_id=change.id, path=change.path)

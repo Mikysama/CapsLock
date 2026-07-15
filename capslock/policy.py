@@ -5,8 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-
-TEXT_SUFFIXES = {".md", ".txt", ".py", ".js", ".ts", ".tsx", ".json", ".yaml", ".yml", ".toml", ".csv", ".html", ".css", ".sh", ".sql", ".go", ".rs", ".java", ".c", ".h", ".cpp"}
+from .security import TEXT_SUFFIXES
 
 
 class PolicyError(ValueError):
