@@ -9,6 +9,7 @@ from rich.console import Console
 
 from ..config import Settings
 from ..execution import CommandService
+from ..layout import ProjectLayout
 from ..policy import WorkspacePolicy
 from ..session import SessionStore
 from ..storage import MemoryStore, workspace_key
@@ -16,8 +17,9 @@ from .prompt import select_session
 from .render import render_doctor, render_session_list, render_session_renamed
 
 
-def open_store(workspace: Path) -> SessionStore:
-    return SessionStore(workspace / ".capslock" / "capslock.sqlite3")
+def open_store(workspace: Path, *, layout: ProjectLayout | None = None) -> SessionStore:
+    selected = layout or ProjectLayout.discover(workspace)
+    return SessionStore(selected.database)
 
 
 def render_sessions(console: Console, store: SessionStore, limit: int) -> int:
@@ -50,20 +52,26 @@ def select_saved_session(console: Console, store: SessionStore, limit: int) -> s
         return None
 
 
-def doctor(console: Console, workspace: Path, settings: Settings) -> int:
+def doctor(console: Console, workspace: Path, settings: Settings, *, layout: ProjectLayout | None = None) -> int:
+    selected = layout or ProjectLayout.discover(workspace)
     api_ready = bool(settings.api_key and not settings.api_key.startswith("your_"))
     git_ready = (workspace / ".git").exists()
-    with open_store(workspace) as store:
+    with open_store(workspace, layout=selected) as store:
         commands = CommandService(store, WorkspacePolicy(workspace), "doctor", "doctor", lambda *args, **kwargs: None)
         available = commands.available_templates()
-    memory_path = settings.memory.database or workspace / ".capslock" / "memory.sqlite3"
+    memory_path = settings.memory.database or selected.user.memory
     with MemoryStore(memory_path) as memory:
         local_write = memory.local_write_enabled(workspace_key(workspace))
         fts_available = memory.fts_available
     render_doctor(
         console,
         workspace=workspace,
-        database=workspace / ".capslock" / "capslock.sqlite3",
+        layout_mode=selected.mode,
+        config=selected.config,
+        project_mcp=selected.project_mcp,
+        skills=selected.skills,
+        layout_warnings=selected.warnings,
+        database=selected.database,
         model=settings.model,
         endpoint=safe_endpoint(settings.base_url),
         api_ready=api_ready,

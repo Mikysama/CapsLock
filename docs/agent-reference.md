@@ -1,12 +1,12 @@
 # CapsLock Agent 工具与指令参考
 
-本参考描述当前 v1.4.1 的模型工具、终端指令和审批边界。CapsLock 是按需运行的本机 Agent，权限模式可在会话内切换。
+本参考描述当前 v1.5.0 的模型工具、Skill、终端指令和审批边界。CapsLock 是按需运行的本机 Agent，权限模式可在会话内切换。
 
 ## 权限模式与风险兜底
 
 | 模式 | 行为 | 适用场景 |
 | --- | --- | --- |
-| `full_access` | 不再询问，自动执行所有提案。每次自动执行仍记录风险级别、原因和回滚建议。 | 受控测试工作区中的自动化任务。 |
+| `full_access` | 自动执行普通提案；项目 Skill 文件仍逐次确认。每次自动执行记录风险级别、原因和回滚建议。 | 受控测试工作区中的自动化任务。 |
 | `approve_for_me` | 只要求确认高风险文件写入、命令执行和 MCP 操作；本地读取与 Web 请求按默认流程执行。 | 默认模式。 |
 | `ask_for_approval` | 每次用户 Agent 请求以及后续所有高风险动作均需确认。 | 不熟悉工作区或需要最大人工控制时。 |
 
@@ -14,7 +14,7 @@
 
 交互聊天中输入 `/` 会实时打开 Claude Code 风格的“命令 + 功能说明”竖向双列列表；继续输入（例如 `/perm`）会立即过滤掉不匹配当前前缀的命令。完整父命令会展开子命令，完整叶子命令仍保持候选可见，alias 也参与补全。使用 `↑/↓` 选择或 `Tab` 补全，斜杠命令输入会以粗体强调色显示。输入区使用等宽的上下边框与历史和帮助栏分隔，权限状态显示在右侧。该交互由 `prompt-toolkit` 负责渲染，以兼容 VS Code 和 macOS Terminal。
 
-即使在 `full_access`，CapsLock 仍不会绕过安全兜底：文件变更会保留原内容和 `/undo` 路径；命令保留超时、输出限制、进程组取消和 `/diff` 检查建议；Web 仍执行 SSRF/内容边界检查；MCP 仍限制为显式允许的本地 stdio 工具。无法自动回滚的第三方 MCP 副作用会在风险审计中明确标记。
+即使在 `full_access`，CapsLock 仍不会绕过安全兜底：文件变更会保留原内容和 `/undo` 路径；`.capslock/skills/**` 的持久化指令修改始终逐次确认；命令保留超时、输出限制、进程组取消和 `/diff` 检查建议；Web 仍执行 SSRF/内容边界检查；MCP 仍限制为显式允许的本地 stdio 工具。无法自动回滚的第三方 MCP 副作用会在风险审计中明确标记。
 
 ## 模型工具
 
@@ -63,6 +63,11 @@
 | `/memory forget <id>`、`/memory undo <id>`、`/memory purge <id>` | 可恢复遗忘、撤销，或二次确认后永久清除。 |
 | `/memory export <scope> <path>`、`/memory import <scope> <path>` | 在工作区 JSON 文件与指定作用域之间导入导出。 |
 | `/memory status|enable|disable` | 查看或切换当前工作区的本机写入开关。 |
+| `/skills list` | 列出合并后的用户级与工作区级 Skill，以及有效、禁用或无效状态。 |
+| `/skills show <name-or-run-id>` | 显示当前 Skill 契约，或已删除 Skill 的历史运行审计。 |
+| `/skills validate <name>` | 离线校验 manifest、路径、版本、工具、schema 和 fixtures。 |
+| `/skills run <name> [key=value ...]` | 显式运行 Skill；缺少的必填输入会交互补齐。 |
+| `/skills enable|disable <name>` | 在当前工作区启用或禁用有效 Skill。 |
 | `/mcp list` | 列出合并后的 MCP server 配置。 |
 | `/mcp status <server>`、`/mcp tools <server>` | 查看 server 的配置、状态与允许工具。 |
 | `/approve <id>` | 展示动作详情后确认并执行。文件变更和命令使用 `y/yes`；外部动作使用编号菜单。 |
@@ -80,19 +85,23 @@
 
 ## 配置与数据位置
 
-- `capslock.toml`：项目模型、命令、Web 和 MCP 限制配置；不要存 API key。
+- `.capslock/config.toml`：可提交的项目模型、命令、Web 和 MCP 限制配置；不要存 API key。
 - `.env` 或 shell：`CAPSLOCK_API_KEY`、`CAPSLOCK_TAVILY_API_KEY` 等密钥。
-- `.capslock/capslock.sqlite3`：会话、运行、统一动作生命周期、领域明细、任务和来源审计。
-- `.capslock/backups/`：schema 升级前自动创建的数据库备份。
-- `.capslock/events.jsonl`：脱敏事件流。
-- Linux `$XDG_DATA_HOME/capslock/memory.sqlite3` 或 macOS Application Support：用户级记忆、历史、索引和无正文审计；可由 `CAPSLOCK_MEMORY_DATABASE` 覆盖。
-- `capslock.mcp.json`：可提交的项目 MCP 声明，禁止 `env`/凭据。
-- `.capslock/mcp.local.json`：本机私有 MCP 覆盖、路径和环境变量；不得提交。
+- `.capslock/mcp.json`：可提交的项目 MCP 声明，禁止 `env`/凭据。
+- `.capslock/skills/<name>/`：可提交的工作区 Skill 包；同名时覆盖用户级包。
+- `.capslock/local/mcp.json`：本机私有 MCP 覆盖、路径和环境变量；始终忽略。
+- `.capslock/state/capslock.sqlite3`、`events.jsonl`、`backups/`：本机工作区状态；始终忽略。
+- `${CAPSLOCK_HOME:-~/.capslock}/skills/`：用户级 Skill 包。
+- `${CAPSLOCK_HOME:-~/.capslock}/state/memory.sqlite3`：用户级记忆、历史、索引和无正文审计。
+
+`capslock migrate-layout [--scope workspace|user|all] [--dry-run|--apply] [--yes]` 显式迁移旧布局，默认 `workspace` dry-run。v1.x 保持旧路径只读兼容并警告，v2.0 移除。`CAPSLOCK_HOME` 与 `CAPSLOCK_MEMORY_DATABASE` 仅接受启动 shell 中的绝对路径，项目 `.env` 中的同名值会被忽略。
 
 ## 引用与安全边界
 
 - 本地结论使用 `[[evidence:ev_…]]`，最终输出显示路径与行号。
 - 外部结论使用 `[[source:<source-id>]]`，最终输出显示标题、URL 与抓取时间。
 - 记忆结论使用 `[[memory:mem_…]]`，最终输出显示类型、作用域和来源。
-- 支持的文件必须位于工作区内、为 UTF-8 且不超过配置上限；`.git` 和 `.capslock` 不允许由编辑工具修改。
+- Skill 只能由 `/skills run` 启动；manifest 声明的工具和权限只会缩小能力，不能覆盖当前权限模式或安全策略。
+- Skill schema 仅允许包内 JSON 文件与内部 `$ref`；未知字段、符号链接、目录穿越和外部引用默认拒绝。
+- 支持的文件必须位于工作区内、为 UTF-8 且不超过配置上限；Agent 看不到 `.env`、`.capslock/local/`、`.capslock/state/` 或旧运行文件。`.git` 与非 Skill 的 `.capslock` 内容不可修改，命令 cwd 不能进入整个 `.capslock`。
 - URL 抓取拒绝 localhost、私网、链路本地、保留地址和重定向后的非公开地址；仅接受 HTML/纯文本。

@@ -34,13 +34,17 @@ def _evidence(path: Path, query: str, context_lines: int = 2, limit: int = 8) ->
 
 
 def list_files(context: RunContext, arguments: dict[str, Any]) -> ToolResult:
-    directory = context.policy.resolve(_path(arguments))
-    if not directory.is_dir():
-        raise ValueError(f"directory does not exist: {directory}")
+    directory = context.policy.readable_directory(_path(arguments))
     pattern = arguments.get("pattern", "*")
     if not isinstance(pattern, str):
         raise ValueError("pattern must be a string")
-    files = [item for item in sorted(directory.rglob("*")) if item.is_file() and fnmatch.fnmatch(item.name, pattern)][:context.policy.max_files]
+    files = [
+        item
+        for item in sorted(directory.rglob("*"))
+        if item.is_file()
+        and context.policy.is_agent_readable(item)
+        and fnmatch.fnmatch(item.name, pattern)
+    ][:context.policy.max_files]
     return ToolResult(True, {"path": str(directory), "files": [str(item.relative_to(context.policy.root)) for item in files], "count": len(files)})
 
 
@@ -59,7 +63,12 @@ def read_file(context: RunContext, arguments: dict[str, Any]) -> ToolResult:
 
 
 def search_files(context: RunContext, arguments: dict[str, Any]) -> ToolResult:
-    directory = context.policy.resolve(_path(arguments))
+    requested = _path(arguments)
+    directory = context.policy.resolve(requested)
+    if directory.is_dir():
+        context.policy.readable_directory(requested)
+    else:
+        context.policy.readable_file(requested)
     query = arguments.get("query")
     if not isinstance(query, str) or not query.strip():
         raise ValueError("query must be a non-empty string")
@@ -69,7 +78,12 @@ def search_files(context: RunContext, arguments: dict[str, Any]) -> ToolResult:
     candidates = [directory] if directory.is_file() else [item for item in directory.rglob("*") if item.is_file()]
     output: list[Evidence] = []
     for item in candidates[:context.policy.max_files]:
-        if item.suffix.lower() not in TEXT_SUFFIXES or not fnmatch.fnmatch(item.name, pattern) or item.stat().st_size > context.policy.max_file_bytes:
+        if (
+            not context.policy.is_agent_readable(item)
+            or item.suffix.lower() not in TEXT_SUFFIXES
+            or not fnmatch.fnmatch(item.name, pattern)
+            or item.stat().st_size > context.policy.max_file_bytes
+        ):
             continue
         try:
             output.extend(_evidence(item, query, limit=8 - len(output)))

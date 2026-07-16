@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Any
 
 from ..config import Settings
+from ..layout import ProjectLayout
+from ..observability import EventSink
 from ..permissions import PermissionMode
 from ..runtime import WorkspaceAgent
 from ..session import SessionStore
@@ -13,13 +15,14 @@ from ..storage import MemoryStore
 
 
 class WorkspaceApplication:
-    def __init__(self, *, workspace: Path, settings: Settings, client: Any, session_id: str | None = None) -> None:
+    def __init__(self, *, workspace: Path, settings: Settings, client: Any, session_id: str | None = None, layout: ProjectLayout | None = None) -> None:
         self.workspace = workspace.resolve()
+        self.layout = layout or ProjectLayout.discover(self.workspace)
         self.settings = settings
         self.client = client
-        self.store = SessionStore(self.workspace / ".capslock" / "capslock.sqlite3")
+        self.store = SessionStore(self.layout.database)
         try:
-            memory_path = settings.memory.database or self.workspace / ".capslock" / "memory.sqlite3"
+            memory_path = settings.memory.database or self.layout.user.memory
             self.memory_store = MemoryStore(memory_path)
             mode = PermissionMode.parse(self.store.workspace_setting("permission_mode", settings.permission_mode) or settings.permission_mode)
             self.agent = WorkspaceAgent(
@@ -41,8 +44,10 @@ class WorkspaceApplication:
                 mcp_timeout_seconds=settings.mcp.mcp_timeout_seconds,
                 mcp_output_bytes=settings.mcp.mcp_output_bytes,
                 permission_mode=mode,
+                event_sink=EventSink(self.layout.events),
                 memory_store=self.memory_store,
                 memory_project_write_enabled=settings.memory.project_write_enabled,
+                layout=self.layout,
             )
         except Exception:
             self.close()

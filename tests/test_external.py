@@ -85,10 +85,10 @@ def test_web_tools_only_propose_actions(tmp_path: Path) -> None:
 
 
 def test_mcp_project_local_merge_and_local_credentials(tmp_path: Path) -> None:
-    (tmp_path / "capslock.mcp.json").write_text(json.dumps({"servers": {"demo": {"command": "python", "args": ["server.py"], "cwd": ".", "allowed_tools": ["read", "write"]}}}), encoding="utf-8")
     state = tmp_path / ".capslock"
-    state.mkdir()
-    (state / "mcp.local.json").write_text(json.dumps({"servers": {"demo": {"env": {"TOKEN": "secret"}, "allowed_tools": ["read"], "enabled": True}}}), encoding="utf-8")
+    state.joinpath("local").mkdir(parents=True)
+    (state / "mcp.json").write_text(json.dumps({"servers": {"demo": {"command": "python", "args": ["server.py"], "cwd": ".", "allowed_tools": ["read", "write"]}}}), encoding="utf-8")
+    (state / "local/mcp.json").write_text(json.dumps({"servers": {"demo": {"env": {"TOKEN": "secret"}, "allowed_tools": ["read"], "enabled": True}}}), encoding="utf-8")
     server = McpRegistry(WorkspacePolicy(tmp_path)).get("demo")
     assert server.allowed_tools == ("read",)
     assert server.env == {"TOKEN": "secret"}

@@ -39,6 +39,7 @@ from .render import (
 
 
 def action_coordinator(agent: WorkspaceAgent, run_id: str = "cli") -> ActionCoordinator:
+    layout = getattr(agent, "layout", None)
     return ActionCoordinator(
         store=agent.store,
         policy=WorkspacePolicy(agent.workspace),
@@ -54,6 +55,7 @@ def action_coordinator(agent: WorkspaceAgent, run_id: str = "cli") -> ActionCoor
             agent.web_max_redirects,
         ),
         mcp=McpSettings(agent.mcp_timeout_seconds, agent.mcp_output_bytes),
+        layout=layout,
     )
 
 
@@ -322,7 +324,10 @@ def execute_external(context: CliContext, action: Any) -> Any:
 
 def mcp_command(context: CliContext, text: str) -> None:
     parts = text.split()
-    registry = McpRegistry(WorkspacePolicy(context.agent.workspace))
+    registry = McpRegistry(
+        WorkspacePolicy(context.agent.workspace),
+        layout=getattr(context.agent, "layout", None),
+    )
     try:
         if len(parts) == 1 or parts[1] == "list":
             servers = registry.servers()

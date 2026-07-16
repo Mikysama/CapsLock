@@ -4,6 +4,26 @@
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-07-16
+
+### Added
+
+- 新增声明式本地 Skill 包、用户/工作区双层注册表以及 `/skills list/show/validate/run/enable/disable` 显式工作流。
+- Skill 输入和输出使用 JSON Schema 2020-12 强制校验，并支持正向与预期失败 fixture 兼容检查。
+- 工作区 schema 升至 v4，保存脱敏的 Skill run 元数据、状态、声明能力和历史输出摘要。
+- 新增 `capslock migrate-layout`，支持 workspace/user/all 的无副作用预览、显式校验迁移和中断恢复。
+
+### Changed
+
+- 项目配置、MCP、Skill 与运行状态统一收口到 `.capslock/`，用户级 Skill 和记忆统一收口到 `${CAPSLOCK_HOME:-~/.capslock}`；v1.x 继续只读兼容旧路径。
+
+### Security
+
+- Skill 只能看到 manifest 声明的现有工具子集；限定命令模板和 MCP 工具在调用时再次校验。
+- Skill 指令不能覆盖系统安全指令、当前权限模式、工作区边界或动作审批；运行中禁用、删除或修改包会终止运行。
+- 拒绝未知 manifest 字段、越界/符号链接路径、外部 schema 引用、不兼容版本和未声明权限需求。
+- Agent 不可读取 `.env`、`.capslock/local/`、`.capslock/state/` 或旧运行文件；只有项目 Skill 可创建文件提案，且即使 `full_access` 也必须逐次确认。
+
 ## [1.4.1] - 2026-07-16
 
 ### Added

@@ -1,6 +1,6 @@
 # CapsLock
 
-一个单机、可恢复、受控编辑、执行与研究的工作区 Agent。它可分析本地文本和代码、检索带行号的证据、读取 Git 状态/diff，并显式管理跨会话的本地记忆；文件修改、命令执行、Web 与 MCP 调用始终先生成可审阅的提案。默认不执行任意 Shell，也不自动写入记忆。
+一个单机、可恢复、受控编辑、执行与研究的工作区 Agent。它可分析本地文本和代码、检索带行号的证据、读取 Git 状态/diff，并显式管理本地记忆和可复用 Skill；文件修改、命令执行、Web 与 MCP 调用始终受现有权限与审计约束。默认不执行任意 Shell，也不自动写入记忆或触发 Skill。
 
 开发计划、架构决策与实施记录见 [v1 开发文档](docs/development/v1/)；当前工具与 CLI 指令见 [Agent 工具与指令参考](docs/agent-reference.md)。
 
@@ -43,7 +43,7 @@ capslock --version
 capslock
 ```
 
-直接运行 `capslock` 会进入新会话；原有的 `capslock chat` 仍然可用。输入 `/exit` 或 `/quit` 结束会话；退出时不会保留完全为空的会话。会话标题默认取首个问题，也可在聊天中执行 `/rename 新标题` 修改。会话和执行轨迹保存在工作区的 `.capslock/capslock.sqlite3`，可用 `capslock sessions` 查看。执行 `capslock resume` 后可根据标题用方向键选择会话，也可继续通过完整 ID/唯一 ID 前缀执行 `capslock resume <session-id>`。
+直接运行 `capslock` 会进入新会话；原有的 `capslock chat` 仍然可用。输入 `/exit` 或 `/quit` 结束会话；退出时不会保留完全为空的会话。会话标题默认取首个问题，也可在聊天中执行 `/rename 新标题` 修改。会话和执行轨迹保存在工作区的 `.capslock/state/capslock.sqlite3`，可用 `capslock sessions` 查看。执行 `capslock resume` 后可根据标题用方向键选择会话，也可继续通过完整 ID/唯一 ID 前缀执行 `capslock resume <session-id>`。
 
 历史会话可通过完整 ID 或列表中显示的唯一 ID 前缀重命名：
 
@@ -74,7 +74,21 @@ capslock sessions rename a14c92ef "修复登录接口超时"
 /memory export workspace memories.json
 ```
 
-模型可在相关任务中调用只读记忆检索工具，但 1.4.1 不自动提取或自动注入记忆。`forget` 可撤销；`purge` 会在二次确认后永久移除正文、索引和历史版本。导入导出仅允许工作区内的 JSON 路径。
+模型可在相关任务中调用只读记忆检索工具，但 1.5.0 不自动提取或自动注入记忆。`forget` 可撤销；`purge` 会在二次确认后永久移除正文、索引和历史版本。导入导出仅允许工作区内的 JSON 路径。
+
+### 本地 Skill
+
+工作区 Skill 放在 `.capslock/skills/<name>/`，用户级 Skill 放在 `${CAPSLOCK_HOME:-~/.capslock}/skills/`。同名工作区包覆盖用户包；Skill 只会由用户显式运行：
+
+```text
+/skills list
+/skills validate workspace-summary
+/skills show workspace-summary
+/skills run workspace-summary root=.
+/skills disable workspace-summary
+```
+
+每个包由 `skill.toml`、`instructions.md`、JSON 输入/输出 schema 和可选 fixtures 组成。缺少的必填输入会在运行前逐项询问，模型输出必须是符合 schema 的 JSON object。可将 `examples/skills/workspace-summary/` 复制到 `.capslock/skills/` 作为起点。Skill 文件可以由 Agent 提出修改，但三种权限模式下都必须逐次人工确认。
 
 无充分本地证据时，Agent 会明确说明信息不足。一次性提问可使用：
 
@@ -84,18 +98,27 @@ capslock ask "公司总部在哪里？"
 
 ## 配置与边界
 
-环境变量优先于项目根目录的 `capslock.toml`。支持 `CAPSLOCK_API_KEY`、`CAPSLOCK_BASE_URL`、`CAPSLOCK_MODEL`、`CAPSLOCK_TIMEOUT_SECONDS` 和 `CAPSLOCK_MAX_TURNS`；为兼容现有使用方式，`DEEPSEEK_*` 变量仍然有效。
+环境变量优先于 `.capslock/config.toml`。支持 `CAPSLOCK_API_KEY`、`CAPSLOCK_BASE_URL`、`CAPSLOCK_MODEL`、`CAPSLOCK_TIMEOUT_SECONDS` 和 `CAPSLOCK_MAX_TURNS`；为兼容现有使用方式，`DEEPSEEK_*` 变量仍然有效。
 
-需要项目级配置时，可复制 `capslock.toml.example` 为 `capslock.toml`；不要把 API key 写入该文件。
+需要项目级配置时，可运行 `mkdir -p .capslock && cp examples/capslock/config.toml .capslock/config.toml`；不要把 API key 写入该文件。项目 MCP 声明位于 `.capslock/mcp.json`，本机私有覆盖位于 `.capslock/local/mcp.json`。
 
-项目可用 `[memory] enabled=false` 禁止记忆变更；本机还可通过 `/memory disable` 关闭写入。项目禁令优先，两种禁用都不影响读取已有记忆。用户级记忆库默认遵循 Linux XDG/macOS Application Support 目录，也可用 shell 中的 `CAPSLOCK_MEMORY_DATABASE` 指定绝对路径，项目配置不能重定向该数据库。
+项目可用 `[memory] enabled=false` 禁止记忆变更；本机还可通过 `/memory disable` 关闭写入。项目禁令优先，两种禁用都不影响读取已有记忆。用户级记忆库默认为 `${CAPSLOCK_HOME:-~/.capslock}/state/memory.sqlite3`。`CAPSLOCK_HOME` 和 `CAPSLOCK_MEMORY_DATABASE` 只能在启动 shell 中设置且必须是绝对路径，项目 `.env` 不能重定向用户数据。
+
+v1.x 仍只读兼容 `capslock.toml`、`capslock.mcp.json`、`capslock.skills/`、旧 `.capslock` 运行路径及旧用户目录，并在使用时显示迁移提示；这些兼容路径计划在 v2.0 移除。迁移默认只预览，不加载模型或数据库：
+
+```bash
+capslock migrate-layout
+capslock migrate-layout --scope user
+capslock migrate-layout --scope all --apply --yes
+```
 
 Agent 可调用本地工作区、会话任务、固定命令、Web 研究与本地 stdio MCP 工具。Agent 在对话中提出外部请求后，CLI 会展示完整请求 ID、类型、脱敏载荷和摘要，并用编号菜单选择批准、拒绝或稍后处理。Web 请求获批完成后，Agent 会自动读取来源并继续回答。稍后也可通过 `/web`、`/approve <id>`、`/reject <id>` 处理，或用 `/sources` 回查不可信网页来源。Tavily 搜索需要在环境中设置 `CAPSLOCK_TAVILY_API_KEY`（也兼容 `TAVILY_API_KEY`）。v1.3 仅支持公开 `http/https` URL 和显式配置的 stdio MCP，拒绝私网 URL、远程 MCP、OAuth 与任意 Shell。
 
 ## 架构
 
 - `application/`：工作区资源装配与统一动作审批、执行和撤销流程。
-- `runtime.py` / `model.py`：模型循环、提供方无关协议、证据校验与运行状态。
+- `runtime.py` / `model.py`：模型循环、提供方无关协议、证据校验与普通/Skill 运行状态。
+- `skills/`：Skill manifest、schema/fixture 校验、双层注册表与运行快照检查。
 - `tooling/`：工具注册表，以及工作区/Git、任务/来源和动作适配器。
 - `storage/`：SQLite 连接、版本化迁移和领域 repositories。
 - `memory.py`：作用域、生命周期、脱敏、导入导出和模型访问隔离。
@@ -118,4 +141,4 @@ python scripts/check_repository.py
 
 测试不需要 API 密钥：它们使用模拟客户端验证工具循环、证据 ID、会话恢复、越界路径拒绝和只读工具结果。
 
-v1.4.1 的会话历史、数据库迁移和发布步骤见 [发布说明](docs/releases/v1.4.1.md)；记忆模型设计见 [v1.4.0 发布说明](docs/releases/v1.4.0.md)。
+v1.5.0 的 Skill 契约、数据库迁移和发布步骤见 [发布说明](docs/releases/v1.5.0.md)；记忆模型设计见 [v1.4.0 发布说明](docs/releases/v1.4.0.md)。

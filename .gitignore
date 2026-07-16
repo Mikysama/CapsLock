@@ -6,7 +6,16 @@
 
 .venv/
 .venv-*/
-.capslock/
+.capslock/state/
+.capslock/local/
+.capslock/capslock.sqlite3
+.capslock/events.jsonl
+.capslock/backups/
+.capslock/mcp.local.json
+.capslock/**/.migrate-*
+capslock.toml
+capslock.mcp.json
+capslock.skills/
 .agentbuild/
 
 __pycache__/

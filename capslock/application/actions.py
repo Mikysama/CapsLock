@@ -9,6 +9,7 @@ from ..config import CommandSettings, McpSettings, WebSettings
 from ..domain import ActionInfo, ActionStatus, ActionType, ChangeInfo, CommandInfo, ExternalActionInfo
 from ..execution import CommandService
 from ..external import WebService
+from ..layout import ProjectLayout
 from ..mcp import McpService
 from ..permissions import ApprovalPolicy, PermissionMode
 from ..policy import PolicyError, WorkspacePolicy
@@ -33,6 +34,7 @@ class ActionCoordinator:
         command: CommandSettings | None = None,
         web: WebSettings | None = None,
         mcp: McpSettings | None = None,
+        layout: ProjectLayout | None = None,
     ) -> None:
         self.store = store
         self.policy = policy
@@ -43,6 +45,7 @@ class ActionCoordinator:
         self.command_config = command or CommandSettings(120, 100_000)
         self.web_config = web or WebSettings(None, 20, 500_000, 3)
         self.mcp_config = mcp or McpSettings(30, 100_000)
+        self.layout = layout or ProjectLayout.discover(policy.root)
         self.approvals = ApprovalPolicy()
 
     def for_run(self, run_id: str) -> "ActionCoordinator":
@@ -56,6 +59,7 @@ class ActionCoordinator:
             command=self.command_config,
             web=self.web_config,
             mcp=self.mcp_config,
+            layout=self.layout,
         )
 
     def propose(self, action_type: ActionType, **payload: Any) -> ActionRecord:
@@ -105,6 +109,8 @@ class ActionCoordinator:
 
     def execute_auto_approved(self, action_id: str) -> ActionRecord:
         action = self.resolve(action_id)
+        if self._is_skill_change(action):
+            raise ValueError("project Skill changes require explicit approval")
         assessment = self.approvals.assess(action.type)
         self.event("risk_assessed", action=action.type.value, level=assessment.level, rollback=assessment.rollback)
         self.event("auto_approved", action=action.type.value, level=assessment.level)
@@ -150,11 +156,27 @@ class ActionCoordinator:
     def _apply_policy(self, action_type: ActionType, record: ActionRecord) -> ActionRecord:
         assessment = self.approvals.assess(action_type)
         self.event("risk_assessed", action=action_type.value, level=assessment.level, rollback=assessment.rollback)
-        if self.approvals.requires_approval(self.permission_mode, action_type):
+        if self._is_skill_change(record) or self.approvals.requires_approval(self.permission_mode, action_type):
             return record
         if self.permission_mode is PermissionMode.FULL_ACCESS:
             self.event("auto_approved", action=action_type.value, level=assessment.level)
         return self.approve_and_execute(record.id)
+
+    def _is_skill_change(self, record: ActionInfo | ActionRecord) -> bool:
+        if isinstance(record, ActionInfo):
+            action_type = record.type
+        elif isinstance(record, ChangeInfo):
+            action_type = ActionType.FILE_CREATE if record.operation == "create" else ActionType.FILE_EDIT
+        else:
+            return False
+        if action_type not in {ActionType.FILE_EDIT, ActionType.FILE_CREATE}:
+            return False
+        path = getattr(record, "path", None)
+        if path is None:
+            change = self.store.get_change(record.id, session_id=self.session_id)
+            path = change.path if change is not None else None
+        parts = path.split("/") if path is not None else []
+        return len(parts) >= 3 and tuple(parts[:2]) == (".capslock", "skills")
 
     def _changes(self, run_id: str | None = None) -> ChangeService:
         return ChangeService(self.store, self.policy, self.session_id, run_id or self.run_id, self.event)
@@ -169,7 +191,7 @@ class ActionCoordinator:
 
     def _mcp(self, run_id: str | None = None) -> McpService:
         config = self.mcp_config
-        return McpService(self.store, self.policy, self.session_id, run_id or self.run_id, self.event, timeout_seconds=config.mcp_timeout_seconds, output_limit_bytes=config.mcp_output_bytes)
+        return McpService(self.store, self.policy, self.session_id, run_id or self.run_id, self.event, timeout_seconds=config.mcp_timeout_seconds, output_limit_bytes=config.mcp_output_bytes, layout=self.layout)
 
     def _external_service(self, action: ActionInfo) -> WebService | McpService:
         return self._mcp(action.run_id) if action.type in {ActionType.MCP_CONNECT, ActionType.MCP_CALL} else self._web(action.run_id)

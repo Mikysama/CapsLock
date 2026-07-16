@@ -51,7 +51,8 @@ def test_read_rejects_binary_and_oversized_files(tmp_path: Path) -> None:
 def test_dotenv_overrides_toml_and_example_is_not_loaded(tmp_path: Path, monkeypatch) -> None:
     clear_config_environment(monkeypatch)
     (tmp_path / ".env.example").write_text("CAPSLOCK_MODEL=example-model\n", encoding="utf-8")
-    (tmp_path / "capslock.toml").write_text("[model]\nmodel = 'toml-model'\nmax_turns = 3\n", encoding="utf-8")
+    (tmp_path / ".capslock").mkdir()
+    (tmp_path / ".capslock/config.toml").write_text("[model]\nmodel = 'toml-model'\nmax_turns = 3\n", encoding="utf-8")
 
     load_project_environment(tmp_path)
     assert Settings.load(tmp_path).model == "toml-model"

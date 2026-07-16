@@ -6,6 +6,9 @@ import os
 from pathlib import Path
 
 
+SHELL_ONLY_VARIABLES = {"CAPSLOCK_HOME", "CAPSLOCK_MEMORY_DATABASE"}
+
+
 def load_project_environment(directory: str | Path = ".") -> None:
     """Load .env without replacing shell-provided variables."""
     root = Path(directory)
@@ -19,7 +22,7 @@ def load_project_environment(directory: str | Path = ".") -> None:
             continue
         name, value = line.split("=", 1)
         name, value = name.strip(), _unquote(value.strip())
-        if name and name not in shell_variables:
+        if name and name not in shell_variables and name not in SHELL_ONLY_VARIABLES:
             os.environ[name] = value
 
 

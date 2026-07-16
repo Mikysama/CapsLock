@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import sys
 import tempfile
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -13,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .domain import MemoryInfo, MemoryScope, MemoryType
+from .layout import UserLayout
 from .policy import PolicyError, WorkspacePolicy
 from .security import sanitize_memory_text
 from .storage.memory import MemoryStore, workspace_key
@@ -26,16 +26,7 @@ EXPORT_VERSION = 1
 
 
 def default_memory_database() -> Path:
-    override = os.environ.get("CAPSLOCK_MEMORY_DATABASE")
-    if override:
-        path = Path(override).expanduser()
-        if not path.is_absolute():
-            raise ValueError("CAPSLOCK_MEMORY_DATABASE must be an absolute path")
-        return path
-    if sys.platform == "darwin":
-        return Path.home() / "Library" / "Application Support" / "CapsLock" / "memory.sqlite3"
-    data_home = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
-    return data_home / "capslock" / "memory.sqlite3"
+    return UserLayout.from_environment().memory
 
 
 class MemoryService:

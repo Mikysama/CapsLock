@@ -24,7 +24,9 @@ def forbidden_reason(path: PurePosixPath) -> str | None:
         return "environment file"
     if name.endswith((".swp", ".swo")) or name == ".DS_Store":
         return "editor or operating-system artifact"
-    if ".capslock" in parts or any(part == ".venv" or part.startswith(".venv-") for part in parts):
+    if ".capslock" in parts and not allowed_capslock_path(path):
+        return "private, runtime, or unsupported .capslock content"
+    if any(part == ".venv" or part.startswith(".venv-") for part in parts):
         return "runtime or virtual-environment state"
     if parts.intersection({"__pycache__", ".pytest_cache", ".ruff_cache", "build", "dist", "htmlcov"}):
         return "cache or build output"
@@ -33,6 +35,16 @@ def forbidden_reason(path: PurePosixPath) -> str | None:
     if name in {".coverage", "coverage.xml"}:
         return "coverage output"
     return None
+
+
+def allowed_capslock_path(path: PurePosixPath) -> bool:
+    if path in {PurePosixPath(".capslock/config.toml"), PurePosixPath(".capslock/mcp.json")}:
+        return True
+    return (
+        len(path.parts) >= 3
+        and path.parts[:2] == (".capslock", "skills")
+        and not any(part.startswith(".migrate-") for part in path.parts)
+    )
 
 
 def main() -> int:

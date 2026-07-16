@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .domain import ChangeInfo, CommandInfo, ExternalActionInfo, SessionInfo, SourceInfo, TaskInfo
-from .storage import ActionRepository, Database, RunRepository, SessionRepository, SettingsRepository, SourceRepository, TaskRepository
+from .domain import ChangeInfo, CommandInfo, ExternalActionInfo, SessionInfo, SkillRunInfo, SourceInfo, TaskInfo
+from .storage import ActionRepository, Database, RunRepository, SessionRepository, SettingsRepository, SkillRepository, SourceRepository, TaskRepository
 from .storage.repositories import Repository
 
 
-class SessionStore(SessionRepository, RunRepository, ActionRepository, TaskRepository, SettingsRepository, SourceRepository):
+class SessionStore(SessionRepository, RunRepository, ActionRepository, TaskRepository, SettingsRepository, SourceRepository, SkillRepository):
     """Workspace persistence facade retained for the public runtime API."""
 
     def __init__(self, database: str | Path) -> None:
@@ -34,6 +34,7 @@ __all__ = [
     "ExternalActionInfo",
     "SessionInfo",
     "SessionStore",
+    "SkillRunInfo",
     "SourceInfo",
     "TaskInfo",
 ]

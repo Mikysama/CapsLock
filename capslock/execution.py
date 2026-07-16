@@ -62,9 +62,7 @@ class CommandService:
         executable = template.argv[0] if Path(template.argv[0]).is_file() else shutil.which(template.argv[0])
         if executable is None:
             raise ValueError(f"required executable is unavailable: {template.argv[0]}")
-        directory = self.policy.resolve(cwd)
-        if not directory.is_dir() or any(part in {".git", ".capslock"} for part in directory.relative_to(self.policy.root).parts):
-            raise PolicyError("command cwd must be a normal workspace directory")
+        directory = self.policy.command_directory(cwd)
         argv = list(template.argv)
         if target is not None:
             if not template.supports_target:

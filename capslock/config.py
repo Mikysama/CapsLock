@@ -7,6 +7,8 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
+from .layout import ProjectLayout
+
 
 @dataclass(frozen=True)
 class ModelSettings:
@@ -67,9 +69,10 @@ class Settings:
         raise AttributeError(name)
 
     @classmethod
-    def load(cls, workspace: Path) -> "Settings":
+    def load(cls, workspace: Path, *, layout: ProjectLayout | None = None) -> "Settings":
+        layout = layout or ProjectLayout.discover(workspace)
         document: dict[str, object] = {}
-        config = workspace / "capslock.toml"
+        config = layout.config
         if config.is_file():
             document = tomllib.loads(config.read_text(encoding="utf-8"))
         values = document.get("model", {})
@@ -116,7 +119,7 @@ class Settings:
             permission_mode=str(value("CAPSLOCK_PERMISSION_MODE", "approve_for_me")),
             memory=MemorySettings(
                 project_write_enabled=_boolean(memory_values.get("enabled", True)),
-                database=_memory_database(),
+                database=layout.user.memory,
             ),
         )
 
@@ -130,9 +133,3 @@ def _boolean(value: object) -> bool:
     if normalized in {"false", "0", "no", "off"}:
         return False
     raise ValueError("memory.enabled must be true or false")
-
-
-def _memory_database() -> Path:
-    from .memory import default_memory_database
-
-    return default_memory_database()

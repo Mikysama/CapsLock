@@ -20,6 +20,7 @@ def clear_config_environment(monkeypatch) -> None:
         "CAPSLOCK_TAVILY_API_KEY",
         "TAVILY_API_KEY",
         "CAPSLOCK_MEMORY_DATABASE",
+        "CAPSLOCK_SKILLS_DIRECTORY",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -37,18 +38,18 @@ def test_help_and_version_do_not_load_workspace_environment(monkeypatch, capsys)
     with pytest.raises(SystemExit) as version_exit:
         cli.main(["--version"])
     assert version_exit.value.code == 0
-    assert capsys.readouterr().out.strip() == "capslock 1.4.1"
+    assert capsys.readouterr().out.strip() == "capslock 1.5.0"
 
 
 def test_bare_cli_starts_chat_and_explicit_chat_remains_supported(tmp_path: Path, monkeypatch) -> None:
     started = []
 
     @contextmanager
-    def create_application(workspace, settings, session_id=None):
+    def create_application(workspace, settings, session_id=None, *, layout=None):
         yield SimpleNamespace(agent=object())
 
     monkeypatch.setattr(cli, "load_project_environment", lambda workspace: None)
-    monkeypatch.setattr(cli.Settings, "load", lambda workspace: object())
+    monkeypatch.setattr(cli.Settings, "load", lambda workspace, *, layout=None: object())
     monkeypatch.setattr(cli, "create_application", create_application)
     monkeypatch.setattr(cli, "run_chat", lambda context, debug: started.append(debug) or 0)
 
@@ -67,7 +68,7 @@ def test_cli_loads_environment_from_selected_workspace(tmp_path: Path, monkeypat
     (workspace / ".env").write_text("CAPSLOCK_MODEL=workspace-model\n", encoding="utf-8")
     observed = {}
 
-    def doctor(console, selected_workspace, settings):
+    def doctor(console, selected_workspace, settings, *, layout=None):
         observed["workspace"] = selected_workspace
         observed["model"] = settings.model
         return 0
@@ -104,12 +105,12 @@ def test_resume_accepts_unique_session_id_prefix(tmp_path: Path, monkeypatch) ->
     resumed = []
 
     @contextmanager
-    def create_application(workspace, settings, session_id=None):
+    def create_application(workspace, settings, session_id=None, *, layout=None):
         resumed.append(session_id)
         yield SimpleNamespace(agent=object())
 
     monkeypatch.setattr(cli, "load_project_environment", lambda workspace: None)
-    monkeypatch.setattr(cli.Settings, "load", lambda workspace: object())
+    monkeypatch.setattr(cli.Settings, "load", lambda workspace, *, layout=None: object())
     monkeypatch.setattr(cli, "create_application", create_application)
     monkeypatch.setattr(cli, "run_chat", lambda context, debug: 0)
 

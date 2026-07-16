@@ -67,6 +67,34 @@ class ToolRegistry:
     def schemas(self) -> list[dict[str, object]]:
         return [tool.schema() for tool in self._tools.values()]
 
+    @property
+    def names(self) -> set[str]:
+        return set(self._tools)
+
+    def subset(
+        self,
+        names: set[str],
+        *,
+        guard: Callable[[str, RunContext, dict[str, Any]], None] | None = None,
+    ) -> "ToolRegistry":
+        missing = sorted(names - self.names)
+        if missing:
+            raise ValueError(f"unsupported tools: {', '.join(missing)}")
+        tools: list[Tool] = []
+        for name, tool in self._tools.items():
+            if name not in names:
+                continue
+            if guard is None:
+                tools.append(tool)
+                continue
+
+            def execute(context: RunContext, arguments: dict[str, Any], *, _tool: Tool = tool) -> ToolResult:
+                guard(_tool.name, context, arguments)
+                return _tool.execute(context, arguments)
+
+            tools.append(Tool(tool.name, tool.description, tool.parameters, execute))
+        return ToolRegistry(tools)
+
     def invoke(self, name: str, context: RunContext, arguments: dict[str, Any]) -> tuple[ToolResult, int]:
         tool = self._tools.get(name)
         if tool is None:

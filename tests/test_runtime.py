@@ -112,3 +112,20 @@ def test_internal_model_protocol_and_events_are_scoped_per_run(tmp_path: Path) -
     assert [event.kind for event in first.events] == ["run_started"]
     assert [event.kind for event in second.events] == ["run_started"]
     assert first.events[0].data["run_id"] != second.events[0].data["run_id"]
+
+
+def test_runtime_records_unexpected_model_failure(tmp_path: Path) -> None:
+    class FailingModel:
+        def complete(self, **kwargs):
+            raise RuntimeError("model failed")
+
+    store = SessionStore(tmp_path / "state.sqlite3")
+    agent = WorkspaceAgent(FailingModel(), workspace=tmp_path, model="test", store=store)
+
+    with pytest.raises(RuntimeError, match="model failed"):
+        agent.ask("question")
+
+    row = store._connection.execute(
+        "SELECT status,error FROM runs WHERE session_id=?", (agent.session_id,)
+    ).fetchone()
+    assert row["status"] == "failed" and row["error"] == "model failed"

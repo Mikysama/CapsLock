@@ -451,6 +451,11 @@ def render_doctor(
     console: Console,
     *,
     workspace: object,
+    layout_mode: str,
+    config: object,
+    project_mcp: object,
+    skills: object,
+    layout_warnings: tuple[str, ...],
     database: object,
     model: str,
     endpoint: str,
@@ -463,6 +468,10 @@ def render_doctor(
 ) -> None:
     output = table("Check", "Result")
     output.add_row("Workspace", Text(str(workspace), style="path"))
+    output.add_row("Layout", Text(layout_mode, style="warning" if layout_mode != "new" else "success"))
+    output.add_row("Project config", Text(str(config), style="path"))
+    output.add_row("Project MCP", Text(str(project_mcp), style="path"))
+    output.add_row("Project Skills", Text(str(skills), style="path"))
     output.add_row("SQLite", Text(str(database), style="path"))
     output.add_row("Model", Text(model, style="text.secondary"))
     output.add_row("Endpoint", Text(endpoint, style="path"))
@@ -479,6 +488,10 @@ def render_doctor(
         output.add_row("Memory SQLite", Text(str(memory_database), style="path"))
         output.add_row("Memory FTS5", Text("available" if memory_fts else "missing", style="success" if memory_fts else "error"))
         output.add_row("Memory writes", Text("enabled" if memory_write_enabled else "disabled", style="success" if memory_write_enabled else "warning"))
+    output.add_row(
+        "Layout warnings",
+        Text("; ".join(layout_warnings) if layout_warnings else "none", style="warning" if layout_warnings else "success"),
+    )
     console.print(output)
 
 

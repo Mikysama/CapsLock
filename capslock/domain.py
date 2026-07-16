@@ -184,6 +184,24 @@ class SourceInfo:
 
 
 @dataclass(frozen=True)
+class SkillRunInfo:
+    run_id: str
+    session_id: str
+    name: str
+    version: str
+    scope: str
+    manifest_digest: str
+    required_tools: tuple[str, ...]
+    required_permissions: tuple[str, ...]
+    status: str
+    input: dict[str, Any]
+    output: dict[str, Any] | None
+    created_at: str
+    finished_at: str | None = None
+    error: str | None = None
+
+
+@dataclass(frozen=True)
 class MemoryInfo:
     id: str
     content: str | None

@@ -1,4 +1,4 @@
-# Copy to capslock.toml in the workspace when project-specific settings are needed.
+# Copy to .capslock/config.toml when project-specific settings are needed.
 [model]
 # api_key is intentionally omitted: use CAPSLOCK_API_KEY or DEEPSEEK_API_KEY.
 base_url = "https://api.deepseek.com"

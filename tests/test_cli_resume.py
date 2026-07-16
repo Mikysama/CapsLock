@@ -95,12 +95,12 @@ def test_bare_resume_uses_interactive_session_selection(tmp_path, monkeypatch) -
         return second.id
 
     @contextmanager
-    def create_application(workspace, settings, session_id=None):
+    def create_application(workspace, settings, session_id=None, *, layout=None):
         resumed.append(session_id)
         yield SimpleNamespace(agent=object())
 
     monkeypatch.setattr(cli, "load_project_environment", lambda workspace: None)
-    monkeypatch.setattr(cli.Settings, "load", lambda workspace: object())
+    monkeypatch.setattr(cli.Settings, "load", lambda workspace, *, layout=None: object())
     monkeypatch.setattr(cli, "select_saved_session", select_saved_session)
     monkeypatch.setattr(cli, "create_application", create_application)
     monkeypatch.setattr(cli, "run_chat", lambda context, debug: 0)
@@ -114,7 +114,7 @@ def test_bare_resume_uses_interactive_session_selection(tmp_path, monkeypatch) -
 def test_bare_resume_with_no_sessions_exits_without_creating_one(tmp_path, monkeypatch) -> None:
     terminal = make_console(width=100, color_system=None, force_terminal=False, record=True)
     monkeypatch.setattr(cli, "load_project_environment", lambda workspace: None)
-    monkeypatch.setattr(cli.Settings, "load", lambda workspace: object())
+    monkeypatch.setattr(cli.Settings, "load", lambda workspace, *, layout=None: object())
 
     assert cli.main(["--workspace", str(tmp_path), "resume"], console=terminal) == 0
     assert "No saved sessions in this workspace" in terminal.export_text()

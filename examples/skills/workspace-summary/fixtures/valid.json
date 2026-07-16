@@ -1,0 +1,8 @@
+{
+  "input": {"root": "."},
+  "output": {
+    "summary": "A local workspace.",
+    "important_files": ["README.md"],
+    "risks": []
+  }
+}

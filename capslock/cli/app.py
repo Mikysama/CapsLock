@@ -12,11 +12,13 @@ from .. import __version__
 from ..application.app import WorkspaceApplication
 from ..config import Settings
 from ..environment import load_project_environment
+from ..layout import LayoutConflict, ProjectLayout
 from ..runtime import AgentRuntimeError
 from ..theme import make_console
 from .chat import run_chat
 from .context import CliContext
 from .diagnostics import doctor, open_store, rename_saved_session, render_sessions, select_saved_session
+from .migration import run_layout_migration
 from .render import render_answer
 
 
@@ -45,6 +47,13 @@ def build_parser() -> argparse.ArgumentParser:
     rename.add_argument("session_id", help="Full session ID or a unique prefix")
     rename.add_argument("title", nargs="+", help="New session title")
     subparsers.add_parser("doctor", help="Check local configuration and workspace access")
+    migrate = subparsers.add_parser("migrate-layout", help="Preview or apply the .capslock layout migration")
+    migrate.add_argument("--scope", choices=("workspace", "user", "all"), default="workspace")
+    mode = migrate.add_mutually_exclusive_group()
+    mode.add_argument("--dry-run", dest="apply", action="store_false", help="Preview without changing files (default)")
+    mode.add_argument("--apply", dest="apply", action="store_true", help="Copy, verify, and remove legacy sources")
+    migrate.set_defaults(apply=False)
+    migrate.add_argument("--yes", action="store_true", help="Confirm apply without an interactive prompt")
     return parser
 
 
@@ -64,12 +73,15 @@ def create_application(
     workspace: Path,
     settings: Settings,
     session_id: str | None = None,
+    *,
+    layout: ProjectLayout | None = None,
 ) -> WorkspaceApplication:
     return WorkspaceApplication(
         workspace=workspace,
         settings=settings,
         client=create_client(settings),
         session_id=session_id,
+        layout=layout,
     )
 
 
@@ -80,19 +92,30 @@ def main(argv: list[str] | None = None, *, console: Console | None = None) -> in
     if not workspace.is_dir():
         output.print(f"[error]Error:[/] [path]{workspace}[/]")
         return 2
-    load_project_environment(workspace)
-    settings = Settings.load(workspace)
     try:
+        layout = ProjectLayout.discover(workspace)
+        if args.command == "migrate-layout":
+            return run_layout_migration(
+                output,
+                layout,
+                scope=args.scope,
+                apply=args.apply,
+                yes=args.yes,
+            )
+        load_project_environment(workspace)
+        settings = Settings.load(workspace, layout=layout)
+        for warning in layout.warnings:
+            output.print(f"[warning]Warning:[/] {warning}")
         if args.command == "doctor":
-            return doctor(output, workspace, settings)
+            return doctor(output, workspace, settings, layout=layout)
         if args.command == "sessions":
-            with open_store(workspace) as store:
+            with open_store(workspace, layout=layout) as store:
                 if args.sessions_command == "rename":
                     return rename_saved_session(output, store, args.session_id, " ".join(args.title))
                 return render_sessions(output, store, args.limit)
         session_id = getattr(args, "session_id", None)
         if args.command == "resume":
-            with open_store(workspace) as store:
+            with open_store(workspace, layout=layout) as store:
                 if session_id is None:
                     session_id = select_saved_session(output, store, args.limit)
                     if session_id is None:
@@ -102,7 +125,7 @@ def main(argv: list[str] | None = None, *, console: Console | None = None) -> in
                     if session is None:
                         raise AgentRuntimeError(f"session does not exist: {session_id}")
                     session_id = session.id
-        with create_application(workspace, settings, session_id) as application:
+        with create_application(workspace, settings, session_id, layout=layout) as application:
             context = CliContext(output, application.agent)
             if args.command == "ask":
                 with output.status("[running.bold]Agent is analyzing the workspace...[/]"):
@@ -113,7 +136,10 @@ def main(argv: list[str] | None = None, *, console: Console | None = None) -> in
     except KeyboardInterrupt:
         output.print("\n[warning]Cancelled.[/]")
         return 130
-    except AgentRuntimeError as exc:
+    except LayoutConflict as exc:
+        output.print(f"[error]Layout conflict:[/] {exc}")
+        return 2
+    except (AgentRuntimeError, ValueError) as exc:
         output.print(f"[error]Error:[/] {exc}")
         return 2
     except Exception as exc:

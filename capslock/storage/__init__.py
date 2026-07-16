@@ -7,6 +7,7 @@ from .repositories import (
     RunRepository,
     SessionRepository,
     SettingsRepository,
+    SkillRepository,
     SourceRepository,
     TaskRepository,
 )
@@ -18,6 +19,7 @@ __all__ = [
     "RunRepository",
     "SessionRepository",
     "SettingsRepository",
+    "SkillRepository",
     "SourceRepository",
     "TaskRepository",
     "workspace_key",

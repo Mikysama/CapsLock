@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .external import ExternalActionService
+from .layout import ProjectLayout
 from .policy import PolicyError, WorkspacePolicy
 from .session import ExternalActionInfo, SessionStore
 
@@ -28,16 +29,17 @@ class McpServer:
 
 
 class McpRegistry:
-    def __init__(self, policy: WorkspacePolicy) -> None:
+    def __init__(self, policy: WorkspacePolicy, *, layout: ProjectLayout | None = None) -> None:
         self.policy = policy
+        self.layout = layout or ProjectLayout.discover(policy.root)
 
     @property
     def project_path(self) -> Path:
-        return self.policy.root / "capslock.mcp.json"
+        return self.layout.project_mcp
 
     @property
     def local_path(self) -> Path:
-        return self.policy.root / ".capslock" / "mcp.local.json"
+        return self.layout.local_mcp
 
     def servers(self) -> dict[str, McpServer]:
         project = self._load(self.project_path, private=False)
@@ -80,7 +82,7 @@ class McpRegistry:
             raise ValueError(f"MCP server {name} requires command and string args")
         if not isinstance(cwd, str) or not isinstance(allowed, list) or not all(isinstance(tool, str) for tool in allowed):
             raise ValueError(f"MCP server {name} has invalid cwd or allowed_tools")
-        self.policy.resolve(cwd)
+        self.policy.command_directory(cwd)
         project_allowed = project.get("allowed_tools") if project else None
         local_allowed = local.get("allowed_tools") if local else None
         if project_allowed is not None and local_allowed is not None:
@@ -92,10 +94,10 @@ class McpRegistry:
 
 
 class McpService:
-    def __init__(self, store: SessionStore, policy: WorkspacePolicy, session_id: str, run_id: str, emit, *, timeout_seconds: float = 30, output_limit_bytes: int = 100_000) -> None:
+    def __init__(self, store: SessionStore, policy: WorkspacePolicy, session_id: str, run_id: str, emit, *, timeout_seconds: float = 30, output_limit_bytes: int = 100_000, layout: ProjectLayout | None = None) -> None:
         self.store, self.policy, self.session_id, self.run_id, self.emit = store, policy, session_id, run_id, emit
         self.timeout_seconds, self.output_limit_bytes = timeout_seconds, output_limit_bytes
-        self.registry = McpRegistry(policy)
+        self.registry = McpRegistry(policy, layout=layout)
         self.actions = ExternalActionService(store, session_id, run_id, emit)
 
     def propose_connect(self, server: str) -> ExternalActionInfo:
@@ -132,7 +134,7 @@ class McpService:
             raise RuntimeError("MCP support requires the 'mcp' package; reinstall CapsLock dependencies") from exc
         server = self.registry.get(str(action.payload["server"]))
         env = {"PATH": os.environ.get("PATH", ""), **server.env}
-        params = StdioServerParameters(command=server.command, args=list(server.args), env=env, cwd=str(self.policy.resolve(server.cwd)))
+        params = StdioServerParameters(command=server.command, args=list(server.args), env=env, cwd=str(self.policy.command_directory(server.cwd)))
         async with asyncio.timeout(self.timeout_seconds):
             async with stdio_client(params) as (read, write):
                 async with ClientSession(read, write) as session:
