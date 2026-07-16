@@ -5,6 +5,7 @@ from __future__ import annotations
 from .actions import apply_change, discard_change, discard_command, propose_command, propose_file_create, propose_file_edit, propose_mcp_call, propose_mcp_connect, propose_web_fetch, propose_web_search, run_command
 from .core import Tool, ToolRegistry
 from .memory import get_memory, search_memories
+from .skills import load_skill, read_skill_resource
 from .tasks import list_external_sources, task_list_update, task_status_update
 from .workspace import git_diff, git_status, list_files, read_file, search_files
 
@@ -22,6 +23,8 @@ def workspace_tools() -> ToolRegistry:
         Tool("list_external_sources", "List the session's untrusted external Web sources for citation and review.", {"type": "object", "properties": {}, "additionalProperties": False}, list_external_sources),
         Tool("search_memories", "Search user-managed memories visible to this workspace and session. Read-only; use only when relevant.", {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 20}}, "required": ["query"], "additionalProperties": False}, search_memories),
         Tool("get_memory", "Read one visible user-managed memory by ID. Read-only.", {"type": "object", "properties": {"memory_id": {"type": "string"}}, "required": ["memory_id"], "additionalProperties": False}, get_memory),
+        Tool("load_skill", "Load one enabled Skill's instructions and resource catalog when its description matches the user's task.", {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"], "additionalProperties": False}, load_skill),
+        Tool("read_skill_resource", "Read a UTF-8 text resource from a Skill that was already loaded in this run.", {"type": "object", "properties": {"name": {"type": "string"}, "path": {"type": "string"}, "start_line": {"type": "integer"}, "end_line": {"type": "integer"}}, "required": ["name", "path"], "additionalProperties": False}, read_skill_resource),
         Tool("propose_file_edit", "Propose one exact text replacement. This never writes a file; the user must approve before application.", {"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}, "summary": {"type": "string"}}, "required": ["path", "old_text", "new_text"], "additionalProperties": False}, propose_file_edit),
         Tool("propose_file_create", "Propose creation of one text file. This never writes a file; the user must approve before application.", {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}, "summary": {"type": "string"}}, "required": ["path", "content"], "additionalProperties": False}, propose_file_create),
         Tool("apply_change", "Apply an already user-approved change proposal. Never call this before approval.", {"type": "object", "properties": {"change_id": {"type": "string"}}, "required": ["change_id"], "additionalProperties": False}, apply_change),

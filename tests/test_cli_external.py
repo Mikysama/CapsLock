@@ -107,7 +107,7 @@ def test_chat_exit_deletes_completely_empty_session(tmp_path, monkeypatch, comma
         workspace=tmp_path,
     )
     input_session = SimpleNamespace(prompt=lambda *args, **kwargs: command)
-    monkeypatch.setattr(chat, "prompt_session", lambda: input_session)
+    monkeypatch.setattr(chat, "prompt_session", lambda skill_provider=None: input_session)
 
     assert chat.run_chat(CliContext(make_console(), agent), False) == 0
     assert store.get(session.id) is None
@@ -129,7 +129,11 @@ def test_chat_input_exit_deletes_completely_empty_session(tmp_path, monkeypatch,
     def stop_prompt(*args, **kwargs):
         raise exception
 
-    monkeypatch.setattr(chat, "prompt_session", lambda: SimpleNamespace(prompt=stop_prompt))
+    monkeypatch.setattr(
+        chat,
+        "prompt_session",
+        lambda skill_provider=None: SimpleNamespace(prompt=stop_prompt),
+    )
 
     assert chat.run_chat(CliContext(make_console(), agent), False) == 0
     assert store.get(session.id) is None
@@ -161,7 +165,7 @@ def test_chat_exit_preserves_session_with_session_memory(tmp_path, monkeypatch) 
         workspace=tmp_path,
     )
     input_session = SimpleNamespace(prompt=lambda *args, **kwargs: "/exit")
-    monkeypatch.setattr(chat, "prompt_session", lambda: input_session)
+    monkeypatch.setattr(chat, "prompt_session", lambda skill_provider=None: input_session)
 
     assert chat.run_chat(CliContext(make_console(), agent), False) == 0
     assert store.get(session.id) is not None

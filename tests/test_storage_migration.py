@@ -68,7 +68,7 @@ def test_legacy_actions_migrate_with_backup_and_normalized_statuses(tmp_path: Pa
         assert command.result_kind is ActionResultKind.NONZERO_EXIT
         assert external.status is ActionStatus.COMPLETED
         assert external.result_kind is ActionResultKind.SUCCESS
-        assert store._connection.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert store._connection.execute("PRAGMA user_version").fetchone()[0] == 5
         assert "run_id" in {row[1] for row in store._connection.execute("PRAGMA table_info(messages)")}
         assert store._connection.execute("SELECT count(*) FROM actions").fetchone()[0] == 3
 
@@ -114,7 +114,7 @@ def test_schema_v1_adds_run_ids_with_one_backup(tmp_path: Path) -> None:
         columns = {row[1] for row in store._connection.execute("PRAGMA table_info(messages)")}
         assert "run_id" in columns
         assert store.messages("s") == [{"role": "user", "content": "kept"}]
-        assert store._connection.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert store._connection.execute("PRAGMA user_version").fetchone()[0] == 5
 
     backups = list((tmp_path / "backups").glob("capslock-schema-v1-*.sqlite3"))
     assert len(backups) == 1
@@ -163,12 +163,12 @@ def test_schema_v2_backfills_titles_from_first_question(tmp_path: Path) -> None:
         assert asked.title_updated_at == "2026-01-01T10:01:00+00:00"
         assert empty is not None and empty.title == "New session - 2026-01-02 11:30"
         assert empty.title_source is SessionTitleSource.PENDING
-        assert store._connection.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert store._connection.execute("PRAGMA user_version").fetchone()[0] == 5
 
     assert len(list((tmp_path / "backups").glob("capslock-schema-v2-*.sqlite3"))) == 1
 
 
-def test_schema_v3_adds_skill_audit_with_one_backup(tmp_path: Path) -> None:
+def test_schema_v3_adds_only_current_skill_settings_with_one_backup(tmp_path: Path) -> None:
     path = tmp_path / "capslock.sqlite3"
     connection = sqlite3.connect(path)
     connection.executescript("""
@@ -190,11 +190,50 @@ def test_schema_v3_adds_skill_audit_with_one_backup(tmp_path: Path) -> None:
                 "SELECT name FROM sqlite_master WHERE type='table'"
             )
         }
-        assert {"skill_runs", "skill_settings"} <= tables
-        assert store._connection.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert "skill_settings" in tables
+        assert "skill_runs" not in tables
+        assert store._connection.execute("PRAGMA user_version").fetchone()[0] == 5
 
     backups = list((tmp_path / "backups").glob("capslock-schema-v3-*.sqlite3"))
     assert len(backups) == 1
     with SessionStore(path):
         pass
     assert list((tmp_path / "backups").glob("capslock-schema-v3-*.sqlite3")) == backups
+
+
+def test_schema_v4_drops_legacy_skill_runs_but_preserves_settings_and_backup(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "capslock.sqlite3"
+    connection = sqlite3.connect(path)
+    connection.executescript("""
+        CREATE TABLE skill_runs (run_id TEXT PRIMARY KEY);
+        CREATE TABLE skill_settings (
+          name TEXT PRIMARY KEY, enabled INTEGER NOT NULL, updated_at TEXT NOT NULL
+        );
+        INSERT INTO skill_runs VALUES('old-run');
+        INSERT INTO skill_settings VALUES('demo', 0, '2026-07-15');
+        PRAGMA user_version = 4;
+    """)
+    connection.commit()
+    connection.close()
+
+    with SessionStore(path) as store:
+        tables = {
+            row[0]
+            for row in store._connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        assert "skill_runs" not in tables
+        assert "skill_settings" in tables
+        assert not store.skill_enabled("demo")
+        assert store._connection.execute("PRAGMA user_version").fetchone()[0] == 5
+
+    backups = list((tmp_path / "backups").glob("capslock-schema-v4-*.sqlite3"))
+    assert len(backups) == 1
+    backup = sqlite3.connect(backups[0])
+    try:
+        assert backup.execute("SELECT count(*) FROM skill_runs").fetchone()[0] == 1
+    finally:
+        backup.close()

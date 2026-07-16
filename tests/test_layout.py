@@ -14,7 +14,6 @@ from capslock.theme import make_console
 def user_layout(tmp_path: Path, *, override: Path | None = None) -> UserLayout:
     return UserLayout(
         tmp_path / "user-home",
-        tmp_path / "legacy-user" / "skills",
         tmp_path / "legacy-user" / "memory.sqlite3",
         override,
     )
@@ -111,9 +110,6 @@ def test_migration_dry_run_and_apply_preserve_files(tmp_path: Path) -> None:
     events = layout.root / "events.jsonl"
     database.write_bytes(b"sqlite-data")
     events.write_text('{"event":1}\n', encoding="utf-8")
-    skill = layout.legacy_skills / "demo"
-    skill.mkdir(parents=True)
-    skill.joinpath("instructions.md").write_text("instruction", encoding="utf-8")
     before = {database.name: digest(database), events.name: digest(events)}
 
     migrator = LayoutMigrator(layout)
@@ -124,17 +120,16 @@ def test_migration_dry_run_and_apply_preserve_files(tmp_path: Path) -> None:
 
     final = migrator.apply(plan)
 
-    assert not final.changes and not database.exists() and not layout.legacy_skills.exists()
+    assert not final.changes and not database.exists()
     assert digest(layout.root / "state/capslock.sqlite3") == before[database.name]
     assert digest(layout.root / "state/events.jsonl") == before[events.name]
-    assert (layout.skills / "demo/instructions.md").read_text(encoding="utf-8") == "instruction"
     assert not LayoutMigrator(layout).plan().changes
 
 
 def test_migration_merges_directories_and_recovers_identical_target(tmp_path: Path) -> None:
     layout = project_layout(tmp_path)
-    old = layout.legacy_skills
-    new = layout.skills
+    old = layout.root / "backups"
+    new = layout.root / "state/backups"
     old.joinpath("one").mkdir(parents=True)
     old.joinpath("one/a.md").write_text("same", encoding="utf-8")
     old.joinpath("two").mkdir()
@@ -145,7 +140,7 @@ def test_migration_merges_directories_and_recovers_identical_target(tmp_path: Pa
     new.joinpath("three/c.md").write_text("new-only", encoding="utf-8")
 
     migrator = LayoutMigrator(layout)
-    item = next(item for item in migrator.plan().items if item.kind == "project Skills")
+    item = next(item for item in migrator.plan().items if item.kind == "workspace backups")
     assert item.status == "merge"
 
     migrator.apply(migrator.plan())
@@ -157,10 +152,12 @@ def test_migration_merges_directories_and_recovers_identical_target(tmp_path: Pa
 
 def test_migration_conflict_or_symlink_has_zero_writes(tmp_path: Path) -> None:
     layout = project_layout(tmp_path)
-    layout.legacy_skills.joinpath("demo").mkdir(parents=True)
-    layout.legacy_skills.joinpath("demo/instructions.md").write_text("old", encoding="utf-8")
-    layout.skills.joinpath("demo").mkdir(parents=True)
-    layout.skills.joinpath("demo/instructions.md").write_text("new", encoding="utf-8")
+    legacy_backups = layout.root / "backups"
+    current_backups = layout.root / "state/backups"
+    legacy_backups.mkdir(parents=True)
+    legacy_backups.joinpath("state.txt").write_text("old", encoding="utf-8")
+    current_backups.mkdir(parents=True)
+    current_backups.joinpath("state.txt").write_text("new", encoding="utf-8")
     legacy_config = layout.workspace / "capslock.toml"
     legacy_config.write_text("config", encoding="utf-8")
 
@@ -170,26 +167,23 @@ def test_migration_conflict_or_symlink_has_zero_writes(tmp_path: Path) -> None:
         LayoutMigrator(layout).apply(plan)
     assert legacy_config.exists() and not (layout.root / "config.toml").exists()
 
-    layout.legacy_skills.joinpath("demo/instructions.md").unlink()
-    layout.legacy_skills.joinpath("demo/instructions.md").symlink_to(legacy_config)
+    legacy_backups.joinpath("state.txt").unlink()
+    legacy_backups.joinpath("state.txt").symlink_to(legacy_config)
     assert next(
-        item for item in LayoutMigrator(layout).plan().items if item.kind == "project Skills"
+        item for item in LayoutMigrator(layout).plan().items if item.kind == "workspace backups"
     ).status == "conflict"
 
 
-def test_user_and_all_scope_respect_explicit_memory_override(tmp_path: Path) -> None:
+def test_user_scope_respects_explicit_memory_override(tmp_path: Path) -> None:
     override = tmp_path / "external-memory.sqlite3"
     layout = project_layout(tmp_path, override=override)
-    layout.user.legacy_skills.joinpath("demo").mkdir(parents=True)
-    layout.user.legacy_skills.joinpath("demo/skill.toml").write_text("skill", encoding="utf-8")
     layout.user.legacy_memory.parent.mkdir(parents=True, exist_ok=True)
     layout.user.legacy_memory.write_bytes(b"memory")
 
     user_plan = LayoutMigrator(layout).plan("user")
 
-    assert {item.kind for item in user_plan.items} == {"user Skills"}
+    assert not user_plan.items
     LayoutMigrator(layout).apply(user_plan)
-    assert layout.user.skills.joinpath("demo/skill.toml").exists()
     assert layout.user.legacy_memory.exists()
     assert not layout.user.canonical_memory.exists()
 

@@ -455,6 +455,10 @@ def render_doctor(
     config: object,
     project_mcp: object,
     skills: object,
+    skill_count: int,
+    skill_catalog_bytes: int,
+    skill_catalog_truncated: bool,
+    invalid_skills: int,
     layout_warnings: tuple[str, ...],
     database: object,
     model: str,
@@ -472,6 +476,18 @@ def render_doctor(
     output.add_row("Project config", Text(str(config), style="path"))
     output.add_row("Project MCP", Text(str(project_mcp), style="path"))
     output.add_row("Project Skills", Text(str(skills), style="path"))
+    output.add_row(
+        "Skill catalog",
+        Text(
+            f"{skill_count} enabled · {skill_catalog_bytes}/16384 bytes"
+            + (" · descriptions truncated" if skill_catalog_truncated else ""),
+            style="warning" if skill_catalog_truncated else "success",
+        ),
+    )
+    output.add_row(
+        "Invalid Skills",
+        Text(str(invalid_skills), style="warning" if invalid_skills else "success"),
+    )
     output.add_row("SQLite", Text(str(database), style="path"))
     output.add_row("Model", Text(model, style="text.secondary"))
     output.add_row("Endpoint", Text(endpoint, style="path"))

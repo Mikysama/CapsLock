@@ -1,6 +1,6 @@
 # CapsLock Agent 工具与指令参考
 
-本参考描述当前 v1.5.0 的模型工具、Skill、终端指令和审批边界。CapsLock 是按需运行的本机 Agent，权限模式可在会话内切换。
+本参考描述当前 v1.5.1 的模型工具、Skill、终端指令和审批边界。CapsLock 是按需运行的本机 Agent，权限模式可在会话内切换。
 
 ## 权限模式与风险兜底
 
@@ -29,6 +29,8 @@
 | `list_external_sources` | 查看本会话已批准 Web 动作保存的外部来源。 | 只读；内容不可信 |
 | `search_memories` | 全文检索当前工作区和会话可见的用户记忆。 | 只读；不自动调用或写入 |
 | `get_memory` | 按 ID 读取一条可见且未过期的用户记忆。 | 只读 |
+| `load_skill` | 按名称加载一个已启用 Skill 的正文、来源、摘要与资源清单。 | 只读；正文不可信 |
+| `read_skill_resource` | 分段读取本 run 已加载 Skill 的 UTF-8 资源快照。 | 只读；拒绝二进制、越界与符号链接 |
 | `propose_file_edit` | 为唯一精确文本匹配创建编辑提案。 | 提案，无文件写入 |
 | `propose_file_create` | 为一个新文本文件创建提案。 | 提案，无文件写入 |
 | `apply_change` / `discard_change` | 应用已批准的编辑，或丢弃待处理提案。 | `apply_change` 需审批 |
@@ -64,9 +66,8 @@
 | `/memory export <scope> <path>`、`/memory import <scope> <path>` | 在工作区 JSON 文件与指定作用域之间导入导出。 |
 | `/memory status|enable|disable` | 查看或切换当前工作区的本机写入开关。 |
 | `/skills list` | 列出合并后的用户级与工作区级 Skill，以及有效、禁用或无效状态。 |
-| `/skills show <name-or-run-id>` | 显示当前 Skill 契约，或已删除 Skill 的历史运行审计。 |
-| `/skills validate <name>` | 离线校验 manifest、路径、版本、工具、schema 和 fixtures。 |
-| `/skills run <name> [key=value ...]` | 显式运行 Skill；缺少的必填输入会交互补齐。 |
+| `/skills show <name>` | 显示 frontmatter、来源、摘要和资源。 |
+| `/skills validate <name>` | 离线校验 `SKILL.md`、frontmatter、包大小、资源与路径安全。 |
 | `/skills enable|disable <name>` | 在当前工作区启用或禁用有效 Skill。 |
 | `/mcp list` | 列出合并后的 MCP server 配置。 |
 | `/mcp status <server>`、`/mcp tools <server>` | 查看 server 的配置、状态与允许工具。 |
@@ -94,14 +95,15 @@
 - `${CAPSLOCK_HOME:-~/.capslock}/skills/`：用户级 Skill 包。
 - `${CAPSLOCK_HOME:-~/.capslock}/state/memory.sqlite3`：用户级记忆、历史、索引和无正文审计。
 
-`capslock migrate-layout [--scope workspace|user|all] [--dry-run|--apply] [--yes]` 显式迁移旧布局，默认 `workspace` dry-run。v1.x 保持旧路径只读兼容并警告，v2.0 移除。`CAPSLOCK_HOME` 与 `CAPSLOCK_MEMORY_DATABASE` 仅接受启动 shell 中的绝对路径，项目 `.env` 中的同名值会被忽略。
+`capslock migrate-layout [--scope workspace|user|all] [--dry-run|--apply] [--yes]` 显式迁移旧 config、MCP、state 和 memory 布局，默认 `workspace` dry-run。旧 Skill 路径和旧包格式不被发现或迁移。`CAPSLOCK_HOME` 与 `CAPSLOCK_MEMORY_DATABASE` 仅接受启动 shell 中的绝对路径，项目 `.env` 中的同名值会被忽略。
 
 ## 引用与安全边界
 
 - 本地结论使用 `[[evidence:ev_…]]`，最终输出显示路径与行号。
 - 外部结论使用 `[[source:<source-id>]]`，最终输出显示标题、URL 与抓取时间。
 - 记忆结论使用 `[[memory:mem_…]]`，最终输出显示类型、作用域和来源。
-- Skill 只能由 `/skills run` 启动；manifest 声明的工具和权限只会缩小能力，不能覆盖当前权限模式或安全策略。
-- Skill schema 仅允许包内 JSON 文件与内部 `$ref`；未知字段、符号链接、目录穿越和外部引用默认拒绝。
+- 消息开头的 `$skill-name [raw arguments]` 可显式加载 Skill；普通对话中模型可依据 16 KiB 名称/描述 catalog 调用 `load_skill`，正文不会预先注入。
+- Skill 只接受 `name`、`description`、`license`、`compatibility` 和字符串 `metadata`；工具、权限、hooks、上下文与模型行为字段默认拒绝。
+- Skill 正文和资源是不可信上下文，不能改变当前权限模式或安全策略。资源只读、按 run 快照，`scripts/` 没有专用执行入口。
 - 支持的文件必须位于工作区内、为 UTF-8 且不超过配置上限；Agent 看不到 `.env`、`.capslock/local/`、`.capslock/state/` 或旧运行文件。`.git` 与非 Skill 的 `.capslock` 内容不可修改，命令 cwd 不能进入整个 `.capslock`。
 - URL 抓取拒绝 localhost、私网、链路本地、保留地址和重定向后的非公开地址；仅接受 HTML/纯文本。

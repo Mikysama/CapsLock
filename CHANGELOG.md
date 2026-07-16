@@ -4,25 +4,37 @@
 
 ## [Unreleased]
 
-## [1.5.0] - 2026-07-16
+## [1.5.1] - 2026-07-16
 
 ### Added
 
-- 新增声明式本地 Skill 包、用户/工作区双层注册表以及 `/skills list/show/validate/run/enable/disable` 显式工作流。
-- Skill 输入和输出使用 JSON Schema 2020-12 强制校验，并支持正向与预期失败 fixture 兼容检查。
-- 工作区 schema 升至 v4，保存脱敏的 Skill run 元数据、状态、声明能力和历史输出摘要。
+- 新增 Agent Skills 兼容的 `SKILL.md` 包、16 KiB 描述 catalog，以及模型只读工具 `load_skill` 和 `read_skill_resource`。
+- 新增消息开头的 `$skill-name [raw arguments]` 显式调用和交互式 `$` 补全。
+- 新增 `python -m capslock` 模块入口，与 `capslock` console script 行为一致。
 - 新增 `capslock migrate-layout`，支持 workspace/user/all 的无副作用预览、显式校验迁移和中断恢复。
 
 ### Changed
 
-- 项目配置、MCP、Skill 与运行状态统一收口到 `.capslock/`，用户级 Skill 和记忆统一收口到 `${CAPSLOCK_HOME:-~/.capslock}`；v1.x 继续只读兼容旧路径。
+- 项目配置、MCP、Skill 与运行状态统一收口到 `.capslock/`，用户级 Skill 和记忆统一收口到 `${CAPSLOCK_HOME:-~/.capslock}`。
+- Skill 正文按需加载到普通 run，使用普通文本与现有 citations；自动和显式调用均使用当前普通工具集与权限模式。
+- `/skills` 精简为 `list/show/validate/enable/disable`；工作区 schema 升至 v5，删除旧 `skill_runs`，仅保留当前禁用状态所需的 `skill_settings`。
+- 依赖由 `jsonschema` 和 `packaging` 改为安全解析 frontmatter 的 `PyYAML`。
+- 已安装旧版 editable/release 环境必须重新执行 `python -m pip install -e '.[dev]'`，否则会缺少 `yaml` 模块或继续显示旧版本元数据。
+
+### Removed
+
+- 删除旧 TOML/Schema Skill 包、`capslock.skills/` 与旧用户 Skill 目录的发现和布局迁移支持。
+- 删除旧 Skill run 领域类型、repository、CLI 历史查询和 SQLite 表；迁移前的 v4 数据库备份仍可用于人工恢复。
 
 ### Security
 
-- Skill 只能看到 manifest 声明的现有工具子集；限定命令模板和 MCP 工具在调用时再次校验。
-- Skill 指令不能覆盖系统安全指令、当前权限模式、工作区边界或动作审批；运行中禁用、删除或修改包会终止运行。
-- 拒绝未知 manifest 字段、越界/符号链接路径、外部 schema 引用、不兼容版本和未声明权限需求。
+- Skill 不能声明工具、权限、hooks、上下文模型或执行行为；这些 frontmatter 字段会被明确拒绝。
+- 拒绝重复或未知 frontmatter、越界/符号链接路径、二进制文本读取和超限包；资源在单次 run 内使用只读快照。
 - Agent 不可读取 `.env`、`.capslock/local/`、`.capslock/state/` 或旧运行文件；只有项目 Skill 可创建文件提案，且即使 `full_access` 也必须逐次确认。
+
+## [1.5.0] - 未发布，由 1.5.1 取代
+
+v1.5.0 的开发提交未创建 tag 或 GitHub Release。其 TOML、JSON Schema 和独立 Skill run 契约在公开发布前由 v1.5.1 的 `SKILL.md` 渐进加载契约取代。
 
 ## [1.4.1] - 2026-07-16
 

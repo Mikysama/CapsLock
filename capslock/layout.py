@@ -18,7 +18,6 @@ class LayoutConflict(RuntimeError):
 @dataclass(frozen=True)
 class UserLayout:
     home: Path
-    legacy_skills: Path
     legacy_memory: Path
     memory_override: Path | None = None
 
@@ -39,14 +38,12 @@ class UserLayout:
                 raise ValueError("CAPSLOCK_MEMORY_DATABASE must be an absolute path")
         if sys.platform == "darwin":
             application_support = Path.home() / "Library" / "Application Support"
-            legacy_skills = application_support / "capslock" / "skills"
             legacy_memory = application_support / "CapsLock" / "memory.sqlite3"
         else:
             data_home = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
             legacy_root = data_home / "capslock"
-            legacy_skills = legacy_root / "skills"
             legacy_memory = legacy_root / "memory.sqlite3"
-        return cls(home.resolve(), legacy_skills, legacy_memory, override)
+        return cls(home.resolve(), legacy_memory, override)
 
     @property
     def skills(self) -> Path:
@@ -106,10 +103,6 @@ class ProjectLayout:
         return path
 
     @property
-    def legacy_skills(self) -> Path:
-        return self.workspace / "capslock.skills"
-
-    @property
     def state_mode(self) -> str:
         new_paths = (self.root / "state" / "capslock.sqlite3", self.root / "state" / "events.jsonl", self.root / "state" / "backups")
         legacy_paths = (self.root / "capslock.sqlite3", self.root / "events.jsonl", self.root / "backups")
@@ -139,7 +132,6 @@ class ProjectLayout:
             for path in (
                 self.workspace / "capslock.toml",
                 self.workspace / "capslock.mcp.json",
-                self.legacy_skills,
                 self.root / "mcp.local.json",
                 self.root / "capslock.sqlite3",
                 self.root / "events.jsonl",
@@ -167,9 +159,7 @@ class ProjectLayout:
             warnings.append(
                 "legacy CapsLock paths are in use; run `capslock migrate-layout` to preview migration"
             )
-        if self.user.memory_override is None and (
-            self.user.legacy_memory.exists() or self.user.legacy_skills.exists()
-        ):
+        if self.user.memory_override is None and self.user.legacy_memory.exists():
             warnings.append(
                 "legacy user data paths are in use; run `capslock migrate-layout --scope user`"
             )
@@ -225,7 +215,6 @@ class LayoutMigrator:
                 (
                     (self.layout.workspace / "capslock.toml", root / "config.toml", "project config"),
                     (self.layout.workspace / "capslock.mcp.json", root / "mcp.json", "project MCP"),
-                    (self.layout.legacy_skills, root / "skills", "project Skills"),
                     (root / "mcp.local.json", root / "local" / "mcp.json", "local MCP"),
                     (root / "capslock.sqlite3", root / "state" / "capslock.sqlite3", "workspace database"),
                     (root / "events.jsonl", root / "state" / "events.jsonl", "workspace events"),
@@ -234,7 +223,6 @@ class LayoutMigrator:
             )
         if scope in {"user", "all"}:
             user = self.layout.user
-            mappings.append((user.legacy_skills, user.skills, "user Skills"))
             if user.memory_override is None:
                 mappings.append((user.legacy_memory, user.canonical_memory, "user memory"))
         return MigrationPlan(scope, tuple(self._inspect(source, destination, kind) for source, destination, kind in mappings))

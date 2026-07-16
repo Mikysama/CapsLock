@@ -9,7 +9,7 @@ from pathlib import Path
 from ..domain import SessionTitleSource, normalize_session_title, pending_session_title
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 BASE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
@@ -76,18 +76,7 @@ CREATE TABLE IF NOT EXISTS external_action_data (
 );
 """
 
-SKILL_SCHEMA = """
-CREATE TABLE IF NOT EXISTS skill_runs (
-  run_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, name TEXT NOT NULL,
-  version TEXT NOT NULL, scope TEXT NOT NULL, manifest_digest TEXT NOT NULL,
-  required_tools TEXT NOT NULL, required_permissions TEXT NOT NULL,
-  status TEXT NOT NULL, input_json TEXT NOT NULL, output_json TEXT,
-  created_at TEXT NOT NULL, finished_at TEXT, error TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_skill_runs_session_created
-  ON skill_runs(session_id, created_at);
-CREATE INDEX IF NOT EXISTS idx_skill_runs_name_created
-  ON skill_runs(name, created_at);
+SKILL_SETTINGS_SCHEMA = """
 CREATE TABLE IF NOT EXISTS skill_settings (
   name TEXT PRIMARY KEY, enabled INTEGER NOT NULL,
   updated_at TEXT NOT NULL
@@ -100,14 +89,15 @@ def migrate(connection: sqlite3.Connection, path: Path) -> None:
     if version > SCHEMA_VERSION:
         raise RuntimeError(f"database schema {version} is newer than supported schema {SCHEMA_VERSION}")
     if version == SCHEMA_VERSION:
-        connection.executescript(BASE_SCHEMA + ACTION_SCHEMA + SKILL_SCHEMA)
+        connection.executescript(BASE_SCHEMA + ACTION_SCHEMA + SKILL_SETTINGS_SCHEMA)
+        _remove_legacy_skill_schema(connection)
         _migrate_messages_v2(connection)
         _migrate_sessions_v3(connection)
         connection.commit()
         return
     tables = _tables(connection)
     if not tables:
-        connection.executescript(BASE_SCHEMA + ACTION_SCHEMA + SKILL_SCHEMA)
+        connection.executescript(BASE_SCHEMA + ACTION_SCHEMA + SKILL_SETTINGS_SCHEMA)
         _migrate_messages_v2(connection)
         _migrate_sessions_v3(connection)
         connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -120,7 +110,8 @@ def migrate(connection: sqlite3.Connection, path: Path) -> None:
         legacy = {"changes", "commands", "external_actions"} & tables
         if legacy:
             _migrate_legacy_actions(connection, legacy)
-        _execute_script(connection, BASE_SCHEMA + ACTION_SCHEMA + SKILL_SCHEMA)
+        _execute_script(connection, BASE_SCHEMA + ACTION_SCHEMA + SKILL_SETTINGS_SCHEMA)
+        _remove_legacy_skill_schema(connection)
         _migrate_messages_v2(connection)
         _migrate_sessions_v3(connection)
         connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -128,6 +119,10 @@ def migrate(connection: sqlite3.Connection, path: Path) -> None:
     except Exception as exc:
         connection.rollback()
         raise RuntimeError(f"database migration failed; backup retained at {backup}") from exc
+
+
+def _remove_legacy_skill_schema(connection: sqlite3.Connection) -> None:
+    connection.execute("DROP TABLE IF EXISTS skill_runs")
 
 
 def _migrate_messages_v2(connection: sqlite3.Connection) -> None:

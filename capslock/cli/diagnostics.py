@@ -12,6 +12,7 @@ from ..execution import CommandService
 from ..layout import ProjectLayout
 from ..policy import WorkspacePolicy
 from ..session import SessionStore
+from ..skills import SkillRegistry
 from ..storage import MemoryStore, workspace_key
 from .prompt import select_session
 from .render import render_doctor, render_session_list, render_session_renamed
@@ -59,6 +60,13 @@ def doctor(console: Console, workspace: Path, settings: Settings, *, layout: Pro
     with open_store(workspace, layout=selected) as store:
         commands = CommandService(store, WorkspacePolicy(workspace), "doctor", "doctor", lambda *args, **kwargs: None)
         available = commands.available_templates()
+        registry = SkillRegistry(
+            workspace,
+            disabled=lambda name: not store.skill_enabled(name),
+            layout=selected,
+        )
+        catalog = registry.catalog()
+        invalid_skills = sum(1 for entry in registry.entries() if entry.error is not None)
     memory_path = settings.memory.database or selected.user.memory
     with MemoryStore(memory_path) as memory:
         local_write = memory.local_write_enabled(workspace_key(workspace))
@@ -70,6 +78,10 @@ def doctor(console: Console, workspace: Path, settings: Settings, *, layout: Pro
         config=selected.config,
         project_mcp=selected.project_mcp,
         skills=selected.skills,
+        skill_count=catalog.total,
+        skill_catalog_bytes=catalog.bytes,
+        skill_catalog_truncated=catalog.truncated,
+        invalid_skills=invalid_skills,
         layout_warnings=selected.warnings,
         database=selected.database,
         model=settings.model,

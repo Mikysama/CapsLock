@@ -15,6 +15,7 @@ from ..session import SessionStore
 
 if TYPE_CHECKING:
     from ..memory import MemoryService
+    from ..skills import SkillService
 
 
 @dataclass(frozen=True)
@@ -45,6 +46,7 @@ class RunContext:
     store: SessionStore | None = None
     actions: ActionCoordinator | None = None
     memory: MemoryService | None = None
+    skills: SkillService | None = None
     permission_mode: PermissionMode = PermissionMode.APPROVE_FOR_ME
 
 
@@ -70,30 +72,6 @@ class ToolRegistry:
     @property
     def names(self) -> set[str]:
         return set(self._tools)
-
-    def subset(
-        self,
-        names: set[str],
-        *,
-        guard: Callable[[str, RunContext, dict[str, Any]], None] | None = None,
-    ) -> "ToolRegistry":
-        missing = sorted(names - self.names)
-        if missing:
-            raise ValueError(f"unsupported tools: {', '.join(missing)}")
-        tools: list[Tool] = []
-        for name, tool in self._tools.items():
-            if name not in names:
-                continue
-            if guard is None:
-                tools.append(tool)
-                continue
-
-            def execute(context: RunContext, arguments: dict[str, Any], *, _tool: Tool = tool) -> ToolResult:
-                guard(_tool.name, context, arguments)
-                return _tool.execute(context, arguments)
-
-            tools.append(Tool(tool.name, tool.description, tool.parameters, execute))
-        return ToolRegistry(tools)
 
     def invoke(self, name: str, context: RunContext, arguments: dict[str, Any]) -> tuple[ToolResult, int]:
         tool = self._tools.get(name)

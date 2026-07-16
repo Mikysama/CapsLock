@@ -58,9 +58,8 @@ COMMAND_TREE = (
         "/skills", "管理并显式运行本地 Skill", "skills",
         (
             CommandSpec("/skills list", "列出有效、禁用和无效 Skill", "skills"),
-            CommandSpec("/skills show", "显示 Skill 或历史运行；需名称或 run ID", "skills", accepts_arguments=True),
+            CommandSpec("/skills show", "显示 Skill frontmatter、来源与资源；需名称", "skills", accepts_arguments=True),
             CommandSpec("/skills validate", "校验 Skill 包和兼容性；需名称", "skills", accepts_arguments=True),
-            CommandSpec("/skills run", "显式运行 Skill；支持 key=value 输入", "skills", accepts_arguments=True),
             CommandSpec("/skills enable", "在当前工作区启用 Skill", "skills", accepts_arguments=True),
             CommandSpec("/skills disable", "在当前工作区禁用 Skill", "skills", accepts_arguments=True),
         ),

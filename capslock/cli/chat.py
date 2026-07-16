@@ -22,7 +22,13 @@ def run_chat(context: CliContext, debug: bool) -> int:
     agent, console = context.agent, context.console
     try:
         console.print(startup_banner(agent))
-        input_session = prompt_session()
+        input_session = prompt_session(
+            lambda: [
+                (entry.name, entry.package.description)
+                for entry in agent.skills.entries()
+                if entry.enabled and entry.error is None and entry.package is not None
+            ]
+        )
         return _run_chat_loop(context, debug, input_session)
     finally:
         _delete_empty_session(agent)

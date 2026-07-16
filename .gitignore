@@ -15,7 +15,6 @@
 .capslock/**/.migrate-*
 capslock.toml
 capslock.mcp.json
-capslock.skills/
 .agentbuild/
 
 __pycache__/

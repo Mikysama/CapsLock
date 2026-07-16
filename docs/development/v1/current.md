@@ -26,10 +26,10 @@ User MemoryStore
  ├─ global / workspace / session scope
  ├─ FTS5 + revision history + content-free audit
  └─ MemoryService + read-only model tools
-SkillRegistry / Skill run
+SkillRegistry / progressive loading
  ├─ user + workspace package discovery
- ├─ manifest + JSON Schema + fixture validation
- └─ restricted ToolRegistry + schema v4 audit
+ ├─ SKILL.md frontmatter + package validation
+ └─ 16 KiB catalog + per-run read-only snapshots
 ```
 
 模块职责：
@@ -39,7 +39,7 @@ SkillRegistry / Skill run
 - `tooling/`：工具注册表，以及工作区/Git、任务/来源和动作工具。
 - `storage/`：SQLite 连接、顺序迁移和领域 repositories。
 - `memory.py`：用户级记忆作用域、写策略、脱敏、导入导出和上下文失效隔离。
-- `skills/`：声明式 Skill 包、双层注册表、兼容检查和运行快照校验。
+- `skills/`：Agent Skills 包、双层注册表、catalog 和单次 run 只读快照。
 - `policy.py`：工作区受控读写安全边界。
 - `changes.py`：变更提案、审批、应用、冲突保护与撤销。
 - `execution.py`：固定命令模板、审批、进程执行、超时与输出限制。
@@ -63,12 +63,13 @@ SkillRegistry / Skill run
 - CLI 版本、启动、`doctor` 脱敏、工作区 `.env` 加载与配置优先级。
 - CLI 输入区上下边框、父命令子树、完整叶子命令候选以及 `/quit`、`/session` alias。
 - Web/MCP 权限、真实 stdio server、超时/崩溃恢复和子进程清理。
-- schema v0 到 v4 的备份与迁移、旧会话标题回填、Skill 审计表、重复 ID 拒绝、事务回滚和幂等启动。
+- schema v0 到 v5 的备份与迁移、旧会话标题回填、旧 Skill audit 清理、重复 ID 拒绝、事务回滚和幂等启动。
 - 动作状态转换、跨会话访问、模型 adapter、当前 run 事件作用域和资源关闭。
 - v1.0–v1.3.2 的路径、证据、会话、编辑、命令、来源、权限和主题回归。
 - v1.4.0 的跨工作区记忆作用域、FTS、脱敏、生命周期、导入导出、模型引用和失效上下文隔离。
 - v1.4.1 的默认聊天入口、会话标题、重命名、空会话清理、方向键恢复选择和中英文列对齐。
-- v1.5.0 的 Skill 包校验、双层覆盖、禁用、输入/输出契约、限定工具、运行快照和历史审计。
+- v1.5.1 的 `SKILL.md` 校验、双层覆盖、禁用、catalog、按需加载、资源快照和普通 run 审计。
+- v1.5.1 的 `capslock` 与 `python -m capslock` 入口、PyYAML 依赖和旧 editable 环境升级路径。
 - `.capslock` 新旧布局冲突、dry-run、幂等迁移、目录合并、符号链接拒绝、shell-only 用户路径、state/local 读取隔离和 Skill 强制确认。
 
 运行：
@@ -81,8 +82,9 @@ python -m pip_audit
 python scripts/check_repository.py
 python -m build
 python -m twine check dist/*
-python scripts/verify_release.py --tag v1.5.0
+python scripts/verify_release.py --tag v1.5.1
 capslock doctor
+python -m capslock --version
 ```
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+from collections.abc import Callable
 from datetime import UTC, datetime
 
 from prompt_toolkit import PromptSession
@@ -22,8 +23,22 @@ from .commands import command_descriptions, command_menu_completions
 
 
 class SlashCommandCompleter(Completer):
+    def __init__(self, skill_provider: Callable[[], list[tuple[str, str]]] | None = None) -> None:
+        self.skill_provider = skill_provider or (lambda: [])
+
     def get_completions(self, document: Document, complete_event: object):
         prefix = document.text_before_cursor
+        if prefix.startswith("$"):
+            for name, description in self.skill_provider():
+                command = f"${name}"
+                if command.casefold().startswith(prefix.casefold()):
+                    yield Completion(
+                        command,
+                        start_position=-len(prefix),
+                        display=FormattedText([("class:command-name", command)]),
+                        display_meta=description,
+                    )
+            return
         if not prefix.startswith("/"):
             return
         descriptions = command_descriptions()
@@ -144,7 +159,7 @@ def _updated_at(value: str) -> str:
 
 def refresh_slash_completion(buffer: object) -> None:
     prefix = buffer.document.text_before_cursor
-    if prefix.startswith("/"):
+    if prefix.startswith(("/", "$")):
         buffer.start_completion(select_first=False)
     else:
         buffer.cancel_completion()
@@ -182,8 +197,10 @@ def anchor_completion_menus(container: object) -> None:
     visit(container)
 
 
-def prompt_session() -> PromptSession[str]:
-    session = PromptSession(completer=SlashCommandCompleter(), lexer=SlashCommandLexer(), key_bindings=SLASH_KEY_BINDINGS, style=PROMPT_STYLE, complete_while_typing=True, complete_style=CompleteStyle.COLUMN, reserve_space_for_menu=16)
+def prompt_session(
+    skill_provider: Callable[[], list[tuple[str, str]]] | None = None,
+) -> PromptSession[str]:
+    session = PromptSession(completer=SlashCommandCompleter(skill_provider), lexer=SlashCommandLexer(), key_bindings=SLASH_KEY_BINDINGS, style=PROMPT_STYLE, complete_while_typing=True, complete_style=CompleteStyle.COLUMN, reserve_space_for_menu=16)
     anchor_completion_menus(session.app.layout.container)
     return session
 

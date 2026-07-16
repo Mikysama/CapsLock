@@ -19,7 +19,6 @@ from ..domain import (
     ExternalActionInfo,
     SessionInfo,
     SessionTitleSource,
-    SkillRunInfo,
     SourceInfo,
     TaskInfo,
     normalize_session_title,
@@ -474,7 +473,7 @@ class SourceRepository(Repository):
         return [_source_info(row) for row in self.connection.execute("SELECT * FROM sources WHERE session_id=? ORDER BY fetched_at", (session_id,)).fetchall()]
 
 
-class SkillRepository(Repository):
+class SkillSettingsRepository(Repository):
     def skill_enabled(self, name: str) -> bool:
         row = self.connection.execute(
             "SELECT enabled FROM skill_settings WHERE name=?", (name,)
@@ -488,99 +487,6 @@ class SkillRepository(Repository):
             (name, int(enabled), now()),
         )
         self.connection.commit()
-
-    def start_skill_run(
-        self,
-        *,
-        run_id: str,
-        session_id: str,
-        name: str,
-        version: str,
-        scope: str,
-        manifest_digest: str,
-        required_tools: tuple[str, ...],
-        required_permissions: tuple[str, ...],
-        input_value: dict[str, Any],
-    ) -> SkillRunInfo:
-        created = now()
-        self.connection.execute(
-            """INSERT INTO skill_runs(
-                 run_id,session_id,name,version,scope,manifest_digest,required_tools,
-                 required_permissions,status,input_json,created_at
-               ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
-            (
-                run_id,
-                session_id,
-                name,
-                version,
-                scope,
-                manifest_digest,
-                json.dumps(required_tools),
-                json.dumps(required_permissions),
-                "running",
-                json.dumps(input_value, ensure_ascii=False),
-                created,
-            ),
-        )
-        self.connection.commit()
-        return self.get_skill_run(run_id)  # type: ignore[return-value]
-
-    def finish_skill_run(
-        self,
-        run_id: str,
-        *,
-        status: str,
-        output: dict[str, Any] | None = None,
-        error: str | None = None,
-    ) -> SkillRunInfo:
-        if status not in {"completed", "failed", "cancelled"}:
-            raise ValueError(f"unsupported Skill run status: {status}")
-        updated = self.connection.execute(
-            """UPDATE skill_runs SET status=?,output_json=?,finished_at=?,error=?
-               WHERE run_id=? AND status='running'""",
-            (
-                status,
-                json.dumps(output, ensure_ascii=False) if output is not None else None,
-                now(),
-                error,
-                run_id,
-            ),
-        ).rowcount
-        if not updated:
-            raise ValueError(f"Skill run is not running or does not exist: {run_id}")
-        self.connection.commit()
-        return self.get_skill_run(run_id)  # type: ignore[return-value]
-
-    def get_skill_run(self, run_id: str) -> SkillRunInfo | None:
-        row = self.connection.execute(
-            "SELECT * FROM skill_runs WHERE run_id=?", (run_id,)
-        ).fetchone()
-        return None if row is None else _skill_run_info(row)
-
-    def resolve_skill_run(self, prefix: str, *, session_id: str | None = None) -> SkillRunInfo | None:
-        normalized = prefix.strip()
-        if not normalized:
-            raise ValueError("Skill run id cannot be empty")
-        query = "SELECT * FROM skill_runs WHERE substr(run_id,1,?)=?"
-        values: list[Any] = [len(normalized), normalized]
-        if session_id is not None:
-            query += " AND session_id=?"
-            values.append(session_id)
-        query += " ORDER BY created_at DESC LIMIT 2"
-        rows = self.connection.execute(query, values).fetchall()
-        if len(rows) > 1:
-            raise ValueError(f"Skill run id prefix is ambiguous: {normalized}")
-        return _skill_run_info(rows[0]) if rows else None
-
-    def list_skill_runs(self, session_id: str, *, name: str | None = None) -> list[SkillRunInfo]:
-        query = "SELECT * FROM skill_runs WHERE session_id=?"
-        values: list[Any] = [session_id]
-        if name is not None:
-            query += " AND name=?"
-            values.append(name)
-        query += " ORDER BY created_at DESC"
-        return [_skill_run_info(row) for row in self.connection.execute(query, values).fetchall()]
-
 
 def _normalize_status(status: str, *, error: str | None = None, exit_code: int | None = None, external: bool = False) -> tuple[ActionStatus, ActionResultKind | None]:
     if status == "discarded":
@@ -642,22 +548,3 @@ def _external_info(row: sqlite3.Row) -> ExternalActionInfo:
 
 def _source_info(row: sqlite3.Row) -> SourceInfo:
     return SourceInfo(row["id"], row["session_id"], row["run_id"], row["url"], row["title"], row["excerpt"], row["fetched_at"], bool(row["suspicious"]))
-
-
-def _skill_run_info(row: sqlite3.Row) -> SkillRunInfo:
-    return SkillRunInfo(
-        row["run_id"],
-        row["session_id"],
-        row["name"],
-        row["version"],
-        row["scope"],
-        row["manifest_digest"],
-        tuple(json.loads(row["required_tools"])),
-        tuple(json.loads(row["required_permissions"])),
-        row["status"],
-        json.loads(row["input_json"]),
-        json.loads(row["output_json"]) if row["output_json"] else None,
-        row["created_at"],
-        row["finished_at"],
-        row["error"],
-    )
