@@ -6,11 +6,14 @@ from __future__ import annotations
 import argparse
 import email.parser
 import re
+import runpy
 import tarfile
 import zipfile
 from pathlib import Path, PurePosixPath
 
-from capslock import __version__
+__version__ = str(
+    runpy.run_path(Path(__file__).resolve().parents[1] / "capslock" / "_version.py")["__version__"]
+)
 
 
 def metadata_version(content: bytes) -> str:
