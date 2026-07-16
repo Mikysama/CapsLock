@@ -69,7 +69,9 @@ def doctor(console: Console, workspace: Path, settings: Settings, *, layout: Pro
         invalid_skills = sum(1 for entry in registry.entries() if entry.error is not None)
     memory_path = settings.memory.database or selected.user.memory
     with MemoryStore(memory_path) as memory:
-        local_write = memory.local_write_enabled(workspace_key(workspace))
+        key = workspace_key(workspace)
+        local_write = memory.local_write_enabled(key)
+        memory_settings = memory.memory_settings(key)
         fts_available = memory.fts_available
     render_doctor(
         console,
@@ -92,6 +94,9 @@ def doctor(console: Console, workspace: Path, settings: Settings, *, layout: Pro
         memory_database=memory_path,
         memory_fts=fts_available,
         memory_write_enabled=settings.memory.project_write_enabled and local_write,
+        memory_policy=memory_settings["policy"].value,
+        memory_recall_enabled=bool(memory_settings["recall_enabled"]),
+        memory_embedding_backend=memory_settings["embedding_backend"].value,
     )
     return 0
 

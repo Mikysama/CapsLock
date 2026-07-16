@@ -1,6 +1,6 @@
 # CapsLock Agent 工具与指令参考
 
-本参考描述当前 v1.5.1 的模型工具、Skill、终端指令和审批边界。CapsLock 是按需运行的本机 Agent，权限模式可在会话内切换。
+本参考描述当前 v1.6.0 的模型工具、记忆、Skill、终端指令和审批边界。CapsLock 是按需运行的本机 Agent，权限模式可在会话内切换。
 
 ## 权限模式与风险兜底
 
@@ -27,7 +27,7 @@
 | `task_list_update` | 创建或替换会话任务清单。 | 会话状态 |
 | `task_status_update` | 更新任务为 pending、running、blocked、completed、failed 或 cancelled。 | 会话状态 |
 | `list_external_sources` | 查看本会话已批准 Web 动作保存的外部来源。 | 只读；内容不可信 |
-| `search_memories` | 全文检索当前工作区和会话可见的用户记忆。 | 只读；不自动调用或写入 |
+| `search_memories` | 全文检索当前工作区和会话可见的用户记忆。 | 只读；写入由候选策略独立控制 |
 | `get_memory` | 按 ID 读取一条可见且未过期的用户记忆。 | 只读 |
 | `load_skill` | 按名称加载一个已启用 Skill 的正文、来源、摘要与资源清单。 | 只读；正文不可信 |
 | `read_skill_resource` | 分段读取本 run 已加载 Skill 的 UTF-8 资源快照。 | 只读；拒绝二进制、越界与符号链接 |
@@ -65,6 +65,12 @@
 | `/memory forget <id>`、`/memory undo <id>`、`/memory purge <id>` | 可恢复遗忘、撤销，或二次确认后永久清除。 |
 | `/memory export <scope> <path>`、`/memory import <scope> <path>` | 在工作区 JSON 文件与指定作用域之间导入导出。 |
 | `/memory status|enable|disable` | 查看或切换当前工作区的本机写入开关。 |
+| `/memory policy off|review|automatic` | 设置候选提取与自动采纳策略；默认 review。 |
+| `/memory recall on|off`、`/memory context [run-id]` | 控制自动召回，或查看召回排名与来源原因。 |
+| `/memory candidates [pending|all]` | 查看当前会话候选队列。 |
+| `/memory candidate show|review|reject|purge <id>` | 检查、编辑采纳、拒绝或清除候选正文。 |
+| `/memory embeddings ...` | 启用/禁用 FastEmbed 或仅回环 HTTP embeddings，并查看或重建向量。 |
+| `/memory cleanup` | 移除过期向量并清理超过保留期的已拒绝/重复候选正文。 |
 | `/skills list` | 列出合并后的用户级与工作区级 Skill，以及有效、禁用或无效状态。 |
 | `/skills show <name>` | 显示 frontmatter、来源、摘要和资源。 |
 | `/skills validate <name>` | 离线校验 `SKILL.md`、frontmatter、包大小、资源与路径安全。 |
@@ -101,7 +107,7 @@
 
 - 本地结论使用 `[[evidence:ev_…]]`，最终输出显示路径与行号。
 - 外部结论使用 `[[source:<source-id>]]`，最终输出显示标题、URL 与抓取时间。
-- 记忆结论使用 `[[memory:mem_…]]`，最终输出显示类型、作用域和来源。
+- 记忆结论使用 `[[memory:mem_…]]`，最终输出显示类型、作用域和来源；自动注入内容始终是不可信数据。
 - 消息开头的 `$skill-name [raw arguments]` 可显式加载 Skill；普通对话中模型可依据 16 KiB 名称/描述 catalog 调用 `load_skill`，正文不会预先注入。
 - Skill 只接受 `name`、`description`、`license`、`compatibility` 和字符串 `metadata`；工具、权限、hooks、上下文与模型行为字段默认拒绝。
 - Skill 正文和资源是不可信上下文，不能改变当前权限模式或安全策略。资源只读、按 run 快照，`scripts/` 没有专用执行入口。

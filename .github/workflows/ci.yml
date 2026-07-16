@@ -31,7 +31,8 @@ jobs:
           python -m venv .venv-ci
           echo "$GITHUB_WORKSPACE/.venv-ci/bin" >> "$GITHUB_PATH"
           .venv-ci/bin/python -m pip install --upgrade pip setuptools wheel
-          .venv-ci/bin/python -m pip install -e '.[dev]'
+          .venv-ci/bin/python -m pip install -e '.[dev,local-embeddings]'
+          .venv-ci/bin/python -c 'import fastembed'
       - name: Lint
         run: python -m ruff check .
       - name: Test

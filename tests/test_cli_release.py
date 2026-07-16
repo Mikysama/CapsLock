@@ -38,7 +38,7 @@ def test_help_and_version_do_not_load_workspace_environment(monkeypatch, capsys)
     with pytest.raises(SystemExit) as version_exit:
         cli.main(["--version"])
     assert version_exit.value.code == 0
-    assert capsys.readouterr().out.strip() == "capslock 1.5.1"
+    assert capsys.readouterr().out.strip() == "capslock 1.6.0"
 
 
 def test_bare_cli_starts_chat_and_explicit_chat_remains_supported(tmp_path: Path, monkeypatch) -> None:

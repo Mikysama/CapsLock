@@ -143,6 +143,12 @@ def render_answer(console: Console, answer: WorkspaceAnswer, debug: bool) -> Non
                 f"  [text.secondary]Source:[/] {item.title} · {item.url} · "
                 f"[text.muted]{item.fetched_at} ({item.id})[/]"
             )
+    if answer.memory_recalls:
+        identifiers = ", ".join(hit.memory.id[:12] for hit in answer.memory_recalls)
+        console.print(
+            f"  [text.secondary]Memory context:[/] {len(answer.memory_recalls)} recalled · "
+            f"[text.muted]{identifiers} · /memory context[/]"
+        )
     console.print(f"  [text.muted]Run {answer.run_id[:8]} · {answer.duration_ms}ms[/]")
     if debug:
         for event in answer.events:
@@ -272,9 +278,11 @@ def render_memory(console: Console, item: object) -> None:
         ("type=", "text.muted"), (f"{item.type.value}\n", "text.secondary"),
         ("scope=", "text.muted"), (f"{item.scope.value}\n", "text.secondary"),
         ("status=", "text.muted"), (f"{item.status.value}\n", "text.secondary"),
+        ("origin=", "text.muted"), (f"{item.origin.value}\n", "text.secondary"),
         ("revision=", "text.muted"), (f"{item.revision}\n", "text.secondary"),
         ("confidence=", "text.muted"), (f"{item.confidence:g}\n", "text.secondary"),
         ("source=", "text.muted"), (f"{item.source_kind}:{item.source_ref or '-'}\n", "text.secondary"),
+        ("source_valid=", "text.muted"), (f"{item.source_valid}\n", "success" if item.source_valid else "warning"),
         ("expires_at=", "text.muted"), (f"{item.expires_at or 'never'}\n\n", "text.secondary"),
         (item.content or "(content permanently purged)", "text.primary"),
     )
@@ -289,9 +297,69 @@ def render_memory_policy(console: Console, memory: object) -> None:
             ("local_write_enabled=", "text.muted"),
             (f"{memory.local_write_enabled}\n", "success" if memory.local_write_enabled else "warning"),
             ("effective_write_enabled=", "text.muted"),
-            (str(memory.write_enabled), "success" if memory.write_enabled else "warning"),
+            (f"{memory.write_enabled}\n", "success" if memory.write_enabled else "warning"),
+            ("capture_policy=", "text.muted"),
+            (f"{memory.policy.value}\n", "text.secondary"),
+            ("recall_enabled=", "text.muted"),
+            (f"{memory.recall_enabled}\n", "success" if memory.recall_enabled else "warning"),
+            ("embedding_backend=", "text.muted"),
+            (f"{memory.embedding_backend.value}\n", "text.secondary"),
+            ("embedding_model=", "text.muted"),
+            (memory.embedding_model or "-", "text.secondary"),
         )
     )
+
+
+def render_memory_candidates(console: Console, candidates: list[object]) -> None:
+    if not candidates:
+        console.print("[text.secondary]No memory candidates.[/]")
+        return
+    output = table("Candidate", "Status", "Type", "Scope", "Confidence", "Relation", "Risks", "Content")
+    for item in candidates:
+        output.add_row(
+            Text(item.id[:12], style="text.muted"),
+            status_text(item.status.value),
+            item.type.value,
+            item.scope.value,
+            f"{item.confidence:.2f}",
+            item.relation,
+            ", ".join(item.risk_flags) or "-",
+            (item.content or "(content cleared)")[:80],
+        )
+    console.print(output)
+
+
+def render_memory_candidate(console: Console, item: object) -> None:
+    details = Text.assemble(
+        ("id=", "text.muted"), (f"{item.id}\n", "text.secondary"),
+        ("status=", "text.muted"), (f"{item.status.value}\n", "text.secondary"),
+        ("type=", "text.muted"), (f"{item.type.value}\n", "text.secondary"),
+        ("scope=", "text.muted"), (f"{item.scope.value}\n", "text.secondary"),
+        ("confidence=", "text.muted"), (f"{item.confidence:.2f}\n", "text.secondary"),
+        ("source_run=", "text.muted"), (f"{item.source_run_id}\n", "text.secondary"),
+        ("relation=", "text.muted"), (f"{item.relation}:{item.related_memory_id or '-'}\n", "text.secondary"),
+        ("risks=", "text.muted"), (f"{', '.join(item.risk_flags) or '-'}\n\n", "warning" if item.risk_flags else "success"),
+        (item.content or "(content cleared)", "text.primary"),
+    )
+    console.print(Panel(details, title=f"Candidate {item.id[:12]}", border_style="warning"))
+
+
+def render_memory_context(console: Console, hits: list[object]) -> None:
+    if not hits:
+        console.print("[text.secondary]No recalled memories for that run.[/]")
+        return
+    output = table("Memory", "Score", "Lexical", "Semantic", "Scope", "Source", "Reasons")
+    for hit in hits:
+        output.add_row(
+            Text(hit.memory.id[:12], style="text.muted"),
+            f"{hit.score:.4f}",
+            str(hit.lexical_rank or "-"),
+            str(hit.semantic_rank or "-"),
+            hit.memory.scope.value,
+            "valid" if hit.memory.source_valid else "invalid",
+            "; ".join(hit.reasons),
+        )
+    console.print(output)
 
 
 def render_status(console: Console, agent: object) -> None:
@@ -469,6 +537,9 @@ def render_doctor(
     memory_database: object | None = None,
     memory_fts: bool | None = None,
     memory_write_enabled: bool | None = None,
+    memory_policy: str | None = None,
+    memory_recall_enabled: bool | None = None,
+    memory_embedding_backend: str | None = None,
 ) -> None:
     output = table("Check", "Result")
     output.add_row("Workspace", Text(str(workspace), style="path"))
@@ -504,6 +575,12 @@ def render_doctor(
         output.add_row("Memory SQLite", Text(str(memory_database), style="path"))
         output.add_row("Memory FTS5", Text("available" if memory_fts else "missing", style="success" if memory_fts else "error"))
         output.add_row("Memory writes", Text("enabled" if memory_write_enabled else "disabled", style="success" if memory_write_enabled else "warning"))
+        output.add_row("Memory policy", Text(memory_policy or "review", style="text.secondary"))
+        output.add_row(
+            "Memory recall",
+            Text("enabled" if memory_recall_enabled else "disabled", style="success" if memory_recall_enabled else "warning"),
+        )
+        output.add_row("Memory embeddings", Text(memory_embedding_backend or "off", style="text.secondary"))
     output.add_row(
         "Layout warnings",
         Text("; ".join(layout_warnings) if layout_warnings else "none", style="warning" if layout_warnings else "success"),

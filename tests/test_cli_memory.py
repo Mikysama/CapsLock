@@ -24,6 +24,13 @@ def test_memory_command_tree_exposes_all_management_operations() -> None:
         "/memory status",
         "/memory enable",
         "/memory disable",
+        "/memory policy",
+        "/memory recall",
+        "/memory candidates",
+        "/memory candidate",
+        "/memory context",
+        "/memory cleanup",
+        "/memory embeddings",
     ]
 
 

@@ -4,10 +4,18 @@ from __future__ import annotations
 
 import shlex
 
-from ..domain import MemoryScope, MemoryType
+from ..domain import EmbeddingBackend, MemoryPolicy, MemoryScope, MemoryType
 from ..policy import PolicyError
 from .context import CliContext
-from .render import render_memories, render_memory, render_memory_policy, select_choice
+from .render import (
+    render_memories,
+    render_memory,
+    render_memory_candidate,
+    render_memory_candidates,
+    render_memory_context,
+    render_memory_policy,
+    select_choice,
+)
 
 
 def memory_command(context: CliContext, text: str) -> None:
@@ -27,6 +35,34 @@ def memory_command(context: CliContext, text: str) -> None:
         elif operation == "disable":
             memory.set_local_write_enabled(False)
             render_memory_policy(context.console, memory)
+        elif operation == "policy":
+            memory.set_policy(MemoryPolicy(_one(arguments, "policy")))
+            render_memory_policy(context.console, memory)
+        elif operation == "recall":
+            value = _one(arguments, "recall").casefold()
+            if value not in {"on", "off"}:
+                raise ValueError("Usage: /memory recall <on|off>")
+            memory.set_recall_enabled(value == "on")
+            render_memory_policy(context.console, memory)
+        elif operation == "candidates":
+            if arguments not in ([], ["pending"], ["all"]):
+                raise ValueError("Usage: /memory candidates [pending|all]")
+            render_memory_candidates(context.console, memory.candidates(include_all=arguments == ["all"]))
+        elif operation == "candidate":
+            _candidate(context, arguments)
+        elif operation == "context":
+            if len(arguments) > 1:
+                raise ValueError("Usage: /memory context [run-id]")
+            render_memory_context(context.console, memory.context(arguments[0] if arguments else None))
+        elif operation == "cleanup":
+            result = memory.cleanup()
+            context.console.print(
+                "[success]Memory cleanup completed:[/] "
+                f"expired_embeddings={result['expired_embeddings']} · "
+                f"candidate_contents={result['candidate_contents']}"
+            )
+        elif operation == "embeddings":
+            _embeddings(context, arguments)
         elif operation == "list":
             _list(context, arguments)
         elif operation == "search":
@@ -128,16 +164,24 @@ def _purge(context: CliContext, prefix: str) -> None:
 
 
 def _export(context: CliContext, arguments: list[str]) -> None:
-    if len(arguments) != 2:
-        raise ValueError("Usage: /memory export <global|workspace|session> <relative.json>")
-    scope, path = MemoryScope(arguments[0]), arguments[1]
+    include_candidates = "--include-candidates" in arguments
+    values = [value for value in arguments if value != "--include-candidates"]
+    if len(values) != 2:
+        raise ValueError(
+            "Usage: /memory export <global|workspace|session> <relative.json> [--include-candidates]"
+        )
+    scope, path = MemoryScope(values[0]), values[1]
     try:
-        output, count = context.agent.memory.export_json(scope, path)
+        output, count = context.agent.memory.export_json(
+            scope, path, include_candidates=include_candidates
+        )
     except FileExistsError:
         if context.console.input("Export file exists. Overwrite? [y/N] ").strip().casefold() not in {"y", "yes"}:
             context.console.print("[waiting]Export cancelled.[/]")
             return
-        output, count = context.agent.memory.export_json(scope, path, overwrite=True)
+        output, count = context.agent.memory.export_json(
+            scope, path, overwrite=True, include_candidates=include_candidates
+        )
     context.console.print(f"[success]Exported {count} memories:[/] [path]{output}[/]")
 
 
@@ -170,3 +214,99 @@ def _one(arguments: list[str], operation: str) -> str:
 
 def _number(value: str, *, default: float) -> float:
     return default if not value.strip() else float(value)
+
+
+def _candidate(context: CliContext, arguments: list[str]) -> None:
+    if len(arguments) != 2 or arguments[0] not in {"show", "review", "reject", "purge"}:
+        raise ValueError("Usage: /memory candidate <show|review|reject|purge> <id>")
+    operation, prefix = arguments
+    memory = context.agent.memory
+    candidate = memory.resolve_candidate(prefix)
+    render_memory_candidate(context.console, candidate)
+    if operation == "show":
+        return
+    if operation == "reject":
+        memory.reject_candidate(candidate.id)
+        context.console.print(f"[success]Rejected candidate:[/] {candidate.id}")
+        return
+    if operation == "purge":
+        if context.console.input("Permanently clear candidate content? [y/N] ").strip().casefold() not in {"y", "yes"}:
+            context.console.print("[waiting]Candidate purge cancelled.[/]")
+            return
+        memory.purge_candidate(candidate.id)
+        context.console.print(f"[success]Purged candidate content:[/] {candidate.id}")
+        return
+    action_options = [("accept", "Accept as a new memory"), ("reject", "Reject candidate")]
+    if candidate.related_memory_id:
+        action_options.insert(1, ("replace", f"Replace related memory {candidate.related_memory_id[:12]}"))
+    action_options.append(("cancel", "Cancel"))
+    action = select_choice(context.console, "Review memory candidate", tuple(action_options), escape_key="cancel")
+    if action == "cancel":
+        return
+    if action == "reject":
+        memory.reject_candidate(candidate.id)
+        context.console.print(f"[success]Rejected candidate:[/] {candidate.id}")
+        return
+    content = context.console.input("Memory content [keep candidate]> ").strip() or candidate.content
+    type_value = context.console.input(f"Type [{candidate.type.value}]> ").strip() or candidate.type.value
+    scope_value = context.console.input(f"Scope [{candidate.scope.value}]> ").strip() or candidate.scope.value
+    item = memory.accept_candidate(
+        candidate.id,
+        content=content,
+        memory_type=MemoryType(type_value),
+        scope=MemoryScope(scope_value),
+        replace=action == "replace",
+    )
+    context.console.print(f"[success]Accepted candidate as memory:[/] {item.id}")
+
+
+def _embeddings(context: CliContext, arguments: list[str]) -> None:
+    memory = context.agent.memory
+    operation = arguments[0] if arguments else "status"
+    values = arguments[1:]
+    if operation == "status":
+        if values:
+            raise ValueError("Usage: /memory embeddings status")
+        render_memory_policy(context.console, memory)
+        return
+    if operation == "disable":
+        if values:
+            raise ValueError("Usage: /memory embeddings disable")
+        memory.configure_embeddings(EmbeddingBackend.OFF)
+        render_memory_policy(context.console, memory)
+        return
+    if operation == "rebuild":
+        if values:
+            raise ValueError("Usage: /memory embeddings rebuild")
+        if context.console.input("Rebuild all visible memory embeddings? [y/N] ").strip().casefold() not in {"y", "yes"}:
+            context.console.print("[waiting]Embedding rebuild cancelled.[/]")
+            return
+        indexed, failed = memory.rebuild_embeddings()
+        context.console.print(f"[success]Embedding rebuild complete:[/] indexed={indexed} · failed={failed}")
+        return
+    if operation != "enable" or not values:
+        raise ValueError(
+            "Usage: /memory embeddings enable <fastembed [model]|local-http <endpoint> <model>>"
+        )
+    backend = values[0]
+    if backend == "fastembed" and len(values) <= 2:
+        model = values[1] if len(values) == 2 else None
+        prompt = "Enable FastEmbed? This may download a model into CAPSLOCK_HOME/cache/fastembed. [y/N] "
+        if context.console.input(prompt).strip().casefold() not in {"y", "yes"}:
+            context.console.print("[waiting]Embedding enable cancelled.[/]")
+            return
+        memory.configure_embeddings(EmbeddingBackend.FASTEMBED, model=model)
+    elif backend == "local-http" and len(values) == 3:
+        endpoint, model = values[1], values[2]
+        prompt = f"Send memory text only to loopback endpoint {endpoint}? [y/N] "
+        if context.console.input(prompt).strip().casefold() not in {"y", "yes"}:
+            context.console.print("[waiting]Embedding enable cancelled.[/]")
+            return
+        memory.configure_embeddings(
+            EmbeddingBackend.LOCAL_HTTP, model=model, endpoint=endpoint
+        )
+    else:
+        raise ValueError(
+            "Usage: /memory embeddings enable <fastembed [model]|local-http <endpoint> <model>>"
+        )
+    render_memory_policy(context.console, memory)

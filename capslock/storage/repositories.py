@@ -163,6 +163,15 @@ class SessionRepository(Repository):
 
 
 class RunRepository(Repository):
+    def run_completed(self, run_id: str, *, session_id: str | None = None) -> bool:
+        query = "SELECT status FROM runs WHERE id=?"
+        values: list[object] = [run_id]
+        if session_id is not None:
+            query += " AND session_id=?"
+            values.append(session_id)
+        row = self.connection.execute(query, values).fetchone()
+        return row is not None and str(row[0]) == "completed"
+
     def start_run(self, session_id: str, question: str) -> str:
         run_id, started = uuid.uuid4().hex, now()
         try:

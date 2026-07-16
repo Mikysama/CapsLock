@@ -59,6 +59,34 @@ class MemoryStatus(StrEnum):
     PURGED = "purged"
 
 
+class MemoryPolicy(StrEnum):
+    OFF = "off"
+    REVIEW = "review"
+    AUTOMATIC = "automatic"
+
+
+class MemoryCandidateStatus(StrEnum):
+    PENDING = "pending"
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
+    DUPLICATE = "duplicate"
+    CONFLICT = "conflict"
+    PURGED = "purged"
+
+
+class MemoryOrigin(StrEnum):
+    MANUAL = "manual"
+    IMPORTED = "imported"
+    REVIEWED = "reviewed"
+    AUTOMATIC = "automatic"
+
+
+class EmbeddingBackend(StrEnum):
+    OFF = "off"
+    FASTEMBED = "fastembed"
+    LOCAL_HTTP = "local_http"
+
+
 class SessionTitleSource(StrEnum):
     PENDING = "pending"
     FIRST_QUESTION = "first_question"
@@ -200,3 +228,34 @@ class MemoryInfo:
     created_at: str
     updated_at: str
     purged_at: str | None = None
+    origin: MemoryOrigin = MemoryOrigin.MANUAL
+    source_valid: bool = True
+
+
+@dataclass(frozen=True)
+class MemoryCandidateInfo:
+    id: str
+    extraction_id: str
+    content: str | None
+    type: MemoryType
+    scope: MemoryScope
+    workspace_key: str
+    session_id: str
+    source_run_id: str
+    confidence: float
+    status: MemoryCandidateStatus
+    relation: str
+    related_memory_id: str | None
+    risk_flags: tuple[str, ...]
+    adopted_memory_id: str | None
+    created_at: str
+    decided_at: str | None = None
+
+
+@dataclass(frozen=True)
+class MemoryRecallHit:
+    memory: MemoryInfo
+    score: float
+    lexical_rank: int | None
+    semantic_rank: int | None
+    reasons: tuple[str, ...]

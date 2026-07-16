@@ -4,6 +4,25 @@
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-07-16
+
+### Added
+
+- 新增成功 run 后的受控记忆候选提取、审核队列，以及 `off`、`review`、`automatic` 三档策略。
+- 新增 FTS/语义混合召回、每轮记忆上下文摘要和 `/memory context` 排名解释。
+- 新增可选 FastEmbed 与仅回环 OpenAI-compatible HTTP 嵌入后端，失败时自动退化到 FTS。
+- 新增候选、提取、多来源、向量与召回审计数据；记忆导出格式升级到 v2。
+
+### Changed
+
+- 用户记忆 schema 升至 v2，升级前自动备份；工作区 schema 保持 v5。
+- `automatic` 只采纳用户直接陈述的低风险 workspace/session 候选，global、冲突、敏感与推断内容继续人工审核。
+
+### Security
+
+- 自动记忆必须追溯到提取记录与已完成源 run；失效的自动来源不会进入上下文。
+- 记忆和提取输入均作为不可信数据，不能授予工具权限或覆盖文件、命令、Web、MCP 与 Skill 策略。
+
 ## [1.5.1] - 2026-07-16
 
 ### Added

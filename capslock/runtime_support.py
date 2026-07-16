@@ -23,14 +23,21 @@ class ContextBuilder:
         self.max_messages = max_messages
         self.instructions = instructions
         self.memory = memory
+        self.last_recalls = []
 
-    def build(self, session_id: str, question: str) -> list[dict[str, object]]:
+    def build(self, session_id: str, question: str, *, run_id: str | None = None) -> list[dict[str, object]]:
         summary = ""
         excluded = self.memory.excluded_runs() if self.memory is not None else set()
         if self.store.message_count(session_id, excluded_run_ids=excluded) > self.max_messages:
             summary = self.store.compact_summary(session_id, self.max_messages, excluded_run_ids=excluded)
         history = self.store.messages(session_id, self.max_messages, excluded_run_ids=excluded)
+        memory_context = ""
+        self.last_recalls = []
+        if self.memory is not None and run_id is not None:
+            memory_context, self.last_recalls = self.memory.recall_context(question, run_id=run_id)
         system = self.instructions + (f"\nEarlier session summary:\n{summary}" if summary else "")
+        if memory_context:
+            system += "\n\n" + memory_context
         return [{"role": "system", "content": system}, *history, {"role": "user", "content": question}]
 
 

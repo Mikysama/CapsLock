@@ -105,7 +105,7 @@ def test_policy_import_export_and_atomic_validation(tmp_path: Path) -> None:
     output, count = first.export_json(MemoryScope.WORKSPACE, "export.json")
     assert count == 1
     document = json.loads(output.read_text(encoding="utf-8"))
-    assert document["format"] == "capslock-memory-export" and document["version"] == 1
+    assert document["format"] == "capslock-memory-export" and document["version"] == 2
 
     imported, _ = first.import_json(MemoryScope.SESSION, "export.json")
     assert len(imported) == 1 and imported[0].scope is MemoryScope.SESSION
@@ -163,7 +163,7 @@ def test_project_policy_and_memory_database_override(tmp_path: Path, monkeypatch
 def test_memory_schema_rejects_newer_and_rolls_back_failed_upgrade(tmp_path: Path, monkeypatch) -> None:
     newer = tmp_path / "newer.sqlite3"
     connection = sqlite3.connect(newer)
-    connection.execute("PRAGMA user_version = 2")
+    connection.execute("PRAGMA user_version = 3")
     connection.close()
     with pytest.raises(RuntimeError, match="newer"):
         MemoryStore(newer)
@@ -211,7 +211,9 @@ def test_model_memory_audit_citation_and_stale_context_isolation(tmp_path: Path)
     model = RecordingModel([
         ModelResponse(ModelMessage(None, (ModelToolCall("search", "search_memories", '{"query":"Python"}'),))),
         ModelResponse(ModelMessage(f"Use Python 3.12. [[memory:{item.id}]]")),
+        ModelResponse(ModelMessage('{"candidates":[]}')),
         ModelResponse(ModelMessage("Fresh answer.")),
+        ModelResponse(ModelMessage('{"candidates":[]}')),
     ])
     agent = WorkspaceAgent(
         model,

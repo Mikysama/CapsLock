@@ -42,7 +42,10 @@ class OpenAIChatModel:
         self.client = client
 
     def complete(self, *, model: str, messages: list[dict[str, object]], tools: list[dict[str, object]]) -> ModelResponse:
-        response = self.client.chat.completions.create(model=model, messages=messages, tools=tools)
+        arguments: dict[str, object] = {"model": model, "messages": messages}
+        if tools:
+            arguments["tools"] = tools
+        response = self.client.chat.completions.create(**arguments)
         raw_message = response.choices[0].message
         calls = tuple(
             ModelToolCall(call.id, call.function.name, call.function.arguments)
