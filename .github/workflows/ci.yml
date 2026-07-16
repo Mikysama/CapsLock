@@ -30,7 +30,7 @@ jobs:
         run: |
           python -m venv .venv-ci
           echo "$GITHUB_WORKSPACE/.venv-ci/bin" >> "$GITHUB_PATH"
-          .venv-ci/bin/python -m pip install --upgrade pip
+          .venv-ci/bin/python -m pip install --upgrade pip setuptools wheel
           .venv-ci/bin/python -m pip install -e '.[dev]'
       - name: Lint
         run: python -m ruff check .
