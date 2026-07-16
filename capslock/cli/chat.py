@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from ..domain import MemoryScope
 from ..permissions import PermissionMode
 from ..runtime import AgentRuntimeError
 from . import actions
@@ -19,8 +20,16 @@ WEB_CONTINUATION = (
 
 def run_chat(context: CliContext, debug: bool) -> int:
     agent, console = context.agent, context.console
-    console.print(startup_banner(agent))
-    input_session = prompt_session()
+    try:
+        console.print(startup_banner(agent))
+        input_session = prompt_session()
+        return _run_chat_loop(context, debug, input_session)
+    finally:
+        _delete_empty_session(agent)
+
+
+def _run_chat_loop(context: CliContext, debug: bool, input_session: object) -> int:
+    agent, console = context.agent, context.console
     while True:
         try:
             question = input_session.prompt(
@@ -51,6 +60,17 @@ def run_chat(context: CliContext, debug: bool) -> int:
             run_chat_turn(context, question, debug)
         except AgentRuntimeError as exc:
             console.print(f"[error]Error:[/] {exc}")
+
+
+def _delete_empty_session(agent: object) -> None:
+    memory = getattr(agent, "memory", None)
+    if memory is not None:
+        try:
+            if memory.list(scope=MemoryScope.SESSION, include_inactive=True, limit=1):
+                return
+        except Exception:
+            return
+    agent.store.delete_session_if_empty(agent.session_id)
 
 
 def run_chat_turn(context: CliContext, question: str, debug: bool) -> None:

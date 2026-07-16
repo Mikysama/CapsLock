@@ -40,10 +40,16 @@ export DEEPSEEK_MODEL='deepseek-v4-pro'
 
 ```bash
 capslock --version
-capslock chat
+capslock
 ```
 
-输入 `/exit` 或 `/quit` 结束会话。会话和执行轨迹保存在工作区的 `.capslock/capslock.sqlite3`，可用 `capslock sessions` 查看，或 `capslock resume <session-id>` 恢复。
+直接运行 `capslock` 会进入新会话；原有的 `capslock chat` 仍然可用。输入 `/exit` 或 `/quit` 结束会话；退出时不会保留完全为空的会话。会话标题默认取首个问题，也可在聊天中执行 `/rename 新标题` 修改。会话和执行轨迹保存在工作区的 `.capslock/capslock.sqlite3`，可用 `capslock sessions` 查看。执行 `capslock resume` 后可根据标题用方向键选择会话，也可继续通过完整 ID/唯一 ID 前缀执行 `capslock resume <session-id>`。
+
+历史会话可通过完整 ID 或列表中显示的唯一 ID 前缀重命名：
+
+```bash
+capslock sessions rename a14c92ef "修复登录接口超时"
+```
 
 在自然语言中直接指定文件或目录（路径相对于工作区）：
 
@@ -52,7 +58,7 @@ capslock chat
 你> 在 examples 目录中查找报销需要审批的规则。
 ```
 
-输出包含答案、证据位置和耗时。可使用 `capslock --debug chat` 查看工具执行摘要；`capslock doctor` 检查配置和工作区状态。
+输出包含答案、证据位置和耗时。可使用 `capslock --debug`（或 `capslock --debug chat`）查看工具执行摘要；`capslock doctor` 检查配置和工作区状态。
 
 ### 本地记忆
 
@@ -68,7 +74,7 @@ capslock chat
 /memory export workspace memories.json
 ```
 
-模型可在相关任务中调用只读记忆检索工具，但 1.4.0 不自动提取或自动注入记忆。`forget` 可撤销；`purge` 会在二次确认后永久移除正文、索引和历史版本。导入导出仅允许工作区内的 JSON 路径。
+模型可在相关任务中调用只读记忆检索工具，但 1.4.1 不自动提取或自动注入记忆。`forget` 可撤销；`purge` 会在二次确认后永久移除正文、索引和历史版本。导入导出仅允许工作区内的 JSON 路径。
 
 无充分本地证据时，Agent 会明确说明信息不足。一次性提问可使用：
 
@@ -112,4 +118,4 @@ python scripts/check_repository.py
 
 测试不需要 API 密钥：它们使用模拟客户端验证工具循环、证据 ID、会话恢复、越界路径拒绝和只读工具结果。
 
-v1.4.0 的记忆模型、数据库迁移和发布步骤见 [发布说明](docs/releases/v1.4.0.md)。
+v1.4.1 的会话历史、数据库迁移和发布步骤见 [发布说明](docs/releases/v1.4.1.md)；记忆模型设计见 [v1.4.0 发布说明](docs/releases/v1.4.0.md)。

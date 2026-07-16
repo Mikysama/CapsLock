@@ -1,6 +1,6 @@
 # CapsLock Agent 工具与指令参考
 
-本参考描述当前 v1.4.0 的模型工具、终端指令和审批边界。CapsLock 是按需运行的本机 Agent，权限模式可在会话内切换。
+本参考描述当前 v1.4.1 的模型工具、终端指令和审批边界。CapsLock 是按需运行的本机 Agent，权限模式可在会话内切换。
 
 ## 权限模式与风险兜底
 
@@ -47,6 +47,7 @@
 | --- | --- |
 | `/help` | 显示会话内指令。 |
 | `/status`、`/session` | 查看会话、工作区、模型和轮次限制。 |
+| `/rename <title>` | 重命名当前会话；手动标题不会再被后续问题覆盖。 |
 | `/permissions` | 显示三种权限模式与当前选择。 |
 | `/permissions full|approve|ask` | 在 `full_access`、`approve_for_me`、`ask_for_approval` 之间切换。 |
 | `/context` | 查看当前持久化上下文消息数量。 |
@@ -71,6 +72,11 @@
 | `/clear` | 提示新建会话；历史不会被删除。 |
 | `/cancel` | 说明前台运行可用 Ctrl-C 取消。 |
 | `/exit`、`/quit` | 退出交互会话。 |
+
+`capslock sessions` 按标题列出历史会话；标题默认来自首个问题。使用
+`capslock sessions rename <session-id-or-prefix> <title>` 可在会话外重命名，
+裸 `capslock resume` 会列出标题、最近更新时间和 Session ID，并支持方向键选择；
+`capslock resume <session-id-or-prefix>` 仍可通过完整 ID 或列表显示的唯一短前缀直接恢复。
 
 ## 配置与数据位置
 

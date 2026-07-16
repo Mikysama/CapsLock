@@ -1,12 +1,14 @@
 from types import SimpleNamespace
 
 import httpx
+import pytest
 
 from capslock.cli import actions, chat
 from capslock.cli.context import CliContext
 from capslock.external import TAVILY_SEARCH_URL, WebService
 from capslock.cli.prompt import move_selection
 from capslock.observability import EventSink
+from capslock.permissions import PermissionMode
 from capslock.session import SessionStore
 from capslock.theme import make_console
 
@@ -90,6 +92,79 @@ def test_chat_turn_continues_after_approved_web_action(monkeypatch) -> None:
     assert questions[0] == "Search the schedule"
     assert "list_external_sources" in questions[1]
     assert "Do not propose the same search again" in questions[1]
+
+
+@pytest.mark.parametrize("command", ["/exit", "/quit"])
+def test_chat_exit_deletes_completely_empty_session(tmp_path, monkeypatch, command: str) -> None:
+    store = SessionStore(tmp_path / "state.sqlite3")
+    session = store.create(tmp_path, "test")
+    agent = SimpleNamespace(
+        store=store,
+        session_id=session.id,
+        memory=None,
+        model="test",
+        permission_mode=PermissionMode.APPROVE_FOR_ME,
+        workspace=tmp_path,
+    )
+    input_session = SimpleNamespace(prompt=lambda *args, **kwargs: command)
+    monkeypatch.setattr(chat, "prompt_session", lambda: input_session)
+
+    assert chat.run_chat(CliContext(make_console(), agent), False) == 0
+    assert store.get(session.id) is None
+
+
+@pytest.mark.parametrize("exception", [EOFError(), KeyboardInterrupt()])
+def test_chat_input_exit_deletes_completely_empty_session(tmp_path, monkeypatch, exception) -> None:
+    store = SessionStore(tmp_path / "state.sqlite3")
+    session = store.create(tmp_path, "test")
+    agent = SimpleNamespace(
+        store=store,
+        session_id=session.id,
+        memory=None,
+        model="test",
+        permission_mode=PermissionMode.APPROVE_FOR_ME,
+        workspace=tmp_path,
+    )
+
+    def stop_prompt(*args, **kwargs):
+        raise exception
+
+    monkeypatch.setattr(chat, "prompt_session", lambda: SimpleNamespace(prompt=stop_prompt))
+
+    assert chat.run_chat(CliContext(make_console(), agent), False) == 0
+    assert store.get(session.id) is None
+
+
+def test_chat_exit_preserves_nonempty_or_manually_named_session(tmp_path) -> None:
+    store = SessionStore(tmp_path / "state.sqlite3")
+    asked = store.create(tmp_path, "test")
+    store.start_run(asked.id, "First question")
+    renamed = store.create(tmp_path, "test")
+    store.rename_session(renamed.id, "Planned work")
+
+    assert not store.delete_session_if_empty(asked.id)
+    assert not store.delete_session_if_empty(renamed.id)
+    assert store.get(asked.id) is not None
+    assert store.get(renamed.id) is not None
+
+
+def test_chat_exit_preserves_session_with_session_memory(tmp_path, monkeypatch) -> None:
+    store = SessionStore(tmp_path / "state.sqlite3")
+    session = store.create(tmp_path, "test")
+    memory = SimpleNamespace(list=lambda **kwargs: [object()])
+    agent = SimpleNamespace(
+        store=store,
+        session_id=session.id,
+        memory=memory,
+        model="test",
+        permission_mode=PermissionMode.APPROVE_FOR_ME,
+        workspace=tmp_path,
+    )
+    input_session = SimpleNamespace(prompt=lambda *args, **kwargs: "/exit")
+    monkeypatch.setattr(chat, "prompt_session", lambda: input_session)
+
+    assert chat.run_chat(CliContext(make_console(), agent), False) == 0
+    assert store.get(session.id) is not None
 
 
 def test_arrow_navigation_wraps_selection() -> None:

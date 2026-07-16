@@ -16,12 +16,12 @@ from ..runtime import AgentRuntimeError
 from ..theme import make_console
 from .chat import run_chat
 from .context import CliContext
-from .diagnostics import doctor, open_store, render_sessions
+from .diagnostics import doctor, open_store, rename_saved_session, render_sessions, select_saved_session
 from .render import render_answer
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="capslock", description="Trustworthy read-only workspace agent.")
+    parser = argparse.ArgumentParser(prog="capslock", description="Lock in your focus. Unlock your potential.")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument(
         "--workspace",
@@ -30,14 +30,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="Workspace root (default: current directory)",
     )
     parser.add_argument("--debug", action="store_true", help="Show runtime events after each answer")
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers = parser.add_subparsers(dest="command")
+    parser.set_defaults(command="chat")
     subparsers.add_parser("chat", help="Start a new interactive session")
     ask = subparsers.add_parser("ask", help="Ask one question and exit")
     ask.add_argument("question")
     resume = subparsers.add_parser("resume", help="Resume a saved interactive session")
-    resume.add_argument("session_id")
+    resume.add_argument("session_id", nargs="?", help="Full session ID or a unique prefix")
+    resume.add_argument("--limit", type=int, default=20, help="Maximum sessions shown in the selector")
     sessions = subparsers.add_parser("sessions", help="List saved sessions")
     sessions.add_argument("--limit", type=int, default=20)
+    session_commands = sessions.add_subparsers(dest="sessions_command")
+    rename = session_commands.add_parser("rename", help="Rename a saved session")
+    rename.add_argument("session_id", help="Full session ID or a unique prefix")
+    rename.add_argument("title", nargs="+", help="New session title")
     subparsers.add_parser("doctor", help="Check local configuration and workspace access")
     return parser
 
@@ -81,8 +87,22 @@ def main(argv: list[str] | None = None, *, console: Console | None = None) -> in
             return doctor(output, workspace, settings)
         if args.command == "sessions":
             with open_store(workspace) as store:
+                if args.sessions_command == "rename":
+                    return rename_saved_session(output, store, args.session_id, " ".join(args.title))
                 return render_sessions(output, store, args.limit)
-        with create_application(workspace, settings, getattr(args, "session_id", None)) as application:
+        session_id = getattr(args, "session_id", None)
+        if args.command == "resume":
+            with open_store(workspace) as store:
+                if session_id is None:
+                    session_id = select_saved_session(output, store, args.limit)
+                    if session_id is None:
+                        return 0
+                else:
+                    session = store.resolve_session(session_id)
+                    if session is None:
+                        raise AgentRuntimeError(f"session does not exist: {session_id}")
+                    session_id = session.id
+        with create_application(workspace, settings, session_id) as application:
             context = CliContext(output, application.agent)
             if args.command == "ask":
                 with output.status("[running.bold]Agent is analyzing the workspace...[/]"):

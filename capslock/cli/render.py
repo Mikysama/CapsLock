@@ -295,8 +295,11 @@ def render_memory_policy(console: Console, memory: object) -> None:
 
 
 def render_status(console: Console, agent: object) -> None:
+    session = agent.store.get(agent.session_id)
     console.print(
         Text.assemble(
+            ("title=", "text.muted"),
+            (f"{session.title if session else ''}\n", "text.primary"),
             ("session=", "text.muted"),
             (f"{agent.session_id}\n", "text.secondary"),
             ("workspace=", "text.muted"),
@@ -424,15 +427,24 @@ def render_mcp_server(console: Console, server: object) -> None:
 
 
 def render_session_list(console: Console, sessions: list[object]) -> None:
-    output = table("Session", "Workspace", "Model", "Updated")
+    output = table("Title", "Updated", "Session")
     for item in sessions:
         output.add_row(
-            Text(item.id, style="text.muted"),
-            Text(str(item.workspace), style="path"),
-            Text(item.model, style="text.secondary"),
+            Text(item.title, style="text.primary"),
             Text(item.updated_at, style="text.muted"),
+            Text(item.id[:12], style="text.muted"),
         )
     console.print(output)
+
+
+def render_session_renamed(console: Console, session: object) -> None:
+    console.print(
+        Text.assemble(
+            ("Session renamed: ", "success"),
+            (session.title, "text.primary.bold"),
+            (f" ({session.id[:12]})", "text.muted"),
+        )
+    )
 
 
 def render_doctor(

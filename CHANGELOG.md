@@ -4,6 +4,25 @@
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-07-16
+
+### Added
+
+- 会话标题默认取首个问题，并支持聊天内 `/rename <title>` 及 `capslock sessions rename` 手动重命名。
+- 裸 `capslock resume` 提供按最近更新时间排序的方向键会话选择器，显示标题、更新时间和 Session ID。
+
+### Changed
+
+- 裸 `capslock` 现在直接创建交互会话，同时保留 `capslock chat` 兼容入口。
+- 工作区 schema 升至 v3；旧会话从首个问题回填标题，手动标题不会被后续问题覆盖。
+- `capslock sessions` 以标题为主展示历史；`resume` 和历史重命名支持唯一 Session ID 前缀。
+- `prompt-toolkit` 最低版本升至 3.0.52，以使用原生方向键选择控件。
+
+### Fixed
+
+- `/exit`、`/quit`、EOF 或输入阶段取消时自动清除完全为空的会话，同时保留已有内容、手动标题或 session 级记忆的会话。
+- 修正恢复选择器在序号前缀、窄终端和中英文混排下的列对齐与换行问题。
+
 ## [1.4.0] - 2026-07-16
 
 ### Added

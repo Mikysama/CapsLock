@@ -18,8 +18,11 @@ from ..domain import (
     CommandInfo,
     ExternalActionInfo,
     SessionInfo,
+    SessionTitleSource,
     SourceInfo,
     TaskInfo,
+    normalize_session_title,
+    pending_session_title,
 )
 
 
@@ -35,12 +38,33 @@ class Repository:
 class SessionRepository(Repository):
     def create(self, workspace: Path, model: str) -> SessionInfo:
         session_id, created = uuid.uuid4().hex, now()
+        title = pending_session_title(created)
         self.connection.execute(
-            "INSERT INTO sessions(id,workspace,model,created_at,updated_at) VALUES(?,?,?,?,?)",
-            (session_id, str(workspace.resolve()), model, created, created),
+            """INSERT INTO sessions(
+                 id,workspace,model,created_at,updated_at,title,title_source,title_updated_at
+               ) VALUES(?,?,?,?,?,?,?,?)""",
+            (
+                session_id,
+                str(workspace.resolve()),
+                model,
+                created,
+                created,
+                title,
+                SessionTitleSource.PENDING.value,
+                created,
+            ),
         )
         self.connection.commit()
-        return SessionInfo(session_id, workspace.resolve(), model, created, created)
+        return SessionInfo(
+            session_id,
+            workspace.resolve(),
+            model,
+            created,
+            created,
+            title,
+            SessionTitleSource.PENDING,
+            created,
+        )
 
     def get(self, session_id: str) -> SessionInfo | None:
         row = self.connection.execute("SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
@@ -49,6 +73,49 @@ class SessionRepository(Repository):
     def list(self, limit: int = 20) -> list[SessionInfo]:
         rows = self.connection.execute("SELECT * FROM sessions ORDER BY updated_at DESC LIMIT ?", (limit,)).fetchall()
         return [_session_info(row) for row in rows]
+
+    def resolve_session(self, prefix: str) -> SessionInfo | None:
+        normalized = prefix.strip()
+        if not normalized:
+            raise ValueError("session id cannot be empty")
+        exact = self.get(normalized)
+        if exact is not None:
+            return exact
+        rows = self.connection.execute(
+            "SELECT * FROM sessions WHERE substr(id,1,?)=? ORDER BY updated_at DESC LIMIT 2",
+            (len(normalized), normalized),
+        ).fetchall()
+        if len(rows) > 1:
+            raise ValueError(f"session id prefix is ambiguous: {normalized}")
+        return _session_info(rows[0]) if rows else None
+
+    def rename_session(self, session_id: str, title: str) -> SessionInfo:
+        normalized = normalize_session_title(title)
+        timestamp = now()
+        updated = self.connection.execute(
+            """UPDATE sessions
+               SET title=?,title_source=?,title_updated_at=?
+               WHERE id=?""",
+            (normalized, SessionTitleSource.MANUAL.value, timestamp, session_id),
+        ).rowcount
+        if not updated:
+            raise ValueError(f"session does not exist: {session_id}")
+        self.connection.commit()
+        return self.get(session_id)  # type: ignore[return-value]
+
+    def delete_session_if_empty(self, session_id: str) -> bool:
+        with self.connection:
+            deleted = self.connection.execute(
+                """DELETE FROM sessions
+                   WHERE id=? AND title_source='pending'
+                     AND NOT EXISTS (SELECT 1 FROM runs WHERE session_id=sessions.id)
+                     AND NOT EXISTS (SELECT 1 FROM messages WHERE session_id=sessions.id)
+                     AND NOT EXISTS (SELECT 1 FROM actions WHERE session_id=sessions.id)
+                     AND NOT EXISTS (SELECT 1 FROM tasks WHERE session_id=sessions.id)
+                     AND NOT EXISTS (SELECT 1 FROM sources WHERE session_id=sessions.id)""",
+                (session_id,),
+            ).rowcount
+        return bool(deleted)
 
     def messages(self, session_id: str, limit: int = 24, *, excluded_run_ids: set[str] | None = None) -> list[dict[str, str]]:
         query = "SELECT role,content FROM messages WHERE session_id=?"
@@ -97,12 +164,29 @@ class SessionRepository(Repository):
 
 class RunRepository(Repository):
     def start_run(self, session_id: str, question: str) -> str:
-        run_id = uuid.uuid4().hex
-        self.connection.execute(
-            "INSERT INTO runs(id,session_id,question,status,started_at) VALUES(?,?,?,'running',?)",
-            (run_id, session_id, question, now()),
-        )
-        self.connection.commit()
+        run_id, started = uuid.uuid4().hex, now()
+        try:
+            title = normalize_session_title(question, truncate=True)
+        except ValueError:
+            title = None
+        with self.connection:
+            self.connection.execute(
+                "INSERT INTO runs(id,session_id,question,status,started_at) VALUES(?,?,?,'running',?)",
+                (run_id, session_id, question, started),
+            )
+            if title:
+                self.connection.execute(
+                    """UPDATE sessions
+                       SET title=?,title_source=?,title_updated_at=?
+                       WHERE id=? AND title_source=?""",
+                    (
+                        title,
+                        SessionTitleSource.FIRST_QUESTION.value,
+                        started,
+                        session_id,
+                        SessionTitleSource.PENDING.value,
+                    ),
+                )
         return run_id
 
     def finish_run(self, run_id: str, *, status: str, duration_ms: int, error: str | None = None, input_tokens: int = 0, output_tokens: int = 0, cost_usd: float = 0) -> None:
@@ -411,7 +495,16 @@ def _normalize_status(status: str, *, error: str | None = None, exit_code: int |
 
 
 def _session_info(row: sqlite3.Row) -> SessionInfo:
-    return SessionInfo(row["id"], Path(row["workspace"]), row["model"], row["created_at"], row["updated_at"])
+    return SessionInfo(
+        row["id"],
+        Path(row["workspace"]),
+        row["model"],
+        row["created_at"],
+        row["updated_at"],
+        row["title"],
+        SessionTitleSource(row["title_source"]),
+        row["title_updated_at"],
+    )
 
 
 def _action_info(row: sqlite3.Row) -> ActionInfo:

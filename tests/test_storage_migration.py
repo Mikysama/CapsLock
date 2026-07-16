@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from capslock.domain import ActionResultKind, ActionStatus
+from capslock.domain import ActionResultKind, ActionStatus, SessionTitleSource
 from capslock.session import SessionStore
 
 
@@ -68,7 +68,7 @@ def test_legacy_actions_migrate_with_backup_and_normalized_statuses(tmp_path: Pa
         assert command.result_kind is ActionResultKind.NONZERO_EXIT
         assert external.status is ActionStatus.COMPLETED
         assert external.result_kind is ActionResultKind.SUCCESS
-        assert store._connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert store._connection.execute("PRAGMA user_version").fetchone()[0] == 3
         assert "run_id" in {row[1] for row in store._connection.execute("PRAGMA table_info(messages)")}
         assert store._connection.execute("SELECT count(*) FROM actions").fetchone()[0] == 3
 
@@ -114,10 +114,55 @@ def test_schema_v1_adds_run_ids_with_one_backup(tmp_path: Path) -> None:
         columns = {row[1] for row in store._connection.execute("PRAGMA table_info(messages)")}
         assert "run_id" in columns
         assert store.messages("s") == [{"role": "user", "content": "kept"}]
-        assert store._connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert store._connection.execute("PRAGMA user_version").fetchone()[0] == 3
 
     backups = list((tmp_path / "backups").glob("capslock-schema-v1-*.sqlite3"))
     assert len(backups) == 1
     with SessionStore(path):
         pass
     assert list((tmp_path / "backups").glob("capslock-schema-v1-*.sqlite3")) == backups
+
+
+def test_schema_v2_backfills_titles_from_first_question(tmp_path: Path) -> None:
+    path = tmp_path / "capslock.sqlite3"
+    connection = sqlite3.connect(path)
+    connection.executescript("""
+        CREATE TABLE sessions (
+          id TEXT PRIMARY KEY, workspace TEXT NOT NULL, model TEXT NOT NULL,
+          created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+          summary TEXT NOT NULL DEFAULT ''
+        );
+        CREATE TABLE runs (
+          id TEXT PRIMARY KEY, session_id TEXT NOT NULL, question TEXT NOT NULL,
+          status TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT,
+          duration_ms INTEGER, input_tokens INTEGER DEFAULT 0,
+          output_tokens INTEGER DEFAULT 0, error TEXT, cost_usd REAL DEFAULT 0
+        );
+        PRAGMA user_version = 2;
+    """)
+    connection.execute(
+        "INSERT INTO sessions VALUES(?,?,?,?,?,?)",
+        ("asked", str(tmp_path), "test", "2026-01-01T10:00:00+00:00", "now", ""),
+    )
+    connection.execute(
+        "INSERT INTO sessions VALUES(?,?,?,?,?,?)",
+        ("empty", str(tmp_path), "test", "2026-01-02T11:30:00+00:00", "now", ""),
+    )
+    connection.execute(
+        "INSERT INTO runs(id,session_id,question,status,started_at) VALUES(?,?,?,?,?)",
+        ("run", "asked", "  First\n  question  ", "completed", "2026-01-01T10:01:00+00:00"),
+    )
+    connection.commit()
+    connection.close()
+
+    with SessionStore(path) as store:
+        asked = store.get("asked")
+        empty = store.get("empty")
+        assert asked is not None and asked.title == "First question"
+        assert asked.title_source is SessionTitleSource.FIRST_QUESTION
+        assert asked.title_updated_at == "2026-01-01T10:01:00+00:00"
+        assert empty is not None and empty.title == "New session - 2026-01-02 11:30"
+        assert empty.title_source is SessionTitleSource.PENDING
+        assert store._connection.execute("PRAGMA user_version").fetchone()[0] == 3
+
+    assert len(list((tmp_path / "backups").glob("capslock-schema-v2-*.sqlite3"))) == 1

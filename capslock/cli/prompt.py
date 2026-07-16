@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+from datetime import UTC, datetime
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer, Completion
@@ -12,6 +13,8 @@ from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout.menus import CompletionsMenu, MultiColumnCompletionsMenu
 from prompt_toolkit.lexers import Lexer
 from prompt_toolkit.shortcuts import CompleteStyle
+from prompt_toolkit.shortcuts import choice
+from prompt_toolkit.utils import get_cwidth
 
 from ..permissions import PermissionMode
 from ..theme import build_prompt_style
@@ -63,6 +66,80 @@ def prompt_footer(width: int | None = None) -> FormattedText:
             ("class:footer", "? /help  ·  ↑/↓ 选择  ·  Tab 补全"),
         ]
     )
+
+
+def select_session(sessions: list[object], width: int | None = None) -> str:
+    if not sessions:
+        raise ValueError("no saved sessions are available")
+    terminal_width = width or shutil.get_terminal_size(fallback=(80, 24)).columns
+    number_width = max(2, len(str(len(sessions))))
+    title_width, updated_width, session_width = _session_column_widths(
+        terminal_width,
+        number_width,
+    )
+    header_indent = " " * (6 + number_width)
+    header = FormattedText(
+        [
+            ("class:command-name", "Resume a session\n"),
+            ("", header_indent),
+            ("class:footer", _fit_cell("Title", title_width)),
+            ("", "  "),
+            ("class:footer", _fit_cell("Updated (UTC)", updated_width)),
+            ("", "  "),
+            ("class:footer", _fit_cell("Session ID", session_width)),
+        ]
+    )
+    options = [
+        (
+            session.id,
+            FormattedText(
+                [
+                    ("", " " * (number_width - max(2, len(str(index))))),
+                    ("class:user-input", _fit_cell(session.title, title_width)),
+                    ("", "  "),
+                    ("class:footer", _fit_cell(_updated_at(session.updated_at), updated_width)),
+                    ("", "  "),
+                    ("class:command-name", _fit_cell(session.id, session_width)),
+                ]
+            ),
+        )
+        for index, session in enumerate(sessions, start=1)
+    ]
+    return choice(
+        header,
+        options=options,
+        default=sessions[0].id,
+        style=PROMPT_STYLE,
+        symbol="❯",
+    )
+
+
+def _session_column_widths(terminal_width: int, number_width: int) -> tuple[int, int, int]:
+    fixed_width = 12 + number_width
+    updated_width = 16
+    session_width = 32 if terminal_width >= fixed_width + updated_width + 32 + 12 else 12
+    title_width = max(8, min(50, terminal_width - updated_width - session_width - fixed_width))
+    return title_width, updated_width, session_width
+
+
+def _fit_cell(value: str, width: int) -> str:
+    text = " ".join(str(value).split())
+    if get_cwidth(text) > width:
+        text = text.rstrip()
+        while text and get_cwidth(text) > width - 3:
+            text = text[:-1].rstrip()
+        text += "..."
+    return text + " " * max(0, width - get_cwidth(text))
+
+
+def _updated_at(value: str) -> str:
+    try:
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(UTC).strftime("%Y-%m-%d %H:%M")
+    except ValueError:
+        return value[:16].replace("T", " ")
 
 
 def refresh_slash_completion(buffer: object) -> None:

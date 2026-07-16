@@ -47,7 +47,7 @@ User MemoryStore
 
 ## 验证
 
-当前 74 项测试覆盖：
+当前 91 项测试覆盖：
 
 - 路径越界、二进制文件与超大文件拒绝。
 - 文件读取、全文检索和稳定 Evidence ID。
@@ -56,10 +56,11 @@ User MemoryStore
 - CLI 版本、启动、`doctor` 脱敏、工作区 `.env` 加载与配置优先级。
 - CLI 输入区上下边框、父命令子树、完整叶子命令候选以及 `/quit`、`/session` alias。
 - Web/MCP 权限、真实 stdio server、超时/崩溃恢复和子进程清理。
-- schema v0 到 v1 的备份与迁移、重复 ID 拒绝、事务回滚和幂等启动。
+- schema v0 到 v3 的备份与迁移、旧会话标题回填、重复 ID 拒绝、事务回滚和幂等启动。
 - 动作状态转换、跨会话访问、模型 adapter、当前 run 事件作用域和资源关闭。
 - v1.0–v1.3.2 的路径、证据、会话、编辑、命令、来源、权限和主题回归。
 - v1.4.0 的跨工作区记忆作用域、FTS、脱敏、生命周期、导入导出、模型引用和失效上下文隔离。
+- v1.4.1 的默认聊天入口、会话标题、重命名、空会话清理、方向键恢复选择和中英文列对齐。
 
 运行：
 
@@ -71,7 +72,7 @@ python -m pip_audit
 python scripts/check_repository.py
 python -m build
 python -m twine check dist/*
-python scripts/verify_release.py --tag v1.4.0
+python scripts/verify_release.py --tag v1.4.1
 capslock doctor
 ```
 

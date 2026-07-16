@@ -78,8 +78,23 @@ def test_command_tree_filters_to_current_slash_prefix() -> None:
     assert "/permissions" not in _command_completions("/mcp")
     assert resolve_command("/permissions full").handler == "permissions"
     assert resolve_command("/approve abc123").handler == "approve"
+    assert resolve_command("/rename Release planning").handler == "rename"
     assert resolve_command("/session").handler == "status"
     assert resolve_command("/quit").handler == "exit"
+
+
+def test_rename_command_updates_current_session(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path / "state.sqlite3")
+    session = store.create(tmp_path, "test")
+    terminal = make_console(width=100, color_system=None, force_terminal=False, record=True)
+    agent = SimpleNamespace(store=store, session_id=session.id)
+
+    assert dispatch_slash_command(CliContext(terminal, agent), "/rename Release planning") == "handled"
+
+    renamed = store.get(session.id)
+    assert renamed is not None and renamed.title == "Release planning"
+    assert renamed.title_source.value == "manual"
+    assert "Session renamed: Release planning" in terminal.export_text()
 
 
 def test_command_tree_renders_claude_style_flat_two_column_list(monkeypatch) -> None:

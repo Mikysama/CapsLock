@@ -44,6 +44,7 @@ def handlers(context: CliContext) -> dict[str, CommandHandler]:
     return {
         "help": lambda _: render_command_tree(console, "/"),
         "status": status,
+        "rename": lambda value: actions.rename_session(context, value),
         "permissions": lambda value: actions.permissions(context, value),
         "context": stored_context,
         "cost": lambda _: actions.render_cost(context),
@@ -59,7 +60,7 @@ def handlers(context: CliContext) -> dict[str, CommandHandler]:
         "undo": lambda _: actions.undo(context),
         "diff": lambda _: actions.show_git_diff(context),
         "clear": lambda _: console.print(
-            "[text.secondary]This session is append-only. Start[/] [command]capslock chat[/] "
+            "[text.secondary]This session is append-only. Start[/] [command]capslock[/] "
             "[text.secondary]to create a fresh session.[/]"
         ),
         "cancel": lambda _: console.print(

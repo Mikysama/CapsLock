@@ -18,6 +18,7 @@ class CommandSpec:
 COMMAND_TREE = (
     CommandSpec("/help", "显示可用指令", "help"),
     CommandSpec("/status", "显示会话、模型和权限模式", "status", aliases=("/session",)),
+    CommandSpec("/rename", "重命名当前会话；需新标题", "rename", accepts_arguments=True),
     CommandSpec(
         "/permissions", "查看或切换权限模式", "permissions",
         (

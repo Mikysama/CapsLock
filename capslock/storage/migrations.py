@@ -6,13 +6,17 @@ import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
+from ..domain import SessionTitleSource, normalize_session_title, pending_session_title
 
-SCHEMA_VERSION = 2
+
+SCHEMA_VERSION = 3
 
 BASE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
   id TEXT PRIMARY KEY, workspace TEXT NOT NULL, model TEXT NOT NULL,
-  created_at TEXT NOT NULL, updated_at TEXT NOT NULL, summary TEXT NOT NULL DEFAULT ''
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL, summary TEXT NOT NULL DEFAULT '',
+  title TEXT NOT NULL DEFAULT '', title_source TEXT NOT NULL DEFAULT 'pending',
+  title_updated_at TEXT
 );
 CREATE TABLE IF NOT EXISTS messages (
   id INTEGER PRIMARY KEY, session_id TEXT NOT NULL, role TEXT NOT NULL,
@@ -80,12 +84,14 @@ def migrate(connection: sqlite3.Connection, path: Path) -> None:
     if version == SCHEMA_VERSION:
         connection.executescript(BASE_SCHEMA + ACTION_SCHEMA)
         _migrate_messages_v2(connection)
+        _migrate_sessions_v3(connection)
         connection.commit()
         return
     tables = _tables(connection)
     if not tables:
         connection.executescript(BASE_SCHEMA + ACTION_SCHEMA)
         _migrate_messages_v2(connection)
+        _migrate_sessions_v3(connection)
         connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         connection.commit()
         return
@@ -98,6 +104,7 @@ def migrate(connection: sqlite3.Connection, path: Path) -> None:
             _migrate_legacy_actions(connection, legacy)
         _execute_script(connection, BASE_SCHEMA + ACTION_SCHEMA)
         _migrate_messages_v2(connection)
+        _migrate_sessions_v3(connection)
         connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         connection.commit()
     except Exception as exc:
@@ -110,6 +117,42 @@ def _migrate_messages_v2(connection: sqlite3.Connection) -> None:
     if "run_id" not in columns:
         connection.execute("ALTER TABLE messages ADD COLUMN run_id TEXT")
     connection.execute("CREATE INDEX IF NOT EXISTS idx_messages_session_run ON messages(session_id, run_id)")
+
+
+def _migrate_sessions_v3(connection: sqlite3.Connection) -> None:
+    columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(sessions)")}
+    if "title" not in columns:
+        connection.execute("ALTER TABLE sessions ADD COLUMN title TEXT NOT NULL DEFAULT ''")
+    if "title_source" not in columns:
+        connection.execute(
+            "ALTER TABLE sessions ADD COLUMN title_source TEXT NOT NULL DEFAULT 'pending'"
+        )
+    if "title_updated_at" not in columns:
+        connection.execute("ALTER TABLE sessions ADD COLUMN title_updated_at TEXT")
+
+    sessions = connection.execute(
+        "SELECT id,created_at,title FROM sessions WHERE trim(title)=''"
+    ).fetchall()
+    for session in sessions:
+        first_run = connection.execute(
+            "SELECT question,started_at FROM runs WHERE session_id=? ORDER BY started_at,rowid LIMIT 1",
+            (session["id"],),
+        ).fetchone()
+        try:
+            title = normalize_session_title(first_run["question"], truncate=True) if first_run else None
+        except ValueError:
+            title = None
+        if title:
+            source = SessionTitleSource.FIRST_QUESTION.value
+            updated_at = first_run["started_at"]
+        else:
+            title = pending_session_title(session["created_at"])
+            source = SessionTitleSource.PENDING.value
+            updated_at = session["created_at"]
+        connection.execute(
+            "UPDATE sessions SET title=?,title_source=?,title_updated_at=? WHERE id=?",
+            (title, source, updated_at, session["id"]),
+        )
 
 
 def _tables(connection: sqlite3.Connection) -> set[str]:

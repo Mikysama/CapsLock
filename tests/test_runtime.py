@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from capslock.domain import MAX_SESSION_TITLE_LENGTH, SessionTitleSource
 from capslock.model import ModelMessage, ModelResponse
 from capslock.observability import EventSink
 from capslock.policy import WorkspacePolicy
@@ -53,6 +54,36 @@ def test_runtime_citation_uses_evidence_id_and_resume(tmp_path: Path) -> None:
     assert answer.citations[0].path == path.resolve()
     resumed = WorkspaceAgent(Client([response("Still here.")]), workspace=tmp_path, model="test", store=store, session_id=answer.session_id)
     assert resumed.ask("Continue").text == "Still here."
+
+
+def test_session_title_uses_first_question_until_manually_renamed(tmp_path: Path) -> None:
+    class Model:
+        def complete(self, **kwargs) -> ModelResponse:
+            return ModelResponse(ModelMessage("done"))
+
+    store = SessionStore(tmp_path / "state.sqlite3")
+    agent = WorkspaceAgent(Model(), workspace=tmp_path, model="test", store=store)
+    created = store.get(agent.session_id)
+    assert created is not None and created.title
+    assert created.title_source is SessionTitleSource.PENDING
+
+    agent.ask("  First\nquestion " + "x" * 100)
+    automatic = store.get(agent.session_id)
+    assert automatic is not None
+    assert automatic.title.startswith("First question")
+    assert len(automatic.title) == MAX_SESSION_TITLE_LENGTH
+    assert automatic.title_source is SessionTitleSource.FIRST_QUESTION
+
+    renamed = store.rename_session(agent.session_id, "  Release   planning  ")
+    assert renamed.title == "Release planning"
+    assert renamed.title_source is SessionTitleSource.MANUAL
+    agent.ask("This must not replace the manual title")
+    assert store.get(agent.session_id).title == "Release planning"
+
+    with pytest.raises(ValueError, match="cannot be empty"):
+        store.rename_session(agent.session_id, " \n ")
+    with pytest.raises(ValueError, match="cannot exceed"):
+        store.rename_session(agent.session_id, "x" * (MAX_SESSION_TITLE_LENGTH + 1))
 
 
 def test_session_rejects_wrong_workspace(tmp_path: Path) -> None:

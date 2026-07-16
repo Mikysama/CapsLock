@@ -30,6 +30,7 @@ from .render import (
     render_mcp_server,
     render_mcp_servers,
     render_pending_external_action,
+    render_session_renamed,
     render_sources as render_source_list,
     render_tasks as render_task_list,
     render_undo_preview,
@@ -90,6 +91,15 @@ def render_external_actions(context: CliContext, *, kinds: set[str] | None = Non
 def render_sources(context: CliContext) -> None:
     agent = context.agent
     render_source_list(context.console, agent.store.list_sources(agent.session_id))
+
+
+def rename_session(context: CliContext, command: str) -> None:
+    title = command.partition(" ")[2]
+    try:
+        session = context.agent.store.rename_session(context.agent.session_id, title)
+        render_session_renamed(context.console, session)
+    except ValueError as exc:
+        context.console.print(f"[error]Error:[/] {exc}")
 
 
 def approve_action(context: CliContext, action_id: str) -> None:

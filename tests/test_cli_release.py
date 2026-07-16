@@ -1,8 +1,11 @@
+from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from capslock.cli import app as cli
+from capslock.session import SessionStore
 from capslock.theme import make_console
 
 
@@ -34,7 +37,24 @@ def test_help_and_version_do_not_load_workspace_environment(monkeypatch, capsys)
     with pytest.raises(SystemExit) as version_exit:
         cli.main(["--version"])
     assert version_exit.value.code == 0
-    assert capsys.readouterr().out.strip() == "capslock 1.4.0"
+    assert capsys.readouterr().out.strip() == "capslock 1.4.1"
+
+
+def test_bare_cli_starts_chat_and_explicit_chat_remains_supported(tmp_path: Path, monkeypatch) -> None:
+    started = []
+
+    @contextmanager
+    def create_application(workspace, settings, session_id=None):
+        yield SimpleNamespace(agent=object())
+
+    monkeypatch.setattr(cli, "load_project_environment", lambda workspace: None)
+    monkeypatch.setattr(cli.Settings, "load", lambda workspace: object())
+    monkeypatch.setattr(cli, "create_application", create_application)
+    monkeypatch.setattr(cli, "run_chat", lambda context, debug: started.append(debug) or 0)
+
+    assert cli.main(["--workspace", str(tmp_path)]) == 0
+    assert cli.main(["--workspace", str(tmp_path), "chat"]) == 0
+    assert started == [False, False]
 
 
 def test_cli_loads_environment_from_selected_workspace(tmp_path: Path, monkeypatch) -> None:
@@ -57,6 +77,44 @@ def test_cli_loads_environment_from_selected_workspace(tmp_path: Path, monkeypat
 
     assert cli.main(["--workspace", str(workspace), "doctor"]) == 0
     assert observed == {"workspace": workspace.resolve(), "model": "workspace-model"}
+
+
+def test_sessions_rename_accepts_unique_id_prefix_and_lists_title(tmp_path: Path, monkeypatch) -> None:
+    clear_config_environment(monkeypatch)
+    with SessionStore(tmp_path / ".capslock" / "capslock.sqlite3") as store:
+        session = store.create(tmp_path, "test")
+    terminal = make_console(width=120, color_system=None, force_terminal=False, record=True)
+
+    assert cli.main(
+        ["--workspace", str(tmp_path), "sessions", "rename", session.id[:8], "Release", "planning"],
+        console=terminal,
+    ) == 0
+    assert cli.main(["--workspace", str(tmp_path), "sessions"], console=terminal) == 0
+
+    with SessionStore(tmp_path / ".capslock" / "capslock.sqlite3") as store:
+        assert store.get(session.id).title == "Release planning"
+    output = terminal.export_text()
+    assert "Session renamed: Release planning" in output
+    assert "Release planning" in output and session.id[:12] in output
+
+
+def test_resume_accepts_unique_session_id_prefix(tmp_path: Path, monkeypatch) -> None:
+    with SessionStore(tmp_path / ".capslock" / "capslock.sqlite3") as store:
+        session = store.create(tmp_path, "test")
+    resumed = []
+
+    @contextmanager
+    def create_application(workspace, settings, session_id=None):
+        resumed.append(session_id)
+        yield SimpleNamespace(agent=object())
+
+    monkeypatch.setattr(cli, "load_project_environment", lambda workspace: None)
+    monkeypatch.setattr(cli.Settings, "load", lambda workspace: object())
+    monkeypatch.setattr(cli, "create_application", create_application)
+    monkeypatch.setattr(cli, "run_chat", lambda context, debug: 0)
+
+    assert cli.main(["--workspace", str(tmp_path), "resume", session.id[:8]]) == 0
+    assert resumed == [session.id]
 
 
 @pytest.mark.parametrize(

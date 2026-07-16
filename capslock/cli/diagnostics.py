@@ -12,7 +12,8 @@ from ..execution import CommandService
 from ..policy import WorkspacePolicy
 from ..session import SessionStore
 from ..storage import MemoryStore, workspace_key
-from .render import render_doctor, render_session_list
+from .prompt import select_session
+from .render import render_doctor, render_session_list, render_session_renamed
 
 
 def open_store(workspace: Path) -> SessionStore:
@@ -22,6 +23,31 @@ def open_store(workspace: Path) -> SessionStore:
 def render_sessions(console: Console, store: SessionStore, limit: int) -> int:
     render_session_list(console, store.list(limit))
     return 0
+
+
+def rename_saved_session(console: Console, store: SessionStore, prefix: str, title: str) -> int:
+    try:
+        session = store.resolve_session(prefix)
+        if session is None:
+            raise ValueError(f"session does not exist: {prefix}")
+        renamed = store.rename_session(session.id, title)
+    except ValueError as exc:
+        console.print(f"[error]Error:[/] {exc}")
+        return 2
+    render_session_renamed(console, renamed)
+    return 0
+
+
+def select_saved_session(console: Console, store: SessionStore, limit: int) -> str | None:
+    sessions = store.list(limit)
+    if not sessions:
+        console.print("[text.secondary]No saved sessions in this workspace.[/]")
+        return None
+    try:
+        return select_session(sessions)
+    except (EOFError, KeyboardInterrupt):
+        console.print("\n[warning]Cancelled.[/]")
+        return None
 
 
 def doctor(console: Console, workspace: Path, settings: Settings) -> int:
