@@ -4,6 +4,24 @@
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-07-16
+
+### Added
+
+- 新增用户级 SQLite 记忆库、global/workspace/session 作用域、FTS5 检索、来源、置信度和过期时间。
+- 新增 `/memory list/search/show/add/edit/forget/undo/purge/export/import/status/enable/disable` 手动工作流。
+- 新增只读模型记忆检索工具和 `[[memory:...]]` 引用；不自动提取、写入或注入记忆。
+
+### Changed
+
+- 工作区 schema 升至 v2，消息关联 run；记忆失效或 revision 变化后，相关历史 run 不再进入模型上下文。
+- `doctor` 报告用户记忆库、FTS5 与当前工作区写策略。
+
+### Security
+
+- 记忆写入和导入统一脱敏密钥、Bearer token、私钥及常见 token；模型工具审计不保存查询或记忆正文。
+- `capslock.toml` 可禁止当前项目写记忆，本机开关不能覆盖项目禁令；永久清除擦除正文、索引和历史版本。
+
 ## [1.3.2] - 2026-07-15
 
 ### Changed

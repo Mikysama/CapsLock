@@ -9,6 +9,7 @@ from ..config import Settings
 from ..permissions import PermissionMode
 from ..runtime import WorkspaceAgent
 from ..session import SessionStore
+from ..storage import MemoryStore
 
 
 class WorkspaceApplication:
@@ -18,6 +19,8 @@ class WorkspaceApplication:
         self.client = client
         self.store = SessionStore(self.workspace / ".capslock" / "capslock.sqlite3")
         try:
+            memory_path = settings.memory.database or self.workspace / ".capslock" / "memory.sqlite3"
+            self.memory_store = MemoryStore(memory_path)
             mode = PermissionMode.parse(self.store.workspace_setting("permission_mode", settings.permission_mode) or settings.permission_mode)
             self.agent = WorkspaceAgent(
                 client,
@@ -38,6 +41,8 @@ class WorkspaceApplication:
                 mcp_timeout_seconds=settings.mcp.mcp_timeout_seconds,
                 mcp_output_bytes=settings.mcp.mcp_output_bytes,
                 permission_mode=mode,
+                memory_store=self.memory_store,
+                memory_project_write_enabled=settings.memory.project_write_enabled,
             )
         except Exception:
             self.close()
@@ -49,7 +54,12 @@ class WorkspaceApplication:
             if callable(close):
                 close()
         finally:
-            self.store.close()
+            try:
+                self.store.close()
+            finally:
+                memory_store = getattr(self, "memory_store", None)
+                if memory_store is not None:
+                    memory_store.close()
 
     def __enter__(self) -> "WorkspaceApplication":
         return self

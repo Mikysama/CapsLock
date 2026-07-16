@@ -21,6 +21,10 @@ WorkspaceApplication / WorkspaceAgent
  ├─ ToolRegistry (tooling/)
  └─ SessionStore facade
      └─ repositories + versioned SQLite migrations (storage/)
+User MemoryStore
+ ├─ global / workspace / session scope
+ ├─ FTS5 + revision history + content-free audit
+ └─ MemoryService + read-only model tools
 ```
 
 模块职责：
@@ -29,6 +33,7 @@ WorkspaceApplication / WorkspaceAgent
 - `runtime.py`、`runtime_support.py`、`model.py`：模型适配、工具循环、引用校验和运行记录。
 - `tooling/`：工具注册表，以及工作区/Git、任务/来源和动作工具。
 - `storage/`：SQLite 连接、顺序迁移和领域 repositories。
+- `memory.py`：用户级记忆作用域、写策略、脱敏、导入导出和上下文失效隔离。
 - `policy.py`：工作区受控读写安全边界。
 - `changes.py`：变更提案、审批、应用、冲突保护与撤销。
 - `execution.py`：固定命令模板、审批、进程执行、超时与输出限制。
@@ -42,7 +47,7 @@ WorkspaceApplication / WorkspaceAgent
 
 ## 验证
 
-当前 65 项测试覆盖：
+当前 74 项测试覆盖：
 
 - 路径越界、二进制文件与超大文件拒绝。
 - 文件读取、全文检索和稳定 Evidence ID。
@@ -54,6 +59,7 @@ WorkspaceApplication / WorkspaceAgent
 - schema v0 到 v1 的备份与迁移、重复 ID 拒绝、事务回滚和幂等启动。
 - 动作状态转换、跨会话访问、模型 adapter、当前 run 事件作用域和资源关闭。
 - v1.0–v1.3.2 的路径、证据、会话、编辑、命令、来源、权限和主题回归。
+- v1.4.0 的跨工作区记忆作用域、FTS、脱敏、生命周期、导入导出、模型引用和失效上下文隔离。
 
 运行：
 
@@ -65,7 +71,7 @@ python -m pip_audit
 python scripts/check_repository.py
 python -m build
 python -m twine check dist/*
-python scripts/verify_release.py --tag v1.3.2
+python scripts/verify_release.py --tag v1.4.0
 capslock doctor
 ```
 

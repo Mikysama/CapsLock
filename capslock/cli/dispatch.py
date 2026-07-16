@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from . import actions
+from .memory import memory_command
 from .commands import resolve_command
 from .context import CliContext
 from .render import render_command_tree, render_status
@@ -51,6 +52,7 @@ def handlers(context: CliContext) -> dict[str, CommandHandler]:
         "commands": lambda _: actions.render_commands(context),
         "web": lambda _: actions.render_external_actions(context, kinds={"web_search", "web_fetch"}),
         "sources": lambda _: actions.render_sources(context),
+        "memory": lambda value: memory_command(context, value),
         "mcp": lambda value: actions.mcp_command(context, value),
         "approve": lambda value: actions.approve_action(context, value.partition(" ")[2].strip()),
         "reject": lambda value: actions.reject_action(context, value.partition(" ")[2].strip()),

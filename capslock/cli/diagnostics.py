@@ -11,6 +11,7 @@ from ..config import Settings
 from ..execution import CommandService
 from ..policy import WorkspacePolicy
 from ..session import SessionStore
+from ..storage import MemoryStore, workspace_key
 from .render import render_doctor, render_session_list
 
 
@@ -29,6 +30,10 @@ def doctor(console: Console, workspace: Path, settings: Settings) -> int:
     with open_store(workspace) as store:
         commands = CommandService(store, WorkspacePolicy(workspace), "doctor", "doctor", lambda *args, **kwargs: None)
         available = commands.available_templates()
+    memory_path = settings.memory.database or workspace / ".capslock" / "memory.sqlite3"
+    with MemoryStore(memory_path) as memory:
+        local_write = memory.local_write_enabled(workspace_key(workspace))
+        fts_available = memory.fts_available
     render_doctor(
         console,
         workspace=workspace,
@@ -38,6 +43,9 @@ def doctor(console: Console, workspace: Path, settings: Settings) -> int:
         api_ready=api_ready,
         git_ready=git_ready,
         commands=available,
+        memory_database=memory_path,
+        memory_fts=fts_available,
+        memory_write_enabled=settings.memory.project_write_enabled and local_write,
     )
     return 0
 

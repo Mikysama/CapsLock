@@ -68,7 +68,8 @@ def test_legacy_actions_migrate_with_backup_and_normalized_statuses(tmp_path: Pa
         assert command.result_kind is ActionResultKind.NONZERO_EXIT
         assert external.status is ActionStatus.COMPLETED
         assert external.result_kind is ActionResultKind.SUCCESS
-        assert store._connection.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert store._connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert "run_id" in {row[1] for row in store._connection.execute("PRAGMA table_info(messages)")}
         assert store._connection.execute("SELECT count(*) FROM actions").fetchone()[0] == 3
 
     backups = list((tmp_path / "backups").glob("capslock-schema-v0-*.sqlite3"))
@@ -91,3 +92,32 @@ def test_duplicate_legacy_action_ids_roll_back_and_keep_backup(tmp_path: Path) -
     assert {"changes", "commands", "external_actions"} <= tables
     assert "actions" not in tables
     assert len(list((tmp_path / "backups").glob("capslock-schema-v0-*.sqlite3"))) == 1
+
+
+def test_schema_v1_adds_run_ids_with_one_backup(tmp_path: Path) -> None:
+    path = tmp_path / "capslock.sqlite3"
+    connection = sqlite3.connect(path)
+    connection.executescript("""
+        CREATE TABLE messages (
+          id INTEGER PRIMARY KEY, session_id TEXT NOT NULL, role TEXT NOT NULL,
+          content TEXT NOT NULL, created_at TEXT NOT NULL
+        );
+        PRAGMA user_version = 1;
+    """)
+    connection.execute(
+        "INSERT INTO messages(session_id,role,content,created_at) VALUES('s','user','kept','now')"
+    )
+    connection.commit()
+    connection.close()
+
+    with SessionStore(path) as store:
+        columns = {row[1] for row in store._connection.execute("PRAGMA table_info(messages)")}
+        assert "run_id" in columns
+        assert store.messages("s") == [{"role": "user", "content": "kept"}]
+        assert store._connection.execute("PRAGMA user_version").fetchone()[0] == 2
+
+    backups = list((tmp_path / "backups").glob("capslock-schema-v1-*.sqlite3"))
+    assert len(backups) == 1
+    with SessionStore(path):
+        pass
+    assert list((tmp_path / "backups").glob("capslock-schema-v1-*.sqlite3")) == backups

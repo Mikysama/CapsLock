@@ -39,6 +39,26 @@ class ActionResultKind(StrEnum):
     SUCCESS = "success"
 
 
+class MemoryScope(StrEnum):
+    GLOBAL = "global"
+    WORKSPACE = "workspace"
+    SESSION = "session"
+
+
+class MemoryType(StrEnum):
+    FACT = "fact"
+    PREFERENCE = "preference"
+    DECISION = "decision"
+    TODO = "todo"
+    NOTE = "note"
+
+
+class MemoryStatus(StrEnum):
+    ACTIVE = "active"
+    FORGOTTEN = "forgotten"
+    PURGED = "purged"
+
+
 @dataclass(frozen=True)
 class ActionInfo:
     id: str
@@ -133,3 +153,22 @@ class SourceInfo:
     excerpt: str
     fetched_at: str
     suspicious: bool
+
+
+@dataclass(frozen=True)
+class MemoryInfo:
+    id: str
+    content: str | None
+    type: MemoryType
+    scope: MemoryScope
+    workspace_key: str | None
+    session_id: str | None
+    source_kind: str
+    source_ref: str | None
+    confidence: float
+    expires_at: str | None
+    revision: int
+    status: MemoryStatus
+    created_at: str
+    updated_at: str
+    purged_at: str | None = None

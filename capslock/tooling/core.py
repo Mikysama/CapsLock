@@ -5,13 +5,16 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from ..application import ActionCoordinator
 from ..evidence import Evidence
 from ..permissions import PermissionMode
 from ..policy import PolicyError, WorkspacePolicy
 from ..session import SessionStore
+
+if TYPE_CHECKING:
+    from ..memory import MemoryService
 
 
 @dataclass(frozen=True)
@@ -21,9 +24,16 @@ class ToolResult:
     error: str | None = None
     citations: tuple[Evidence, ...] = ()
     source_ids: tuple[str, ...] = ()
+    memories: tuple[object, ...] = ()
+    audit_data: object | None = None
+    audit_arguments: dict[str, object] | None = None
 
     def for_model(self) -> str:
         return json.dumps({"ok": self.ok, "data": self.data, "error": self.error}, ensure_ascii=False)
+
+    def for_audit(self) -> str:
+        data = self.data if self.audit_data is None else self.audit_data
+        return json.dumps({"ok": self.ok, "data": data, "error": self.error}, ensure_ascii=False)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -34,6 +44,7 @@ class RunContext:
     event: Callable[..., None]
     store: SessionStore | None = None
     actions: ActionCoordinator | None = None
+    memory: MemoryService | None = None
     permission_mode: PermissionMode = PermissionMode.APPROVE_FOR_ME
 
 

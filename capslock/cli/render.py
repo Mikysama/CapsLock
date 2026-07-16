@@ -128,7 +128,12 @@ def selection_menu(title: str, options: tuple[tuple[str, str], ...]) -> Panel:
 def render_answer(console: Console, answer: WorkspaceAnswer, debug: bool) -> None:
     console.print(f"\n[agent.bold]◆ Capslock[/] {answer.text}")
     for item in answer.citations:
-        if hasattr(item, "path"):
+        if hasattr(item, "scope"):
+            console.print(
+                f"  [text.secondary]Memory:[/] {item.type.value} · {item.scope.value} · "
+                f"[text.muted]{item.source_kind} ({item.id})[/]"
+            )
+        elif hasattr(item, "path"):
             console.print(
                 f"  [text.secondary]Evidence:[/] [path]{item.path}[/]:L{item.start_line}-L{item.end_line} "
                 f"[text.muted]({item.id})[/]"
@@ -240,6 +245,53 @@ def render_sources(console: Console, sources: list[object]) -> None:
             Text("untrusted/injection" if item.suspicious else "untrusted", style="warning"),
         )
     console.print(output)
+
+
+def render_memories(console: Console, memories: list[object], *, title: str) -> None:
+    if not memories:
+        console.print("[text.secondary]No matching memories.[/]")
+        return
+    output = table("Memory", "Status", "Type", "Scope", "Confidence", "Source", "Content")
+    for item in memories:
+        output.add_row(
+            Text(item.id[:12], style="text.muted"),
+            status_text(item.status.value),
+            item.type.value,
+            item.scope.value,
+            f"{item.confidence:g}",
+            item.source_kind,
+            (item.content or "(purged)")[:80],
+        )
+    output.title = title
+    console.print(output)
+
+
+def render_memory(console: Console, item: object) -> None:
+    details = Text.assemble(
+        ("id=", "text.muted"), (f"{item.id}\n", "text.secondary"),
+        ("type=", "text.muted"), (f"{item.type.value}\n", "text.secondary"),
+        ("scope=", "text.muted"), (f"{item.scope.value}\n", "text.secondary"),
+        ("status=", "text.muted"), (f"{item.status.value}\n", "text.secondary"),
+        ("revision=", "text.muted"), (f"{item.revision}\n", "text.secondary"),
+        ("confidence=", "text.muted"), (f"{item.confidence:g}\n", "text.secondary"),
+        ("source=", "text.muted"), (f"{item.source_kind}:{item.source_ref or '-'}\n", "text.secondary"),
+        ("expires_at=", "text.muted"), (f"{item.expires_at or 'never'}\n\n", "text.secondary"),
+        (item.content or "(content permanently purged)", "text.primary"),
+    )
+    console.print(Panel(details, title=f"Memory {item.id[:12]}", border_style="border.focus"))
+
+
+def render_memory_policy(console: Console, memory: object) -> None:
+    console.print(
+        Text.assemble(
+            ("project_write_enabled=", "text.muted"),
+            (f"{memory.project_write_enabled}\n", "success" if memory.project_write_enabled else "warning"),
+            ("local_write_enabled=", "text.muted"),
+            (f"{memory.local_write_enabled}\n", "success" if memory.local_write_enabled else "warning"),
+            ("effective_write_enabled=", "text.muted"),
+            (str(memory.write_enabled), "success" if memory.write_enabled else "warning"),
+        )
+    )
 
 
 def render_status(console: Console, agent: object) -> None:
@@ -393,6 +445,9 @@ def render_doctor(
     api_ready: bool,
     git_ready: bool,
     commands: list[str],
+    memory_database: object | None = None,
+    memory_fts: bool | None = None,
+    memory_write_enabled: bool | None = None,
 ) -> None:
     output = table("Check", "Result")
     output.add_row("Workspace", Text(str(workspace), style="path"))
@@ -408,6 +463,10 @@ def render_doctor(
         ),
     )
     output.add_row("Command templates", Text(", ".join(commands) or "none detected", style="command"))
+    if memory_database is not None:
+        output.add_row("Memory SQLite", Text(str(memory_database), style="path"))
+        output.add_row("Memory FTS5", Text("available" if memory_fts else "missing", style="success" if memory_fts else "error"))
+        output.add_row("Memory writes", Text("enabled" if memory_write_enabled else "disabled", style="success" if memory_write_enabled else "warning"))
     console.print(output)
 
 

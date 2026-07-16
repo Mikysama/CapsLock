@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 BASE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 CREATE TABLE IF NOT EXISTS messages (
   id INTEGER PRIMARY KEY, session_id TEXT NOT NULL, role TEXT NOT NULL,
-  content TEXT NOT NULL, created_at TEXT NOT NULL
+  content TEXT NOT NULL, created_at TEXT NOT NULL, run_id TEXT
 );
 CREATE TABLE IF NOT EXISTS runs (
   id TEXT PRIMARY KEY, session_id TEXT NOT NULL, question TEXT NOT NULL,
@@ -77,14 +77,15 @@ def migrate(connection: sqlite3.Connection, path: Path) -> None:
     version = int(connection.execute("PRAGMA user_version").fetchone()[0])
     if version > SCHEMA_VERSION:
         raise RuntimeError(f"database schema {version} is newer than supported schema {SCHEMA_VERSION}")
-    tables = _tables(connection)
-    legacy = {"changes", "commands", "external_actions"} & tables
     if version == SCHEMA_VERSION:
         connection.executescript(BASE_SCHEMA + ACTION_SCHEMA)
+        _migrate_messages_v2(connection)
         connection.commit()
         return
-    if not legacy:
+    tables = _tables(connection)
+    if not tables:
         connection.executescript(BASE_SCHEMA + ACTION_SCHEMA)
+        _migrate_messages_v2(connection)
         connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         connection.commit()
         return
@@ -92,14 +93,23 @@ def migrate(connection: sqlite3.Connection, path: Path) -> None:
     backup = _backup(connection, path, version)
     try:
         connection.execute("BEGIN IMMEDIATE")
-        _migrate_legacy_actions(connection, legacy)
+        legacy = {"changes", "commands", "external_actions"} & tables
+        if legacy:
+            _migrate_legacy_actions(connection, legacy)
+        _execute_script(connection, BASE_SCHEMA + ACTION_SCHEMA)
+        _migrate_messages_v2(connection)
         connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-        connection.commit()
-        connection.executescript(BASE_SCHEMA)
         connection.commit()
     except Exception as exc:
         connection.rollback()
         raise RuntimeError(f"database migration failed; backup retained at {backup}") from exc
+
+
+def _migrate_messages_v2(connection: sqlite3.Connection) -> None:
+    columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(messages)")}
+    if "run_id" not in columns:
+        connection.execute("ALTER TABLE messages ADD COLUMN run_id TEXT")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_messages_session_run ON messages(session_id, run_id)")
 
 
 def _tables(connection: sqlite3.Connection) -> set[str]:

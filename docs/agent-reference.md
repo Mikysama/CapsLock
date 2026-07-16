@@ -1,6 +1,6 @@
 # CapsLock Agent 工具与指令参考
 
-本参考描述当前 v1.3.2 的模型工具、终端指令和审批边界。CapsLock 是按需运行的本机 Agent，权限模式可在会话内切换。
+本参考描述当前 v1.4.0 的模型工具、终端指令和审批边界。CapsLock 是按需运行的本机 Agent，权限模式可在会话内切换。
 
 ## 权限模式与风险兜底
 
@@ -27,6 +27,8 @@
 | `task_list_update` | 创建或替换会话任务清单。 | 会话状态 |
 | `task_status_update` | 更新任务为 pending、running、blocked、completed、failed 或 cancelled。 | 会话状态 |
 | `list_external_sources` | 查看本会话已批准 Web 动作保存的外部来源。 | 只读；内容不可信 |
+| `search_memories` | 全文检索当前工作区和会话可见的用户记忆。 | 只读；不自动调用或写入 |
+| `get_memory` | 按 ID 读取一条可见且未过期的用户记忆。 | 只读 |
 | `propose_file_edit` | 为唯一精确文本匹配创建编辑提案。 | 提案，无文件写入 |
 | `propose_file_create` | 为一个新文本文件创建提案。 | 提案，无文件写入 |
 | `apply_change` / `discard_change` | 应用已批准的编辑，或丢弃待处理提案。 | `apply_change` 需审批 |
@@ -54,6 +56,12 @@
 | `/commands` | 查看命令提案、状态、cwd 与退出码。 |
 | `/web` | 查看 Web 搜索和抓取动作。 |
 | `/sources` | 查看已保存的外部来源及不可信/提示注入标记。 |
+| `/memory list [scope] [--all]` | 列出可见记忆；`--all` 包含已过期和已遗忘记录。 |
+| `/memory search <query>`、`/memory show <id>` | 本地全文检索或查看记忆、作用域及来源。 |
+| `/memory add`、`/memory edit <id>` | 交互式创建或修改记忆；敏感片段保存前会被脱敏。 |
+| `/memory forget <id>`、`/memory undo <id>`、`/memory purge <id>` | 可恢复遗忘、撤销，或二次确认后永久清除。 |
+| `/memory export <scope> <path>`、`/memory import <scope> <path>` | 在工作区 JSON 文件与指定作用域之间导入导出。 |
+| `/memory status|enable|disable` | 查看或切换当前工作区的本机写入开关。 |
 | `/mcp list` | 列出合并后的 MCP server 配置。 |
 | `/mcp status <server>`、`/mcp tools <server>` | 查看 server 的配置、状态与允许工具。 |
 | `/approve <id>` | 展示动作详情后确认并执行。文件变更和命令使用 `y/yes`；外部动作使用编号菜单。 |
@@ -71,6 +79,7 @@
 - `.capslock/capslock.sqlite3`：会话、运行、统一动作生命周期、领域明细、任务和来源审计。
 - `.capslock/backups/`：schema 升级前自动创建的数据库备份。
 - `.capslock/events.jsonl`：脱敏事件流。
+- Linux `$XDG_DATA_HOME/capslock/memory.sqlite3` 或 macOS Application Support：用户级记忆、历史、索引和无正文审计；可由 `CAPSLOCK_MEMORY_DATABASE` 覆盖。
 - `capslock.mcp.json`：可提交的项目 MCP 声明，禁止 `env`/凭据。
 - `.capslock/mcp.local.json`：本机私有 MCP 覆盖、路径和环境变量；不得提交。
 
@@ -78,5 +87,6 @@
 
 - 本地结论使用 `[[evidence:ev_…]]`，最终输出显示路径与行号。
 - 外部结论使用 `[[source:<source-id>]]`，最终输出显示标题、URL 与抓取时间。
+- 记忆结论使用 `[[memory:mem_…]]`，最终输出显示类型、作用域和来源。
 - 支持的文件必须位于工作区内、为 UTF-8 且不超过配置上限；`.git` 和 `.capslock` 不允许由编辑工具修改。
 - URL 抓取拒绝 localhost、私网、链路本地、保留地址和重定向后的非公开地址；仅接受 HTML/纯文本。

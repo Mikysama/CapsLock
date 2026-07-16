@@ -35,6 +35,25 @@ COMMAND_TREE = (
     CommandSpec("/web", "查看 Web 动作提案", "web"),
     CommandSpec("/sources", "查看已保存的外部来源", "sources"),
     CommandSpec(
+        "/memory", "管理用户本地记忆", "memory",
+        (
+            CommandSpec("/memory list", "列出可见记忆", "memory", accepts_arguments=True),
+            CommandSpec("/memory search", "全文检索可见记忆；需查询文本", "memory", accepts_arguments=True),
+            CommandSpec("/memory show", "显示记忆详情；需 ID", "memory", accepts_arguments=True),
+            CommandSpec("/memory add", "交互式新增记忆", "memory"),
+            CommandSpec("/memory edit", "交互式修改记忆；需 ID", "memory", accepts_arguments=True),
+            CommandSpec("/memory forget", "遗忘记忆；需 ID", "memory", accepts_arguments=True),
+            CommandSpec("/memory undo", "撤销最近记忆操作；需 ID", "memory", accepts_arguments=True),
+            CommandSpec("/memory purge", "彻底清除记忆；需 ID", "memory", accepts_arguments=True),
+            CommandSpec("/memory export", "导出作用域到工作区 JSON", "memory", accepts_arguments=True),
+            CommandSpec("/memory import", "从工作区 JSON 原子导入", "memory", accepts_arguments=True),
+            CommandSpec("/memory status", "显示当前记忆写策略", "memory"),
+            CommandSpec("/memory enable", "启用本机记忆写入", "memory"),
+            CommandSpec("/memory disable", "禁用本机记忆写入", "memory"),
+        ),
+        accepts_arguments=True,
+    ),
+    CommandSpec(
         "/mcp", "管理本地 MCP 服务", "mcp",
         (
             CommandSpec("/mcp list", "列出 MCP 服务", "mcp"),

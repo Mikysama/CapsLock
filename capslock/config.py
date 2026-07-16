@@ -45,6 +45,12 @@ class McpSettings:
 
 
 @dataclass(frozen=True)
+class MemorySettings:
+    project_write_enabled: bool = True
+    database: Path | None = None
+
+
+@dataclass(frozen=True)
 class Settings:
     model_config: ModelSettings
     runtime: RuntimeSettings
@@ -52,19 +58,26 @@ class Settings:
     web: WebSettings
     mcp: McpSettings
     permission_mode: str
+    memory: MemorySettings = MemorySettings()
 
     def __getattr__(self, name: str) -> object:
-        for group in (self.model_config, self.runtime, self.command, self.web, self.mcp):
+        for group in (self.model_config, self.runtime, self.command, self.web, self.mcp, self.memory):
             if hasattr(group, name):
                 return getattr(group, name)
         raise AttributeError(name)
 
     @classmethod
     def load(cls, workspace: Path) -> "Settings":
-        values: dict[str, object] = {}
+        document: dict[str, object] = {}
         config = workspace / "capslock.toml"
         if config.is_file():
-            values = tomllib.loads(config.read_text(encoding="utf-8")).get("model", {})
+            document = tomllib.loads(config.read_text(encoding="utf-8"))
+        values = document.get("model", {})
+        if not isinstance(values, dict):
+            values = {}
+        memory_values = document.get("memory", {})
+        if not isinstance(memory_values, dict):
+            memory_values = {}
 
         def value(name: str, default: object, *aliases: str) -> object:
             for environment_name in (name, *aliases):
@@ -101,4 +114,25 @@ class Settings:
                 mcp_output_bytes=int(value("CAPSLOCK_MCP_OUTPUT_BYTES", 100_000)),
             ),
             permission_mode=str(value("CAPSLOCK_PERMISSION_MODE", "approve_for_me")),
+            memory=MemorySettings(
+                project_write_enabled=_boolean(memory_values.get("enabled", True)),
+                database=_memory_database(),
+            ),
         )
+
+
+def _boolean(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().casefold()
+    if normalized in {"true", "1", "yes", "on"}:
+        return True
+    if normalized in {"false", "0", "no", "off"}:
+        return False
+    raise ValueError("memory.enabled must be true or false")
+
+
+def _memory_database() -> Path:
+    from .memory import default_memory_database
+
+    return default_memory_database()

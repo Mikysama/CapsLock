@@ -19,3 +19,7 @@ mcp_timeout_seconds = 30
 mcp_output_bytes = 100000
 # full_access | approve_for_me | ask_for_approval
 permission_mode = "approve_for_me"
+
+[memory]
+# Project policy: false blocks add/edit/import/forget/undo/purge but keeps reads and exports available.
+enabled = true

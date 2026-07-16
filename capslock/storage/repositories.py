@@ -50,30 +50,45 @@ class SessionRepository(Repository):
         rows = self.connection.execute("SELECT * FROM sessions ORDER BY updated_at DESC LIMIT ?", (limit,)).fetchall()
         return [_session_info(row) for row in rows]
 
-    def messages(self, session_id: str, limit: int = 24) -> list[dict[str, str]]:
-        rows = self.connection.execute(
-            "SELECT role,content FROM messages WHERE session_id=? ORDER BY id DESC LIMIT ?", (session_id, limit)
-        ).fetchall()
+    def messages(self, session_id: str, limit: int = 24, *, excluded_run_ids: set[str] | None = None) -> list[dict[str, str]]:
+        query = "SELECT role,content FROM messages WHERE session_id=?"
+        values: list[Any] = [session_id]
+        if excluded_run_ids:
+            query += " AND (run_id IS NULL OR run_id NOT IN (" + ",".join("?" for _ in excluded_run_ids) + "))"
+            values.extend(sorted(excluded_run_ids))
+        query += " ORDER BY id DESC LIMIT ?"
+        values.append(limit)
+        rows = self.connection.execute(query, values).fetchall()
         return [{"role": row["role"], "content": row["content"]} for row in reversed(rows)]
 
-    def append_message(self, session_id: str, role: str, content: str) -> None:
+    def append_message(self, session_id: str, role: str, content: str, *, run_id: str | None = None) -> None:
         timestamp = now()
         with self.connection:
             self.connection.execute(
-                "INSERT INTO messages(session_id,role,content,created_at) VALUES(?,?,?,?)",
-                (session_id, role, content, timestamp),
+                "INSERT INTO messages(session_id,role,content,created_at,run_id) VALUES(?,?,?,?,?)",
+                (session_id, role, content, timestamp, run_id),
             )
             self.connection.execute("UPDATE sessions SET updated_at=? WHERE id=?", (timestamp, session_id))
 
-    def message_count(self, session_id: str) -> int:
-        return int(self.connection.execute("SELECT count(*) FROM messages WHERE session_id=?", (session_id,)).fetchone()[0])
+    def message_count(self, session_id: str, *, excluded_run_ids: set[str] | None = None) -> int:
+        query = "SELECT count(*) FROM messages WHERE session_id=?"
+        values: list[Any] = [session_id]
+        if excluded_run_ids:
+            query += " AND (run_id IS NULL OR run_id NOT IN (" + ",".join("?" for _ in excluded_run_ids) + "))"
+            values.extend(sorted(excluded_run_ids))
+        return int(self.connection.execute(query, values).fetchone()[0])
 
-    def compact_summary(self, session_id: str, keep: int) -> str:
-        rows = self.connection.execute("SELECT role,content FROM messages WHERE session_id=? ORDER BY id", (session_id,)).fetchall()
+    def compact_summary(self, session_id: str, keep: int, *, excluded_run_ids: set[str] | None = None) -> str:
+        query = "SELECT role,content FROM messages WHERE session_id=?"
+        values: list[Any] = [session_id]
+        if excluded_run_ids:
+            query += " AND (run_id IS NULL OR run_id NOT IN (" + ",".join("?" for _ in excluded_run_ids) + "))"
+            values.extend(sorted(excluded_run_ids))
+        query += " ORDER BY id"
+        rows = self.connection.execute(query, values).fetchall()
         older = rows[:-keep] if len(rows) > keep else []
         if not older:
-            row = self.connection.execute("SELECT summary FROM sessions WHERE id=?", (session_id,)).fetchone()
-            return "" if row is None else str(row[0])
+            return ""
         summary = "\n".join(f"{row['role']}: {row['content']}" for row in older)[-6000:]
         self.connection.execute("UPDATE sessions SET summary=?,updated_at=? WHERE id=?", (summary, now(), session_id))
         self.connection.commit()
