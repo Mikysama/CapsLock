@@ -112,7 +112,7 @@ jobs:
         id: release
         run: |
           python scripts/verify_release.py --tag "$GITHUB_REF_NAME"
-          notes="docs/releases/${GITHUB_REF_NAME#v}.md"
+          notes="docs/releases/$GITHUB_REF_NAME.md"
           test -f "$notes"
           echo "notes=$notes" >> "$GITHUB_OUTPUT"
       - name: Build final distributions
