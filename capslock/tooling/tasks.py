@@ -13,7 +13,7 @@ def task_list_update(context: RunContext, arguments: dict[str, Any]) -> ToolResu
         raise ValueError("items must be a non-empty list of task strings")
     if context.store is None:
         return ToolResult(True, {"items": items, "note": "Tasks are session-scoped for this run."})
-    tasks = context.store.replace_tasks(context.session_id, items)
+    tasks = context.store.replace_tasks(context.session_id, items, run_id=context.run_id)
     return ToolResult(True, {"tasks": [{"id": task.id, "text": task.text, "status": task.status} for task in tasks]})
 
 

@@ -72,12 +72,27 @@ def permission_rprompt(mode: PermissionMode) -> FormattedText:
     return FormattedText([("class:permission", f"{mode.value} ")])
 
 
-def prompt_footer(width: int | None = None) -> FormattedText:
+SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+
+
+def prompt_footer(
+    width: int | None = None,
+    *,
+    activity: str | None = None,
+    spinner_frame: int = 0,
+) -> FormattedText:
     terminal_width = width or shutil.get_terminal_size(fallback=(80, 24)).columns
+    status = []
+    if activity == "thinking":
+        status = [
+            ("class:running", f"{SPINNER_FRAMES[spinner_frame % len(SPINNER_FRAMES)]} "),
+            ("class:thinking", "Thinking...  ·  "),
+        ]
     return FormattedText(
         [
             ("class:input-border", "─" * max(20, terminal_width - 1)),
             ("", "\n"),
+            *status,
             ("class:footer", "? /help  ·  ↑/↓ 选择  ·  Tab 补全"),
         ]
     )

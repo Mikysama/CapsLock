@@ -140,6 +140,8 @@ def build_prompt_style(*, no_color: bool | None = None) -> PromptStyle:
             "prompt": foreground("primary", "bold"),
             "input-border": foreground("borderFocus"),
             "footer": foreground("textMuted"),
+            "running": foreground("running", "bold"),
+            "thinking": foreground("thinking", "bold"),
             "slash-command": foreground("command", "bold"),
             "user-input": foreground("user"),
             "command-name": foreground("command", "bold"),

@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from capslock.config import Settings
+from capslock.config import DEFAULT_MAX_TURNS, Settings
 from capslock.environment import load_project_environment
 from capslock.policy import PolicyError, WorkspacePolicy
 from capslock.tools import RunContext, workspace_tools
@@ -115,3 +115,4 @@ def test_toml_and_defaults_are_used_without_environment(tmp_path: Path, monkeypa
     assert defaults.model == "deepseek-v4-flash"
     assert defaults.base_url == "https://api.deepseek.com"
     assert defaults.api_key is None
+    assert defaults.max_turns == DEFAULT_MAX_TURNS == 32

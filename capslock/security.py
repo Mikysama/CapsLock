@@ -30,7 +30,10 @@ def redact(value: Any) -> Any:
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         return [redact(item) for item in value]
     if isinstance(value, str):
-        return _SECRET_TEXT.sub(r"\1=<redacted>", value)
+        safe = _PRIVATE_KEY.sub("<redacted>", value)
+        safe = _BEARER_TEXT.sub(r"\1 <redacted>", safe)
+        safe = _KNOWN_TOKEN.sub("<redacted>", safe)
+        return _SECRET_TEXT.sub(r"\1=<redacted>", safe)
     return value
 
 

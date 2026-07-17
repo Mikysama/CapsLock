@@ -1,6 +1,6 @@
 # CapsLock Agent 工具与指令参考
 
-本参考描述当前 v1.6.0 的模型工具、记忆、Skill、终端指令和审批边界。CapsLock 是按需运行的本机 Agent，权限模式可在会话内切换。
+本参考描述当前 v1.7.0 的模型工具、工作流 TUI、记忆、Skill、终端指令和审批边界。CapsLock 是按需运行的本机 Agent，权限模式可在会话内切换。
 
 ## 权限模式与风险兜底
 
@@ -59,6 +59,9 @@
 | `/commands` | 查看命令提案、状态、cwd 与退出码。 |
 | `/web` | 查看 Web 搜索和抓取动作。 |
 | `/sources` | 查看已保存的外部来源及不可信/提示注入标记。 |
+| `/approvals` | 集中查看待审批文件、命令、Web 和 MCP 动作的风险、原因与回滚建议。 |
+| `/queue`、`/queue move|cancel ...` | 查看、重排或取消尚未开始的前台工作项。 |
+| `/retry <run-id>` | 为失败、取消或中断的 run 创建新尝试，并从最近稳定检查点继续。 |
 | `/memory list [scope] [--all]` | 列出可见记忆；`--all` 包含已过期和已遗忘记录。 |
 | `/memory search <query>`、`/memory show <id>` | 本地全文检索或查看记忆、作用域及来源。 |
 | `/memory add`、`/memory edit <id>` | 交互式创建或修改记忆；敏感片段保存前会被脱敏。 |
@@ -89,6 +92,8 @@
 `capslock sessions rename <session-id-or-prefix> <title>` 可在会话外重命名，
 裸 `capslock resume` 会列出标题、最近更新时间和 Session ID，并支持方向键选择；
 `capslock resume <session-id-or-prefix>` 仍可通过完整 ID 或列表显示的唯一短前缀直接恢复。
+
+TTY 中裸 `capslock` 默认使用流式行内 TUI；`capslock chat --classic` 可回退到旧交互。非交互调用使用 `capslock exec [PROMPT] [--json]`，待审批时不会读取 stdin 确认，而是返回退出码 3。`capslock sessions search/archive/unarchive/export/delete` 提供与 TUI 会话面板等价的管理入口；导出目录包含 `session.json` 和 `session.md`。
 
 ## 配置与数据位置
 

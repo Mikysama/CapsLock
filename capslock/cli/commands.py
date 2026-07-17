@@ -35,6 +35,16 @@ COMMAND_TREE = (
     CommandSpec("/commands", "查看待审固定命令", "commands"),
     CommandSpec("/web", "查看 Web 动作提案", "web"),
     CommandSpec("/sources", "查看已保存的外部来源", "sources"),
+    CommandSpec("/approvals", "打开集中审批中心", "approvals"),
+    CommandSpec(
+        "/queue", "查看或调整前台任务队列", "queue",
+        (
+            CommandSpec("/queue cancel", "取消排队任务；需工作项 ID", "queue", accepts_arguments=True),
+            CommandSpec("/queue move", "移动排队任务；需 ID 和位置", "queue", accepts_arguments=True),
+        ),
+        accepts_arguments=True,
+    ),
+    CommandSpec("/retry", "从失败 run 的最近稳定步骤重试；需 run ID", "retry", accepts_arguments=True),
     CommandSpec(
         "/memory", "管理用户本地记忆", "memory",
         (

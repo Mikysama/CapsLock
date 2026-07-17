@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Callable
 
 from ..changes import ChangeService
@@ -107,6 +108,14 @@ class ActionCoordinator:
             if isinstance(service, WebService):
                 service.close()
 
+    async def approve_and_execute_async(self, action_id: str) -> ActionRecord:
+        action = self.resolve(action_id)
+        if action.type not in {ActionType.MCP_CONNECT, ActionType.MCP_CALL}:
+            return self.approve_and_execute(action_id)
+        service = self._mcp(action.run_id)
+        service.actions.approve(action.id)
+        return await service.execute_async(action.id)
+
     def execute_auto_approved(self, action_id: str) -> ActionRecord:
         action = self.resolve(action_id)
         if self._is_skill_change(action):
@@ -155,12 +164,39 @@ class ActionCoordinator:
 
     def _apply_policy(self, action_type: ActionType, record: ActionRecord) -> ActionRecord:
         assessment = self.approvals.assess(action_type)
+        self.store.set_action_risk(
+            record.id,
+            level=assessment.level,
+            reason=assessment.reason,
+            rollback=assessment.rollback,
+        )
+        record = self._record(record.id, action_type)
         self.event("risk_assessed", action=action_type.value, level=assessment.level, rollback=assessment.rollback)
         if self._is_skill_change(record) or self.approvals.requires_approval(self.permission_mode, action_type):
             return record
+        if action_type in {ActionType.MCP_CONNECT, ActionType.MCP_CALL}:
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                pass
+            else:
+                # The synchronous tool protocol cannot nest MCP's async client in the TUI loop.
+                # Keep the action visibly pending; the approval center executes it asynchronously.
+                return record
         if self.permission_mode is PermissionMode.FULL_ACCESS:
             self.event("auto_approved", action=action_type.value, level=assessment.level)
         return self.approve_and_execute(record.id)
+
+    def _record(self, action_id: str, action_type: ActionType) -> ActionRecord:
+        if action_type in {ActionType.FILE_EDIT, ActionType.FILE_CREATE}:
+            result = self.store.get_change(action_id, session_id=self.session_id)
+        elif action_type is ActionType.COMMAND:
+            result = self.store.get_command(action_id, session_id=self.session_id)
+        else:
+            result = self.store.get_external_action(action_id, session_id=self.session_id)
+        if result is None:
+            raise ValueError(f"action does not exist: {action_id}")
+        return result
 
     def _is_skill_change(self, record: ActionInfo | ActionRecord) -> bool:
         if isinstance(record, ActionInfo):

@@ -93,6 +93,41 @@ class SessionTitleSource(StrEnum):
     MANUAL = "manual"
 
 
+class WorkItemStatus(StrEnum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    WAITING_APPROVAL = "waiting_approval"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    INTERRUPTED = "interrupted"
+
+
+class RunStepKind(StrEnum):
+    MODEL = "model"
+    TOOL = "tool"
+    APPROVAL = "approval"
+
+
+class RunStepStatus(StrEnum):
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class AgentEventKind(StrEnum):
+    QUEUED = "queued"
+    THINKING = "thinking"
+    TEXT_DELTA = "text_delta"
+    TOOL_RUNNING = "tool_running"
+    TOOL_COMPLETED = "tool_completed"
+    WAITING_APPROVAL = "waiting_approval"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
 MAX_SESSION_TITLE_LENGTH = 80
 
 
@@ -127,6 +162,10 @@ class ActionInfo:
     finished_at: str | None = None
     reversed_at: str | None = None
     error: str | None = None
+    risk_level: str | None = None
+    risk_reason: str | None = None
+    rollback: str | None = None
+    decided_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -139,6 +178,46 @@ class SessionInfo:
     title: str = ""
     title_source: SessionTitleSource = SessionTitleSource.PENDING
     title_updated_at: str | None = None
+    archived_at: str | None = None
+    deletion_state: str | None = None
+
+
+@dataclass(frozen=True)
+class WorkItemInfo:
+    id: str
+    session_id: str
+    question: str
+    status: WorkItemStatus
+    position: int
+    created_at: str
+    updated_at: str
+    current_run_id: str | None = None
+    parent_work_item_id: str | None = None
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class RunStepInfo:
+    id: str
+    run_id: str
+    ordinal: int
+    kind: RunStepKind
+    status: RunStepStatus
+    checkpoint: dict[str, Any] | None
+    started_at: str
+    finished_at: str | None = None
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class AgentEvent:
+    sequence: int
+    timestamp: str
+    session_id: str
+    run_id: str
+    work_item_id: str
+    kind: AgentEventKind
+    data: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -183,6 +262,8 @@ class TaskInfo:
     session_id: str
     text: str
     status: str
+    run_id: str | None = None
+    position: int = 0
 
 
 @dataclass(frozen=True)

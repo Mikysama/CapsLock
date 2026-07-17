@@ -14,6 +14,7 @@ from ..policy import WorkspacePolicy
 from ..session import SessionStore
 from ..skills import SkillRegistry
 from ..storage import MemoryStore, workspace_key
+from ..session_management import SessionManager
 from .prompt import select_session
 from .render import render_doctor, render_session_list, render_session_renamed
 
@@ -38,6 +39,45 @@ def rename_saved_session(console: Console, store: SessionStore, prefix: str, tit
         console.print(f"[error]Error:[/] {exc}")
         return 2
     render_session_renamed(console, renamed)
+    return 0
+
+
+def search_saved_sessions(console: Console, store: SessionStore, query: str, limit: int, *, include_archived: bool = False) -> int:
+    render_session_list(console, store.search_sessions(query, limit=limit, include_archived=include_archived))
+    return 0
+
+
+def archive_saved_session(console: Console, store: SessionStore, prefix: str, *, archived: bool) -> int:
+    session = store.resolve_session(prefix)
+    if session is None:
+        console.print(f"[error]Error:[/] session does not exist: {prefix}")
+        return 2
+    updated = store.archive_session(session.id, archived=archived)
+    state = "Archived" if archived else "Restored"
+    console.print(f"[success]{state}:[/] {updated.title} [text.muted]({updated.id[:12]})[/]")
+    return 0
+
+
+def export_saved_session(console: Console, manager: SessionManager, store: SessionStore, prefix: str, destination: str) -> int:
+    session = store.resolve_session(prefix)
+    if session is None:
+        console.print(f"[error]Error:[/] session does not exist: {prefix}")
+        return 2
+    output = manager.export(session.id, destination)
+    console.print(f"[success]Exported:[/] [path]{output}[/]")
+    return 0
+
+
+def delete_saved_session(console: Console, manager: SessionManager, store: SessionStore, prefix: str, *, yes: bool = False) -> int:
+    session = store.resolve_session(prefix)
+    if session is None:
+        console.print(f"[error]Error:[/] session does not exist: {prefix}")
+        return 2
+    if not yes and console.input(f"Permanently delete '{session.title}'? [y/N] ").strip().casefold() not in {"y", "yes"}:
+        console.print("[waiting]Delete cancelled.[/]")
+        return 0
+    purged = manager.delete(session.id)
+    console.print(f"[success]Deleted session.[/] [text.muted]Purged {purged} session memories.[/]")
     return 0
 
 

@@ -9,7 +9,7 @@ from . import actions
 from .context import CliContext
 from .dispatch import dispatch_slash_command
 from .prompt import permission_rprompt, prompt_footer, prompt_session, prompt_tokens
-from .render import render_answer, select_choice, startup_banner
+from .render import render_answer, render_session_history, select_choice, startup_banner
 
 
 WEB_CONTINUATION = (
@@ -22,6 +22,7 @@ def run_chat(context: CliContext, debug: bool) -> int:
     agent, console = context.agent, context.console
     try:
         console.print(startup_banner(agent))
+        render_session_history(console, agent)
         input_session = prompt_session(
             lambda: [
                 (entry.name, entry.package.description)

@@ -10,6 +10,7 @@ from .repositories import (
     SkillSettingsRepository,
     SourceRepository,
     TaskRepository,
+    WorkflowRepository,
 )
 
 __all__ = [
@@ -22,5 +23,6 @@ __all__ = [
     "SkillSettingsRepository",
     "SourceRepository",
     "TaskRepository",
+    "WorkflowRepository",
     "workspace_key",
 ]

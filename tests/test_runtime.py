@@ -109,8 +109,12 @@ def test_internal_model_protocol_and_events_are_scoped_per_run(tmp_path: Path) -
     second = agent.ask("two")
 
     assert first.text == "first" and second.text == "second"
-    assert [event.kind for event in first.events] == ["run_started"]
-    assert [event.kind for event in second.events] == ["run_started"]
+    assert [event.kind for event in first.events] == [
+        "run_started", "workflow_event", "workflow_event", "workflow_event"
+    ]
+    assert [event.kind for event in second.events] == [
+        "run_started", "workflow_event", "workflow_event", "workflow_event"
+    ]
     assert first.events[0].data["run_id"] != second.events[0].data["run_id"]
 
 

@@ -9,7 +9,7 @@ from .memory import memory_command
 from .skills import skills_command
 from .commands import resolve_command
 from .context import CliContext
-from .render import render_command_tree, render_status
+from .render import render_command_tree, render_status, render_work_queue
 
 
 CommandHandler = Callable[[str], None]
@@ -54,6 +54,9 @@ def handlers(context: CliContext) -> dict[str, CommandHandler]:
         "commands": lambda _: actions.render_commands(context),
         "web": lambda _: actions.render_external_actions(context, kinds={"web_search", "web_fetch"}),
         "sources": lambda _: actions.render_sources(context),
+        "approvals": lambda _: actions.render_approvals(context),
+        "queue": lambda _: render_work_queue(console, agent.store.list_work_items(agent.session_id, active_only=True)),
+        "retry": lambda _: console.print("[text.secondary]Use /retry from the workflow TUI.[/]"),
         "memory": lambda value: memory_command(context, value),
         "skills": lambda value: skills_command(context, value),
         "mcp": lambda value: actions.mcp_command(context, value),

@@ -155,6 +155,87 @@ def render_answer(console: Console, answer: WorkspaceAnswer, debug: bool) -> Non
             console.print(f"  [text.muted]{event.kind}: {event.data}[/]")
 
 
+def render_answer_metadata(console: Console, answer: WorkspaceAnswer, debug: bool) -> None:
+    for item in answer.citations:
+        if hasattr(item, "scope"):
+            console.print(f"  [text.secondary]Memory:[/] {item.type.value} · {item.scope.value} · [text.muted]{item.id}[/]")
+        elif hasattr(item, "path"):
+            console.print(f"  [text.secondary]Evidence:[/] [path]{item.path}[/]:L{item.start_line}-L{item.end_line} [text.muted]({item.id})[/]")
+        else:
+            console.print(f"  [text.secondary]Source:[/] {item.title} · {item.url} [text.muted]({item.id})[/]")
+    console.print(f"  [text.muted]Run {answer.run_id[:8]} · {answer.duration_ms}ms[/]")
+    if debug:
+        for event in answer.events:
+            console.print(f"  [text.muted]{event.kind}: {event.data}[/]")
+
+
+def render_session_history(console: Console, agent: object) -> None:
+    transcript = agent.store.transcript(agent.session_id)
+    if not transcript:
+        return
+    session = agent.store.get(agent.session_id)
+    title = session.title if session is not None else agent.session_id[:12]
+    console.print(
+        f"[text.secondary]Resumed:[/] {title} "
+        f"[text.muted]({agent.session_id[:12]})[/]"
+    )
+    for entry in transcript:
+        role = entry["role"]
+        content = str(entry.get("content", ""))
+        if role == "user":
+            console.print("\n[user.bold]You[/]")
+            console.print(content, markup=False, highlight=False)
+            continue
+        console.print("\n[agent.bold]◆ CapsLock[/]")
+        if content:
+            console.print(content, markup=False, highlight=False)
+        status = str(entry.get("status", "completed"))
+        if status != "completed":
+            detail = str(entry.get("error") or status)
+            console.print(
+                f"[warning]Run {entry.get('run_id', '')[:8]} ended as {status}:[/] {detail}"
+            )
+
+
+def render_workflow_status(console: Console, agent: object, width: int | None = None) -> None:
+    terminal_width = width or shutil.get_terminal_size(fallback=(80, 24)).columns
+    tasks = agent.store.list_tasks(agent.session_id)
+    work = agent.store.list_work_items(agent.session_id, active_only=True)
+    task_summary = " · ".join(f"{item.status}: {item.text}" for item in tasks[-3:]) or "No active plan"
+    queue_summary = " · ".join(f"{item.status.value}: {item.question[:40]}" for item in work[:3]) or "Queue empty"
+    cost = agent.store.session_cost(agent.session_id)
+    if terminal_width < 110:
+        body = Text.assemble(
+            ("Plan  ", "primary.bold"), (task_summary + "\n", "text.secondary"),
+            ("Queue ", "primary.bold"), (queue_summary + "\n", "text.secondary"),
+            ("Usage ", "primary.bold"), (f"{cost[0]} in / {cost[1]} out", "text.muted"),
+        )
+    else:
+        body = Table.grid(expand=True, padding=(0, 2))
+        body.add_column(ratio=3)
+        body.add_column(ratio=2)
+        body.add_column(ratio=1)
+        body.add_row(
+            Text.assemble(("Plan\n", "primary.bold"), (task_summary, "text.secondary")),
+            Text.assemble(("Queue\n", "primary.bold"), (queue_summary, "text.secondary")),
+            Text.assemble(("Usage\n", "primary.bold"), (f"{cost[0]}/{cost[1]}", "text.muted")),
+        )
+    console.print(Panel(body, border_style="border.muted", padding=(0, 1)))
+
+
+def render_work_queue(console: Console, items: list[object]) -> None:
+    if not items:
+        console.print("[text.secondary]No foreground work items.[/]")
+        return
+    output = table("Position", "Work item", "Status", "Request")
+    for item in items:
+        output.add_row(
+            str(item.position + 1), item.id[:12], status_text(item.status.value), item.question
+        )
+    output.title = "Foreground queue"
+    console.print(output)
+
+
 def render_changes(console: Console, changes: list[object], *, pending_only: bool = False) -> None:
     if not changes:
         if not pending_only:
@@ -236,6 +317,35 @@ def render_external_actions(console: Console, actions: list[object]) -> None:
             Text(item.summary, style="text.secondary"),
         )
     console.print(output)
+
+
+def render_approval_center(console: Console, actions: list[object]) -> None:
+    if not actions:
+        console.print("[text.secondary]No pending approvals in this session.[/]")
+        return
+    output = table("Action", "Risk", "Type", "Status", "Summary")
+    for item in actions:
+        output.add_row(
+            Text(item.id[:12], style="text.muted"),
+            Text(item.risk_level or "unknown", style="warning"),
+            Text(item.type.value, style="tool"),
+            status_text(item.status.value),
+            Text(item.summary, style="text.secondary"),
+        )
+    output.title = "Approval center"
+    console.print(output)
+    for item in actions:
+        console.print(
+            Panel(
+                Text.assemble(
+                    (f"Risk: {item.risk_level or 'unknown'}\n", "warning.bold"),
+                    (f"Reason: {item.risk_reason or '-'}\n", "text.primary"),
+                    (f"Rollback: {item.rollback or '-'}", "text.secondary"),
+                ),
+                title=f"{item.id[:12]} · {item.type.value}",
+                border_style="warning",
+            )
+        )
 
 
 def render_sources(console: Console, sources: list[object]) -> None:

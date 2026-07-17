@@ -10,6 +10,9 @@ from pathlib import Path
 from .layout import ProjectLayout
 
 
+DEFAULT_MAX_TURNS = 32
+
+
 @dataclass(frozen=True)
 class ModelSettings:
     api_key: str | None
@@ -99,7 +102,7 @@ class Settings:
                 output_cost_per_million=float(value("CAPSLOCK_OUTPUT_COST_PER_MILLION", 0)),
             ),
             runtime=RuntimeSettings(
-                max_turns=int(value("CAPSLOCK_MAX_TURNS", 6)),
+                max_turns=int(value("CAPSLOCK_MAX_TURNS", DEFAULT_MAX_TURNS)),
                 max_context_messages=int(value("CAPSLOCK_MAX_CONTEXT_MESSAGES", 24)),
             ),
             command=CommandSettings(

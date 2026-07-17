@@ -8,7 +8,7 @@ from typing import Any
 from ..application import ActionCoordinator
 from ..changes import make_diff
 from ..config import CommandSettings, McpSettings, WebSettings
-from ..domain import ActionType
+from ..domain import ActionType, AgentEventKind, WorkItemStatus
 from ..mcp import McpRegistry
 from ..permissions import PermissionMode
 from ..policy import PolicyError, WorkspacePolicy
@@ -17,6 +17,7 @@ from ..security import redact
 from .context import CliContext
 from .render import (
     permission_badge,
+    render_approval_center as render_approval_list,
     render_change_approval,
     render_changes as render_change_list,
     render_command_approval,
@@ -95,6 +96,15 @@ def render_sources(context: CliContext) -> None:
     render_source_list(context.console, agent.store.list_sources(agent.session_id))
 
 
+def render_approvals(context: CliContext) -> None:
+    agent = context.agent
+    pending = [
+        item for item in agent.store.list_actions(agent.session_id)
+        if item.status.value in {"pending", "approved"}
+    ]
+    render_approval_list(context.console, pending)
+
+
 def rename_session(context: CliContext, command: str) -> None:
     title = command.partition(" ")[2]
     try:
@@ -139,6 +149,7 @@ def approve_change(context: CliContext, change_id: str) -> None:
             console.print("[waiting]Change remains pending.[/]")
             return
         applied = action_coordinator(agent, change.run_id).approve_and_execute(change.id)
+        settle_workflow(agent, change.run_id)
         console.print(
             f"[success]Applied:[/] [path]{applied.path}[/]. Review with [command]/diff[/]; "
             "use [command]/undo[/] to revert."
@@ -158,6 +169,7 @@ def approve_command(context: CliContext, command_id: str) -> None:
             console.print("[waiting]Command remains pending.[/]")
             return
         result = action_coordinator(agent, command.run_id).approve_and_execute(command.id)
+        settle_workflow(agent, command.run_id)
         render_command_result(console, result)
     except (AgentRuntimeError, ValueError, PolicyError) as exc:
         console.print(f"[error]Error:[/] {exc}")
@@ -168,6 +180,7 @@ def reject_action(context: CliContext, action_id: str) -> None:
         coordinator = action_coordinator(context.agent)
         action = coordinator.resolve(action_id)
         coordinator.for_run(action.run_id).reject(action.id)
+        settle_workflow(context.agent, action.run_id)
         context.console.print(f"[warning]Rejected {action.type.value} proposal.[/]")
     except (AgentRuntimeError, ValueError, PolicyError) as exc:
         context.console.print(f"[error]Error:[/] {exc}")
@@ -305,6 +318,7 @@ def review_pending_external_actions(context: CliContext, run_id: str) -> list[ob
                     completed.append(result)
             elif choice == "reject":
                 action_coordinator(agent, action.run_id).reject(action.id)
+                settle_workflow(agent, action.run_id)
                 console.print(f"[warning]Rejected:[/] {action.id[:12]} · {action.kind}")
             else:
                 console.print(
@@ -318,8 +332,34 @@ def review_pending_external_actions(context: CliContext, run_id: str) -> list[ob
 
 def execute_external(context: CliContext, action: Any) -> Any:
     result = action_coordinator(context.agent, action.run_id).approve_and_execute(action.id)
+    settle_workflow(context.agent, action.run_id)
     render_external_result(context.console, result, redact(result.result))
     return result
+
+
+def settle_workflow(agent: WorkspaceAgent, run_id: str) -> None:
+    remaining = [
+        item for item in agent.store.list_actions(agent.session_id)
+        if item.run_id == run_id and item.status.value in {"pending", "approved", "running"}
+    ]
+    if remaining:
+        return
+    row = agent.store._connection.execute(
+        "SELECT work_item_id,status FROM runs WHERE id=? AND session_id=?",
+        (run_id, agent.session_id),
+    ).fetchone()
+    if row is None or row["status"] != "waiting_approval" or not row["work_item_id"]:
+        return
+    work_item_id = str(row["work_item_id"])
+    agent.store.update_work_item(work_item_id, WorkItemStatus.COMPLETED)
+    agent.store.complete_waiting_run(run_id)
+    agent.store.append_run_event(
+        session_id=agent.session_id,
+        run_id=run_id,
+        work_item_id=work_item_id,
+        kind=AgentEventKind.COMPLETED,
+        payload={"approval_settled": True},
+    )
 
 
 def mcp_command(context: CliContext, text: str) -> None:

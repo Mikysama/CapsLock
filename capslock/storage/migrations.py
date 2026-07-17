@@ -9,14 +9,14 @@ from pathlib import Path
 from ..domain import SessionTitleSource, normalize_session_title, pending_session_title
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 BASE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
   id TEXT PRIMARY KEY, workspace TEXT NOT NULL, model TEXT NOT NULL,
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL, summary TEXT NOT NULL DEFAULT '',
   title TEXT NOT NULL DEFAULT '', title_source TEXT NOT NULL DEFAULT 'pending',
-  title_updated_at TEXT
+  title_updated_at TEXT, archived_at TEXT, deletion_state TEXT
 );
 CREATE TABLE IF NOT EXISTS messages (
   id INTEGER PRIMARY KEY, session_id TEXT NOT NULL, role TEXT NOT NULL,
@@ -26,7 +26,8 @@ CREATE TABLE IF NOT EXISTS runs (
   id TEXT PRIMARY KEY, session_id TEXT NOT NULL, question TEXT NOT NULL,
   status TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT,
   duration_ms INTEGER, input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0,
-  error TEXT, cost_usd REAL DEFAULT 0
+  error TEXT, cost_usd REAL DEFAULT 0, work_item_id TEXT,
+  parent_run_id TEXT, resume_from_step_id TEXT
 );
 CREATE TABLE IF NOT EXISTS tool_calls (
   id INTEGER PRIMARY KEY, run_id TEXT NOT NULL, name TEXT NOT NULL,
@@ -39,7 +40,8 @@ CREATE TABLE IF NOT EXISTS citations (
 );
 CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY, session_id TEXT NOT NULL, text TEXT NOT NULL,
-  status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+  status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+  run_id TEXT, position INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS workspace_settings (
   key TEXT PRIMARY KEY, value TEXT NOT NULL
@@ -56,7 +58,8 @@ CREATE TABLE IF NOT EXISTS actions (
   id TEXT PRIMARY KEY, session_id TEXT NOT NULL, run_id TEXT NOT NULL,
   action_type TEXT NOT NULL, status TEXT NOT NULL, result_kind TEXT,
   summary TEXT NOT NULL, created_at TEXT NOT NULL, approved_at TEXT,
-  started_at TEXT, finished_at TEXT, reversed_at TEXT, error TEXT
+  started_at TEXT, finished_at TEXT, reversed_at TEXT, error TEXT,
+  risk_level TEXT, risk_reason TEXT, rollback TEXT, decided_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_actions_session_created ON actions(session_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_actions_run ON actions(run_id);
@@ -83,23 +86,55 @@ CREATE TABLE IF NOT EXISTS skill_settings (
 );
 """
 
+WORKFLOW_SCHEMA = """
+CREATE TABLE IF NOT EXISTS work_items (
+  id TEXT PRIMARY KEY, session_id TEXT NOT NULL, question TEXT NOT NULL,
+  status TEXT NOT NULL, position INTEGER NOT NULL, current_run_id TEXT,
+  parent_work_item_id TEXT, error TEXT, created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_work_items_session_position
+  ON work_items(session_id,status,position);
+CREATE TABLE IF NOT EXISTS run_steps (
+  id TEXT PRIMARY KEY, run_id TEXT NOT NULL, ordinal INTEGER NOT NULL,
+  kind TEXT NOT NULL, status TEXT NOT NULL, checkpoint TEXT,
+  started_at TEXT NOT NULL, finished_at TEXT, error TEXT,
+  UNIQUE(run_id,ordinal)
+);
+CREATE INDEX IF NOT EXISTS idx_run_steps_run ON run_steps(run_id,ordinal);
+CREATE TABLE IF NOT EXISTS run_events (
+  id INTEGER PRIMARY KEY, run_id TEXT NOT NULL, work_item_id TEXT NOT NULL,
+  session_id TEXT NOT NULL, sequence INTEGER NOT NULL, event_kind TEXT NOT NULL,
+  payload TEXT NOT NULL, created_at TEXT NOT NULL,
+  UNIQUE(run_id,sequence)
+);
+CREATE INDEX IF NOT EXISTS idx_run_events_run ON run_events(run_id,sequence);
+CREATE VIRTUAL TABLE IF NOT EXISTS session_search USING fts5(
+  session_id UNINDEXED, kind UNINDEXED, content, created_at UNINDEXED
+);
+"""
+
 
 def migrate(connection: sqlite3.Connection, path: Path) -> None:
     version = int(connection.execute("PRAGMA user_version").fetchone()[0])
     if version > SCHEMA_VERSION:
         raise RuntimeError(f"database schema {version} is newer than supported schema {SCHEMA_VERSION}")
     if version == SCHEMA_VERSION:
-        connection.executescript(BASE_SCHEMA + ACTION_SCHEMA + SKILL_SETTINGS_SCHEMA)
+        connection.executescript(BASE_SCHEMA + ACTION_SCHEMA + SKILL_SETTINGS_SCHEMA + WORKFLOW_SCHEMA)
         _remove_legacy_skill_schema(connection)
         _migrate_messages_v2(connection)
         _migrate_sessions_v3(connection)
+        _migrate_workflow_v6(connection)
         connection.commit()
         return
     tables = _tables(connection)
     if not tables:
-        connection.executescript(BASE_SCHEMA + ACTION_SCHEMA + SKILL_SETTINGS_SCHEMA)
+        connection.executescript(
+            "BEGIN IMMEDIATE;" + BASE_SCHEMA + ACTION_SCHEMA + SKILL_SETTINGS_SCHEMA + WORKFLOW_SCHEMA
+        )
         _migrate_messages_v2(connection)
         _migrate_sessions_v3(connection)
+        _migrate_workflow_v6(connection)
         connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         connection.commit()
         return
@@ -114,6 +149,7 @@ def migrate(connection: sqlite3.Connection, path: Path) -> None:
         _remove_legacy_skill_schema(connection)
         _migrate_messages_v2(connection)
         _migrate_sessions_v3(connection)
+        _migrate_workflow_v6(connection)
         connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         connection.commit()
     except Exception as exc:
@@ -166,6 +202,48 @@ def _migrate_sessions_v3(connection: sqlite3.Connection) -> None:
             "UPDATE sessions SET title=?,title_source=?,title_updated_at=? WHERE id=?",
             (title, source, updated_at, session["id"]),
         )
+
+
+def _migrate_workflow_v6(connection: sqlite3.Connection) -> None:
+    session_columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(sessions)")}
+    if "archived_at" not in session_columns:
+        connection.execute("ALTER TABLE sessions ADD COLUMN archived_at TEXT")
+    if "deletion_state" not in session_columns:
+        connection.execute("ALTER TABLE sessions ADD COLUMN deletion_state TEXT")
+
+    run_columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(runs)")}
+    for name in ("work_item_id", "parent_run_id", "resume_from_step_id"):
+        if name not in run_columns:
+            connection.execute(f"ALTER TABLE runs ADD COLUMN {name} TEXT")
+
+    task_columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(tasks)")}
+    if "run_id" not in task_columns:
+        connection.execute("ALTER TABLE tasks ADD COLUMN run_id TEXT")
+    if "position" not in task_columns:
+        connection.execute("ALTER TABLE tasks ADD COLUMN position INTEGER NOT NULL DEFAULT 0")
+    connection.execute(
+        """UPDATE tasks SET position=(
+             SELECT count(*)-1 FROM tasks earlier
+             WHERE earlier.session_id=tasks.session_id AND earlier.created_at<=tasks.created_at
+           ) WHERE position=0"""
+    )
+    _execute_script(connection, WORKFLOW_SCHEMA)
+    action_columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(actions)")}
+    for name in ("risk_level", "risk_reason", "rollback", "decided_at"):
+        if name not in action_columns:
+            connection.execute(f"ALTER TABLE actions ADD COLUMN {name} TEXT")
+    if not connection.execute("SELECT 1 FROM session_search LIMIT 1").fetchone():
+        _rebuild_session_search(connection)
+
+
+def _rebuild_session_search(connection: sqlite3.Connection) -> None:
+    connection.execute("DELETE FROM session_search")
+    connection.execute(
+        "INSERT INTO session_search(session_id,kind,content,created_at) SELECT id,'title',title,created_at FROM sessions"
+    )
+    connection.execute(
+        "INSERT INTO session_search(session_id,kind,content,created_at) SELECT session_id,'message',content,created_at FROM messages"
+    )
 
 
 def _tables(connection: sqlite3.Connection) -> set[str]:

@@ -259,6 +259,82 @@ class MemoryStore:
                 output.append(item)
         return output
 
+    def purge_session(self, *, workspace: str, session_id: str) -> int:
+        """Permanently remove session-scoped memory data while retaining content-free audit rows."""
+        rows = self.connection.execute(
+            "SELECT id FROM memories WHERE scope='session' AND workspace_key=? AND session_id=?",
+            (workspace, session_id),
+        ).fetchall()
+        memory_ids = [str(row[0]) for row in rows]
+        with self.connection:
+            affected_sources = [
+                str(row[0]) for row in self.connection.execute(
+                    """SELECT DISTINCT memory_id FROM memory_sources
+                       WHERE workspace_key=? AND session_id=?""",
+                    (workspace, session_id),
+                )
+                if str(row[0]) not in memory_ids
+            ]
+            self.connection.execute(
+                """UPDATE memory_sources SET valid=0,source_ref=NULL,invalidated_at=?
+                   WHERE workspace_key=? AND session_id=?""",
+                (timestamp(), workspace, session_id),
+            )
+            for memory_id in affected_sources:
+                valid = self.connection.execute(
+                    "SELECT 1 FROM memory_sources WHERE memory_id=? AND valid=1 LIMIT 1",
+                    (memory_id,),
+                ).fetchone()
+                self.connection.execute(
+                    "UPDATE memories SET source_valid=?,updated_at=? WHERE id=?",
+                    (int(valid is not None), timestamp(), memory_id),
+                )
+            if memory_ids:
+                marks = ",".join("?" for _ in memory_ids)
+                self.connection.execute(f"DELETE FROM memory_fts WHERE memory_id IN ({marks})", memory_ids)
+                self.connection.execute(f"DELETE FROM memory_embeddings WHERE memory_id IN ({marks})", memory_ids)
+                self.connection.execute(f"DELETE FROM memory_history WHERE memory_id IN ({marks})", memory_ids)
+                self.connection.execute(f"DELETE FROM memory_sources WHERE memory_id IN ({marks})", memory_ids)
+                self.connection.execute(f"DELETE FROM memory_accesses WHERE memory_id IN ({marks})", memory_ids)
+                self.connection.execute(f"DELETE FROM memories WHERE id IN ({marks})", memory_ids)
+            run_ids = [
+                str(row[0]) for row in self.connection.execute(
+                    "SELECT run_id FROM memory_recalls WHERE workspace_key=? AND session_id=?",
+                    (workspace, session_id),
+                )
+            ]
+            if run_ids:
+                marks = ",".join("?" for _ in run_ids)
+                self.connection.execute(f"DELETE FROM memory_recall_items WHERE run_id IN ({marks})", run_ids)
+            self.connection.execute(
+                "DELETE FROM memory_recalls WHERE workspace_key=? AND session_id=?",
+                (workspace, session_id),
+            )
+            self.connection.execute(
+                "DELETE FROM memory_accesses WHERE workspace_key=? AND session_id=?",
+                (workspace, session_id),
+            )
+            extraction_ids = [
+                str(row[0]) for row in self.connection.execute(
+                    "SELECT id FROM memory_extractions WHERE workspace_key=? AND session_id=?",
+                    (workspace, session_id),
+                )
+            ]
+            self.connection.execute(
+                "DELETE FROM memory_candidates WHERE workspace_key=? AND session_id=?",
+                (workspace, session_id),
+            )
+            if extraction_ids:
+                marks = ",".join("?" for _ in extraction_ids)
+                self.connection.execute(f"DELETE FROM memory_extractions WHERE id IN ({marks})", extraction_ids)
+            self.connection.execute(
+                """INSERT INTO memory_audit(
+                     operation,scope,workspace_key,session_id,detail,created_at
+                   ) VALUES('session_delete','session',?,?,?,?)""",
+                (workspace, session_id, json.dumps({"memory_count": len(memory_ids)}), timestamp()),
+            )
+        return len(memory_ids)
+
     def _insert(
         self,
         connection: sqlite3.Connection,

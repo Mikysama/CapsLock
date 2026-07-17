@@ -111,12 +111,15 @@ class McpService:
         return self.actions.propose("mcp_call", {"server": server, "tool": tool, "arguments": arguments}, f"Call MCP {server}.{tool}")
 
     def execute(self, action_id: str) -> ExternalActionInfo:
+        return asyncio.run(self.execute_async(action_id))
+
+    async def execute_async(self, action_id: str) -> ExternalActionInfo:
         action = self.actions._action(action_id)
         if action.status != "approved":
             raise ValueError("external action requires explicit approval before execution")
         self.store.update_external_action(action.id, "running")
         try:
-            result = asyncio.run(self._execute(action))
+            result = await self._execute(action)
         except Exception as exc:
             error = str(exc) or type(exc).__name__
             self.store.update_external_action(action.id, "failed", error=error)
