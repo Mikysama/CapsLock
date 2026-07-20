@@ -10,7 +10,7 @@ from prompt_toolkit.application import get_app_or_none, run_in_terminal
 from prompt_toolkit.patch_stdout import patch_stdout
 from rich.console import Console
 
-from ..domain import AgentEvent, AgentEventKind, MemoryScope
+from ..domain import AgentEvent, AgentEventKind, BudgetRequest, MemoryScope
 from ..permissions import PermissionMode
 from ..status import AgentStatus, status_for_event, status_message
 from .context import CliContext
@@ -49,6 +49,21 @@ async def run_tui(context: CliContext, *, status_enabled: bool = True) -> int:
         "stopping": False,
         "inputs": inputs,
     }
+    router = context.agent.chat_model
+
+    async def authorize_budget(request: BudgetRequest) -> bool:
+        prompt = (
+            f"Model budget: {request.scope} {request.limit_type} "
+            f"{request.current_value:.6g} + {request.reserved_value:.6g} "
+            f"> {request.limit_value:.6g} using {request.profile}. "
+            "Allow this model call? [y/N] "
+        )
+        answer = await run_in_terminal(lambda: console.input(prompt))
+        return str(answer).strip().casefold() in {"y", "yes"}
+
+    set_authorizer = getattr(router, "set_budget_authorizer", None)
+    if callable(set_authorizer):
+        set_authorizer(authorize_budget)
     worker = asyncio.create_task(_worker(context, queue, state))
     animator = asyncio.create_task(_animate_activity(inputs, state))
     try:
@@ -99,6 +114,8 @@ async def run_tui(context: CliContext, *, status_enabled: bool = True) -> int:
                 f"[waiting]Queued:[/] {item.question} [text.muted]({item.id[:8]})[/]"
             )
     finally:
+        if callable(set_authorizer):
+            set_authorizer(None)
         state["stopping"] = True
         await queue.put(None)
         worker.cancel()
@@ -270,9 +287,16 @@ class _RunRenderer:
                     highlight=False,
                 )
             usage = event.data.get("usage", {})
+            models = event.data.get("models", [])
+            selected_model = ""
+            if isinstance(models, list) and models:
+                selected_model = (
+                    f" · {models[0].get('provider', '-')}/{models[0].get('model', '-')}"
+                )
             detail = (
                 f"run {event.run_id[:8]} · {event.data.get('duration_ms', 0)}ms · "
-                f"{usage.get('input_tokens', 0)}/{usage.get('output_tokens', 0)} tokens"
+                f"{usage.get('input_tokens', 0)}/{usage.get('output_tokens', 0)} tokens · "
+                f"${float(usage.get('cost_usd', 0)):.6f}{selected_model}"
             )
             await self.writer.print(
                 result_status("Completed", "success", detail=detail)

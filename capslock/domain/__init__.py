@@ -31,6 +31,14 @@ from .sessions import (
     normalize_session_title,
     pending_session_title,
 )
+from .models import (
+    BudgetRequest,
+    ModelBudgetExceeded,
+    ModelDataPolicyMismatch,
+    ModelErrorCode,
+    ModelRole,
+    ModelRoutingError,
+)
 from .workflow import (
     AgentEvent,
     AgentEventKind,
@@ -65,6 +73,12 @@ __all__ = [
     "MemoryScope",
     "MemoryStatus",
     "MemoryType",
+    "BudgetRequest",
+    "ModelBudgetExceeded",
+    "ModelDataPolicyMismatch",
+    "ModelErrorCode",
+    "ModelRole",
+    "ModelRoutingError",
     "RunStepInfo",
     "RunInfo",
     "RunStepKind",

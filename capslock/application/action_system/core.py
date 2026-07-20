@@ -126,33 +126,24 @@ class ActionCoordinator:
         return await self.execute_approved(action.id)
 
     async def execute_approved(self, action_id: str) -> ActionRecord:
-        action = await self.repositories.actions.require(
-            action_id, session_id=self.session_id
-        )
+        try:
+            action = await self.repositories.actions.require(
+                action_id, session_id=self.session_id
+            )
+        except asyncio.CancelledError:
+            cleanup = asyncio.create_task(self._record_cancellation(action_id))
+            await _await_cleanup(cleanup)
+            raise
         if action.status is not ActionStatus.APPROVED:
             raise ValueError("action requires explicit approval before execution")
-        action = await self.repositories.actions.transition(
-            action.id, ActionStatus.RUNNING
-        )
         try:
+            action = await self.repositories.actions.transition(
+                action.id, ActionStatus.RUNNING
+            )
             execution = await self.handlers[action.type].execute(action)
         except asyncio.CancelledError:
-            run = await self.repositories.workflow.require_run(action.run_id)
-            if run.status == "waiting_approval":
-                await self.repositories.workflow.cancel_waiting_action(
-                    self.session_id,
-                    action.run_id,
-                    action.id,
-                    message="cancelled by user",
-                )
-            else:
-                await self.repositories.actions.transition(
-                    action.id,
-                    ActionStatus.CANCELLED,
-                    result_kind=ActionResultKind.USER_CANCELLED,
-                    error_code="cancelled",
-                    error_message="cancelled by user",
-                )
+            cleanup = asyncio.create_task(self._record_cancellation(action.id))
+            await _await_cleanup(cleanup)
             raise
         except Exception as exc:
             self.event(
@@ -202,6 +193,40 @@ class ActionCoordinator:
             ),
         )
 
+    async def _record_cancellation(self, action_id: str) -> None:
+        action = await self.repositories.actions.require(
+            action_id, session_id=self.session_id
+        )
+        if action.status in {
+            ActionStatus.COMPLETED,
+            ActionStatus.FAILED,
+            ActionStatus.CANCELLED,
+            ActionStatus.REJECTED,
+        }:
+            return
+        run = await self.repositories.workflow.require_run(action.run_id)
+        if run.status == "waiting_approval":
+            await self.repositories.workflow.cancel_waiting_action(
+                self.session_id,
+                action.run_id,
+                action.id,
+                message="cancelled by user",
+            )
+        else:
+            await self.repositories.actions.transition(
+                action.id,
+                ActionStatus.CANCELLED,
+                result_kind=ActionResultKind.USER_CANCELLED,
+                error_code="cancelled",
+                error_message="cancelled by user",
+            )
+        self.event(
+            "action_finished",
+            action_id=action.id,
+            action=action.type.value,
+            status="cancelled",
+        )
+
     async def reject(self, action_id: str) -> ActionRecord:
         action = await self.repositories.actions.require(
             action_id, session_id=self.session_id
@@ -226,3 +251,13 @@ class ActionCoordinator:
         path = str(action.request.get("path", ""))
         parts = path.split("/")
         return len(parts) >= 3 and tuple(parts[:2]) == (".capslock", "skills")
+
+
+async def _await_cleanup(task: asyncio.Task) -> None:
+    """Finish cancellation cleanup before propagating even under repeated cancel()."""
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            continue
+    await task

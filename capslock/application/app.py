@@ -8,10 +8,11 @@ from typing import Any
 from ..config import Settings
 from ..layout import ProjectLayout
 from ..memory import MemoryService
+from ..memory.embeddings import ExternalEmbeddingConfig
 from ..observability import EventSink
 from ..permissions import PermissionMode
 from ..policy import WorkspacePolicy
-from ..runtime import AsyncOpenAIChatModel, WorkspaceAgent
+from ..runtime import AsyncOpenAIChatModel, ModelRouter, WorkspaceAgent
 from ..skills import SkillRegistry, SkillService
 from ..storage.memory_v2 import MemoryRepositories
 from ..storage.repositories_v2 import WorkspaceRepositories
@@ -86,6 +87,40 @@ class WorkspaceApplication:
             skill_service = SkillService(skill_registry, events.emit)
             workflow = WorkflowService(repositories)
             policy = WorkspacePolicy(root)
+            raw_clients = client if isinstance(client, dict) else {"default": client}
+            adapters = {
+                name: AsyncOpenAIChatModel(
+                    item,
+                    max_output_tokens={
+                        profile.model: profile.max_output_tokens
+                        for profile in (settings.models or {}).values()
+                        if profile.provider == name
+                    },
+                )
+                for name, item in raw_clients.items()
+            }
+            router = ModelRouter(
+                providers=settings.providers or {},
+                profiles=settings.models or {},
+                routing=settings.routing,
+                clients=adapters,
+                repositories=repositories,
+                budget=settings.budget,
+            )
+            external_embedding_profiles = {}
+            for profile_name in settings.routing.embedding if settings.routing else ():
+                profile = (settings.models or {})[profile_name]
+                provider = (settings.providers or {})[profile.provider]
+                provider_client = raw_clients.get(profile.provider)
+                if provider_client is not None:
+                    external_embedding_profiles[profile_name] = ExternalEmbeddingConfig(
+                        profile_name,
+                        provider.name,
+                        profile.model,
+                        provider.data_policy,
+                        profile.input_cost_per_million,
+                        provider_client,
+                    )
             memory = MemoryService(
                 memory_repositories,
                 workspace=root,
@@ -93,6 +128,7 @@ class WorkspaceApplication:
                 project_write_enabled=settings.memory.project_write_enabled,
                 event=events.emit,
                 source_validator=repositories.workflow.run_completed,
+                external_embedding_profiles=external_embedding_profiles,
             )
             agent_ref: dict[str, WorkspaceAgent] = {}
 
@@ -132,7 +168,7 @@ class WorkspaceApplication:
             agent = WorkspaceAgent(
                 workspace=root,
                 model_name=settings.model_config.model,
-                chat_model=AsyncOpenAIChatModel(client),
+                chat_model=router,
                 repositories=repositories,
                 workflow=workflow,
                 session_id=session.id,
@@ -162,20 +198,12 @@ class WorkspaceApplication:
             if memory_repositories is not None:
                 await memory_repositories.close()
             await repositories.close()
-            close = getattr(client, "close", None)
-            if callable(close):
-                result = close()
-                if hasattr(result, "__await__"):
-                    await result
+            await _close_clients(client)
             raise
 
     async def close(self) -> None:
         try:
-            close = getattr(self.client, "close", None)
-            if callable(close):
-                result = close()
-                if hasattr(result, "__await__"):
-                    await result
+            await _close_clients(self.client)
         finally:
             try:
                 await self.repositories.close()
@@ -187,3 +215,17 @@ class WorkspaceApplication:
 
     async def __aexit__(self, exc_type: object, exc: object, traceback: object) -> None:
         await self.close()
+
+
+async def _close_clients(clients: Any) -> None:
+    values = clients.values() if isinstance(clients, dict) else (clients,)
+    seen: set[int] = set()
+    for client in values:
+        if id(client) in seen:
+            continue
+        seen.add(id(client))
+        close = getattr(client, "close", None)
+        if callable(close):
+            result = close()
+            if hasattr(result, "__await__"):
+                await result

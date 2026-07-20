@@ -121,7 +121,9 @@ async def _embeddings(context: CliContext, arguments: list[str]) -> None:
     if not arguments:
         view = await memory.settings()
         context.console.print(
-            f"embedding_backend={view.embedding_backend.value} model={view.embedding_model or '-'}"
+            f"embedding_backend={view.embedding_backend.value} model={view.embedding_model or '-'} "
+            f"provider={view.embedding_provider or '-'} policy={view.embedding_data_policy or '-'} "
+            f"consent={'confirmed' if view.embedding_consent_id else '-'}"
         )
         return
     operation = arguments[0]
@@ -129,6 +131,28 @@ async def _embeddings(context: CliContext, arguments: list[str]) -> None:
         await memory.configure_embeddings(EmbeddingBackend.OFF)
     elif operation == "enable" and len(arguments) >= 2:
         backend = EmbeddingBackend(arguments[1].replace("-", "_"))
+        if backend is EmbeddingBackend.EXTERNAL:
+            if len(arguments) != 3:
+                raise ValueError(
+                    "usage: /memory embeddings enable external <model-profile>"
+                )
+            preview = await memory.external_embedding_preview(arguments[2])
+            context.console.print(
+                "External embedding data preview: "
+                f"provider={preview['provider']} model={preview['model']} "
+                f"policy={preview['data_policy']} fields={','.join(preview['fields'])} "
+                f"scopes={','.join(preview['scopes'])} "
+                f"records={preview['record_count']} bytes={preview['byte_count']}"
+            )
+            confirmation = await asyncio.to_thread(
+                context.console.input,
+                "Send these memory fields and future recall queries externally? [y/N] ",
+            )
+            if confirmation.strip().casefold() not in {"y", "yes"}:
+                context.console.print("External embeddings remain disabled.")
+                return
+            await memory.enable_external_embeddings(arguments[2], preview)
+            return
         endpoint = (
             arguments[2]
             if backend is EmbeddingBackend.LOCAL_HTTP and len(arguments) > 2
@@ -144,7 +168,7 @@ async def _embeddings(context: CliContext, arguments: list[str]) -> None:
         context.console.print(f"indexed={await memory.rebuild_embeddings()}")
     else:
         raise ValueError(
-            "usage: /memory embeddings [enable <fastembed|local-http> ...|disable|rebuild]"
+            "usage: /memory embeddings [enable <fastembed|local-http|external> ...|disable|rebuild]"
         )
 
 

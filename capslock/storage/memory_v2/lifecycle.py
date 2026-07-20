@@ -441,6 +441,9 @@ class MemoryRepository(Repository):
             "embedding_backend": EmbeddingBackend(row["embedding_backend"]),
             "embedding_model": row["embedding_model"],
             "embedding_endpoint": row["embedding_endpoint"],
+            "embedding_provider": row["embedding_provider"],
+            "embedding_data_policy": row["embedding_data_policy"],
+            "embedding_consent_id": row["embedding_consent_id"],
         }
 
     async def set_setting(self, workspace: str, name: str, value: object) -> None:
@@ -451,6 +454,9 @@ class MemoryRepository(Repository):
             "embedding_backend",
             "embedding_model",
             "embedding_endpoint",
+            "embedding_provider",
+            "embedding_data_policy",
+            "embedding_consent_id",
         }:
             raise ValueError("unsupported memory setting")
         await self.execute(

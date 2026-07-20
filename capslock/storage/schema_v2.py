@@ -2,8 +2,8 @@
 
 WORKSPACE_APPLICATION_ID = 0x434C4B32  # CLK2
 MEMORY_APPLICATION_ID = 0x434C4D32  # CLM2
-WORKSPACE_SCHEMA_VERSION = 1
-MEMORY_SCHEMA_VERSION = 1
+WORKSPACE_SCHEMA_VERSION = 2
+MEMORY_SCHEMA_VERSION = 2
 
 WORKSPACE_SCHEMA = """
 CREATE TABLE database_metadata (
@@ -154,6 +154,52 @@ CREATE TABLE skill_settings (
   enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),
   updated_at TEXT NOT NULL
 ) STRICT;
+CREATE TABLE routing_decisions (
+  id INTEGER PRIMARY KEY,
+  run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  sequence INTEGER NOT NULL CHECK(sequence>=1),
+  role TEXT NOT NULL CHECK(role IN ('reasoning','fast','embedding','vision')),
+  candidates_json TEXT NOT NULL CHECK(json_valid(candidates_json)),
+  selected_profile TEXT,
+  reason_json TEXT NOT NULL CHECK(json_valid(reason_json)),
+  created_at TEXT NOT NULL,
+  UNIQUE(run_id,sequence)
+) STRICT;
+CREATE TABLE model_calls (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  routing_decision_id INTEGER REFERENCES routing_decisions(id) ON DELETE SET NULL,
+  role TEXT NOT NULL CHECK(role IN ('reasoning','fast','embedding','vision')),
+  profile TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL,
+  attempt INTEGER NOT NULL CHECK(attempt>=1),
+  status TEXT NOT NULL CHECK(status IN ('running','completed','failed')),
+  data_policy TEXT NOT NULL,
+  fallback_from TEXT,
+  started_at TEXT NOT NULL,
+  finished_at TEXT,
+  duration_ms INTEGER CHECK(duration_ms IS NULL OR duration_ms>=0),
+  input_tokens INTEGER NOT NULL DEFAULT 0 CHECK(input_tokens>=0),
+  output_tokens INTEGER NOT NULL DEFAULT 0 CHECK(output_tokens>=0),
+  cost_usd REAL NOT NULL DEFAULT 0 CHECK(cost_usd>=0),
+  error_code TEXT,
+  error_message TEXT
+) STRICT;
+CREATE INDEX idx_model_calls_run ON model_calls(run_id,started_at);
+CREATE INDEX idx_model_calls_model ON model_calls(provider,model,started_at);
+CREATE TABLE budget_decisions (
+  id INTEGER PRIMARY KEY,
+  run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  scope TEXT NOT NULL CHECK(scope IN ('run','session')),
+  limit_type TEXT NOT NULL CHECK(limit_type IN ('tokens','cost_usd')),
+  current_value REAL NOT NULL CHECK(current_value>=0),
+  reserved_value REAL NOT NULL CHECK(reserved_value>=0),
+  limit_value REAL NOT NULL CHECK(limit_value>=0),
+  decision TEXT NOT NULL CHECK(decision IN ('allowed','denied','hard_stop')),
+  profile TEXT NOT NULL,
+  created_at TEXT NOT NULL
+) STRICT;
 CREATE VIRTUAL TABLE session_search USING fts5(
   session_id UNINDEXED,
   kind UNINDEXED,
@@ -206,9 +252,12 @@ CREATE TABLE memory_workspace_settings (
   write_enabled INTEGER NOT NULL DEFAULT 1 CHECK(write_enabled IN (0,1)),
   policy TEXT NOT NULL DEFAULT 'review' CHECK(policy IN ('off','review','automatic')),
   recall_enabled INTEGER NOT NULL DEFAULT 1 CHECK(recall_enabled IN (0,1)),
-  embedding_backend TEXT NOT NULL DEFAULT 'off' CHECK(embedding_backend IN ('off','fastembed','local_http')),
+  embedding_backend TEXT NOT NULL DEFAULT 'off' CHECK(embedding_backend IN ('off','fastembed','local_http','external')),
   embedding_model TEXT,
-  embedding_endpoint TEXT
+  embedding_endpoint TEXT,
+  embedding_provider TEXT,
+  embedding_data_policy TEXT,
+  embedding_consent_id INTEGER
 ) STRICT;
 CREATE TABLE memory_extractions (
   id TEXT PRIMARY KEY,
@@ -262,7 +311,7 @@ CREATE TABLE memory_sources (
 CREATE TABLE memory_embeddings (
   memory_id TEXT NOT NULL,
   revision INTEGER NOT NULL,
-  backend TEXT NOT NULL CHECK(backend IN ('fastembed','local_http')),
+  backend TEXT NOT NULL CHECK(backend IN ('fastembed','local_http','external')),
   model TEXT NOT NULL,
   dimensions INTEGER NOT NULL CHECK(dimensions>0),
   vector BLOB NOT NULL,
@@ -310,6 +359,35 @@ CREATE TABLE memory_audit (
   detail TEXT,
   created_at TEXT NOT NULL
 ) STRICT;
+CREATE TABLE embedding_consents (
+  id INTEGER PRIMARY KEY,
+  workspace_key TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL,
+  data_policy TEXT NOT NULL,
+  fields_json TEXT NOT NULL CHECK(json_valid(fields_json)),
+  record_count INTEGER NOT NULL CHECK(record_count>=0),
+  byte_count INTEGER NOT NULL CHECK(byte_count>=0),
+  content_hash TEXT NOT NULL,
+  confirmed_at TEXT NOT NULL,
+  revoked_at TEXT
+) STRICT;
+CREATE INDEX idx_embedding_consents_workspace ON embedding_consents(workspace_key,confirmed_at);
+CREATE TABLE embedding_requests (
+  id INTEGER PRIMARY KEY,
+  consent_id INTEGER NOT NULL REFERENCES embedding_consents(id) ON DELETE RESTRICT,
+  workspace_key TEXT NOT NULL,
+  run_id TEXT,
+  operation TEXT NOT NULL CHECK(operation IN ('rebuild','recall')),
+  record_count INTEGER NOT NULL CHECK(record_count>=0),
+  byte_count INTEGER NOT NULL CHECK(byte_count>=0),
+  duration_ms INTEGER NOT NULL CHECK(duration_ms>=0),
+  input_tokens INTEGER NOT NULL DEFAULT 0 CHECK(input_tokens>=0),
+  cost_usd REAL NOT NULL DEFAULT 0 CHECK(cost_usd>=0),
+  status TEXT NOT NULL CHECK(status IN ('completed','failed')),
+  error_code TEXT,
+  created_at TEXT NOT NULL
+) STRICT;
 CREATE VIRTUAL TABLE memory_fts USING fts5(
   memory_id UNINDEXED,
   revision UNINDEXED,
@@ -317,3 +395,121 @@ CREATE VIRTUAL TABLE memory_fts USING fts5(
   tokenize='unicode61'
 );
 """
+
+
+WORKSPACE_MIGRATIONS = {
+    1: """
+CREATE TABLE routing_decisions (
+  id INTEGER PRIMARY KEY,
+  run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  sequence INTEGER NOT NULL CHECK(sequence>=1),
+  role TEXT NOT NULL CHECK(role IN ('reasoning','fast','embedding','vision')),
+  candidates_json TEXT NOT NULL CHECK(json_valid(candidates_json)),
+  selected_profile TEXT,
+  reason_json TEXT NOT NULL CHECK(json_valid(reason_json)),
+  created_at TEXT NOT NULL,
+  UNIQUE(run_id,sequence)
+) STRICT;
+CREATE TABLE model_calls (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  routing_decision_id INTEGER REFERENCES routing_decisions(id) ON DELETE SET NULL,
+  role TEXT NOT NULL CHECK(role IN ('reasoning','fast','embedding','vision')),
+  profile TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL,
+  attempt INTEGER NOT NULL CHECK(attempt>=1),
+  status TEXT NOT NULL CHECK(status IN ('running','completed','failed')),
+  data_policy TEXT NOT NULL,
+  fallback_from TEXT,
+  started_at TEXT NOT NULL,
+  finished_at TEXT,
+  duration_ms INTEGER CHECK(duration_ms IS NULL OR duration_ms>=0),
+  input_tokens INTEGER NOT NULL DEFAULT 0 CHECK(input_tokens>=0),
+  output_tokens INTEGER NOT NULL DEFAULT 0 CHECK(output_tokens>=0),
+  cost_usd REAL NOT NULL DEFAULT 0 CHECK(cost_usd>=0),
+  error_code TEXT,
+  error_message TEXT
+) STRICT;
+CREATE INDEX idx_model_calls_run ON model_calls(run_id,started_at);
+CREATE INDEX idx_model_calls_model ON model_calls(provider,model,started_at);
+CREATE TABLE budget_decisions (
+  id INTEGER PRIMARY KEY,
+  run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  scope TEXT NOT NULL CHECK(scope IN ('run','session')),
+  limit_type TEXT NOT NULL CHECK(limit_type IN ('tokens','cost_usd')),
+  current_value REAL NOT NULL CHECK(current_value>=0),
+  reserved_value REAL NOT NULL CHECK(reserved_value>=0),
+  limit_value REAL NOT NULL CHECK(limit_value>=0),
+  decision TEXT NOT NULL CHECK(decision IN ('allowed','denied','hard_stop')),
+  profile TEXT NOT NULL,
+  created_at TEXT NOT NULL
+) STRICT;
+""",
+}
+
+
+MEMORY_MIGRATIONS = {
+    1: """
+ALTER TABLE memory_workspace_settings RENAME TO memory_workspace_settings_v1;
+CREATE TABLE memory_workspace_settings (
+  workspace_key TEXT PRIMARY KEY,
+  write_enabled INTEGER NOT NULL DEFAULT 1 CHECK(write_enabled IN (0,1)),
+  policy TEXT NOT NULL DEFAULT 'review' CHECK(policy IN ('off','review','automatic')),
+  recall_enabled INTEGER NOT NULL DEFAULT 1 CHECK(recall_enabled IN (0,1)),
+  embedding_backend TEXT NOT NULL DEFAULT 'off' CHECK(embedding_backend IN ('off','fastembed','local_http','external')),
+  embedding_model TEXT,
+  embedding_endpoint TEXT,
+  embedding_provider TEXT,
+  embedding_data_policy TEXT,
+  embedding_consent_id INTEGER
+) STRICT;
+INSERT INTO memory_workspace_settings(workspace_key,write_enabled,policy,recall_enabled,embedding_backend,embedding_model,embedding_endpoint)
+SELECT workspace_key,write_enabled,policy,recall_enabled,embedding_backend,embedding_model,embedding_endpoint FROM memory_workspace_settings_v1;
+DROP TABLE memory_workspace_settings_v1;
+ALTER TABLE memory_embeddings RENAME TO memory_embeddings_v1;
+CREATE TABLE memory_embeddings (
+  memory_id TEXT NOT NULL,
+  revision INTEGER NOT NULL,
+  backend TEXT NOT NULL CHECK(backend IN ('fastembed','local_http','external')),
+  model TEXT NOT NULL,
+  dimensions INTEGER NOT NULL CHECK(dimensions>0),
+  vector BLOB NOT NULL,
+  content_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(memory_id,revision,backend,model),
+  FOREIGN KEY(memory_id,revision) REFERENCES memory_revisions(memory_id,revision) ON DELETE CASCADE
+) STRICT;
+INSERT INTO memory_embeddings SELECT * FROM memory_embeddings_v1;
+DROP TABLE memory_embeddings_v1;
+CREATE TABLE embedding_consents (
+  id INTEGER PRIMARY KEY,
+  workspace_key TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL,
+  data_policy TEXT NOT NULL,
+  fields_json TEXT NOT NULL CHECK(json_valid(fields_json)),
+  record_count INTEGER NOT NULL CHECK(record_count>=0),
+  byte_count INTEGER NOT NULL CHECK(byte_count>=0),
+  content_hash TEXT NOT NULL,
+  confirmed_at TEXT NOT NULL,
+  revoked_at TEXT
+) STRICT;
+CREATE INDEX idx_embedding_consents_workspace ON embedding_consents(workspace_key,confirmed_at);
+CREATE TABLE embedding_requests (
+  id INTEGER PRIMARY KEY,
+  consent_id INTEGER NOT NULL REFERENCES embedding_consents(id) ON DELETE RESTRICT,
+  workspace_key TEXT NOT NULL,
+  run_id TEXT,
+  operation TEXT NOT NULL CHECK(operation IN ('rebuild','recall')),
+  record_count INTEGER NOT NULL CHECK(record_count>=0),
+  byte_count INTEGER NOT NULL CHECK(byte_count>=0),
+  duration_ms INTEGER NOT NULL CHECK(duration_ms>=0),
+  input_tokens INTEGER NOT NULL DEFAULT 0 CHECK(input_tokens>=0),
+  cost_usd REAL NOT NULL DEFAULT 0 CHECK(cost_usd>=0),
+  status TEXT NOT NULL CHECK(status IN ('completed','failed')),
+  error_code TEXT,
+  created_at TEXT NOT NULL
+) STRICT;
+""",
+}

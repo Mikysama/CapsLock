@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
+from datetime import UTC, datetime
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator, Self
@@ -11,9 +13,11 @@ import aiosqlite
 
 from .schema_v2 import (
     MEMORY_APPLICATION_ID,
+    MEMORY_MIGRATIONS,
     MEMORY_SCHEMA,
     MEMORY_SCHEMA_VERSION,
     WORKSPACE_APPLICATION_ID,
+    WORKSPACE_MIGRATIONS,
     WORKSPACE_SCHEMA,
     WORKSPACE_SCHEMA_VERSION,
 )
@@ -28,6 +32,7 @@ class AsyncDatabase:
     schema_version: int
     schema: str
     label: str
+    migrations: dict[int, str]
 
     def __init__(self, path: Path, connection: aiosqlite.Connection) -> None:
         self.path = path
@@ -84,11 +89,49 @@ class AsyncDatabase:
                 await self.connection.rollback()
                 raise
             return
+        if app_id == self.application_id and 0 < version < self.schema_version:
+            await self._migrate(version)
+            return
         if app_id != self.application_id or version != self.schema_version:
             raise IncompatibleDatabaseError(
                 f"{self.label} database is not compatible with CapsLock v2: {self.path}; "
                 "move it to a backup location and start again"
             )
+
+    async def _migrate(self, version: int) -> None:
+        backup = await self._backup(version)
+        current = version
+        try:
+            while current < self.schema_version:
+                script = self.migrations.get(current)
+                if script is None:
+                    raise IncompatibleDatabaseError(
+                        f"no {self.label} database migration from schema {current}"
+                    )
+                await self.connection.executescript(
+                    "BEGIN IMMEDIATE;\n"
+                    + script
+                    + f"\nPRAGMA user_version={current + 1};\nCOMMIT;"
+                )
+                current += 1
+        except BaseException as exc:
+            await self.connection.rollback()
+            raise IncompatibleDatabaseError(
+                f"{self.label} database migration failed; backup preserved at {backup}"
+            ) from exc
+
+    async def _backup(self, version: int) -> Path:
+        backup_dir = self.path.parent / "backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+        backup = backup_dir / f"{self.path.name}.schema-{version}.{stamp}.bak"
+        target = sqlite3.connect(backup)
+        try:
+            await self.connection.backup(target)
+        finally:
+            target.close()
+        backup.chmod(0o600)
+        return backup
 
     @asynccontextmanager
     async def transaction(self) -> AsyncIterator[aiosqlite.Connection]:
@@ -135,6 +178,7 @@ class WorkspaceDatabase(AsyncDatabase):
     schema_version = WORKSPACE_SCHEMA_VERSION
     schema = WORKSPACE_SCHEMA
     label = "workspace"
+    migrations = WORKSPACE_MIGRATIONS
 
 
 class MemoryDatabase(AsyncDatabase):
@@ -142,6 +186,7 @@ class MemoryDatabase(AsyncDatabase):
     schema_version = MEMORY_SCHEMA_VERSION
     schema = MEMORY_SCHEMA
     label = "memory"
+    migrations = MEMORY_MIGRATIONS
 
     async def _configure_validated(self) -> None:
         await super()._configure_validated()

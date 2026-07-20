@@ -55,8 +55,11 @@ class ChatModel(Protocol):
 
 
 class AsyncOpenAIChatModel:
-    def __init__(self, client: Any) -> None:
+    def __init__(
+        self, client: Any, *, max_output_tokens: dict[str, int] | None = None
+    ) -> None:
         self.client = client
+        self.max_output_tokens = max_output_tokens or {}
 
     async def complete(
         self,
@@ -68,6 +71,8 @@ class AsyncOpenAIChatModel:
         arguments: dict[str, object] = {"model": model, "messages": messages}
         if tools:
             arguments["tools"] = tools
+        if model in self.max_output_tokens:
+            arguments["max_tokens"] = self.max_output_tokens[model]
         response = await self.client.chat.completions.create(**arguments)
         return self._response(response)
 
@@ -82,9 +87,12 @@ class AsyncOpenAIChatModel:
             "model": model,
             "messages": messages,
             "stream": True,
+            "stream_options": {"include_usage": True},
         }
         if tools:
             arguments["tools"] = tools
+        if model in self.max_output_tokens:
+            arguments["max_tokens"] = self.max_output_tokens[model]
         stream = await self.client.chat.completions.create(**arguments)
         if not hasattr(stream, "__aiter__"):
             response = self._response(stream)

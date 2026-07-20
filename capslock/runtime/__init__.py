@@ -10,6 +10,7 @@ from .model import (
     ModelToolCall,
     ModelUsage,
 )
+from .routing import ModelRouter
 
 __all__ = [
     "AgentRuntimeError",
@@ -21,4 +22,5 @@ __all__ = [
     "ModelToolCall",
     "ModelUsage",
     "WorkspaceAgent",
+    "ModelRouter",
 ]

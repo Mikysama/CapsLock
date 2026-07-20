@@ -540,11 +540,11 @@ class WorkflowRepository(Repository):
             action = await connection.execute(
                 """UPDATE actions SET status='cancelled',result_kind='user_cancelled',
                    finished_at=?,decided_at=coalesce(decided_at,?),error_code='cancelled',
-                   error_message=? WHERE id=? AND run_id=? AND status='running'""",
+                   error_message=? WHERE id=? AND run_id=? AND status IN ('approved','running')""",
                 (timestamp, timestamp, message, action_id, run_id),
             )
             if not action.rowcount:
-                raise ValueError("action is not running")
+                raise ValueError("action is not approved or running")
             await connection.execute(
                 """UPDATE actions SET status='cancelled',result_kind='user_cancelled',
                    finished_at=?,decided_at=coalesce(decided_at,?),error_code='cancelled',

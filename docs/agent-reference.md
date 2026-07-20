@@ -158,6 +158,13 @@ ToolLoop 每个模型或工具阶段写 `run_steps`。只有 completed 且带 ch
 
 工作区数据库使用 application ID `0x434C4B32`，记忆数据库使用 `0x434C4D32`。两者开启 foreign keys、WAL 和 5 秒 busy timeout；记忆库额外开启 secure delete 并设置文件权限 `0600`。
 
-应用先读取 application ID 和 schema version，确认兼容后才切换 WAL。空库 schema、application ID 与 version 在一个事务中初始化。旧库或错库只报错，不执行迁移或删除。
+应用先读取 application ID 和 schema version，确认兼容后才切换 WAL。空库 schema、application ID 与 version 在一个事务中初始化。v1.8.0 可将相同 v2 application ID 的 schema v1 数据库在备份后事务迁移至 schema v2；旧 application ID 和未知版本仍只报错。
+
+## 模型路由、预算与外部嵌入
+
+- `reasoning` 用于工具循环与最终回答，`fast` 用于记忆候选提取，`embedding` 用于外部语义检索；`vision` 只保留配置，不接受视觉输入。
+- timeout、429 和 5xx 最多重试两次；只有相同 data-policy 的显式后备 profile 可接管，首个流式 delta 后不再重试。
+- `/status` 和 JSONL 终止事件保留 run/session token、费用及逐模型摘要。预算预检失败时，TUI 可仅批准下一次模型调用，`exec` 返回 `model_budget_exceeded`。
+- `/memory embeddings enable external <model-profile>` 会先展示 `memory.content`、未来 `recall.query`、当前记录数和 UTF-8 字节数；确认记录失效或撤销后不会联网。
 
 canonical 路径与手工迁移步骤见 [v2 architecture and migration](development/v2.md)。

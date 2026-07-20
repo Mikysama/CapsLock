@@ -7,6 +7,8 @@ import hashlib
 import math
 import socket
 import struct
+import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlparse
@@ -22,6 +24,42 @@ MAX_EMBEDDING_TEXT_BYTES = 8 * 1024
 
 class EmbeddingProvider(Protocol):
     async def embed(self, texts: list[str]) -> list[list[float]]: ...
+
+
+@dataclass(frozen=True)
+class ExternalEmbeddingConfig:
+    profile: str
+    provider: str
+    model: str
+    data_policy: str
+    input_cost_per_million: float
+    client: Any
+
+
+class ExternalOpenAIEmbeddingProvider:
+    def __init__(self, config: ExternalEmbeddingConfig) -> None:
+        self.config = config
+        self.last_input_tokens = 0
+        self.last_cost_usd = 0.0
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        response = await self.config.client.embeddings.create(
+            model=self.config.model, input=texts
+        )
+        vectors = [
+            [float(value) for value in item.embedding]
+            for item in sorted(response.data, key=lambda item: item.index)
+        ]
+        usage = getattr(response, "usage", None)
+        self.last_input_tokens = int(
+            getattr(usage, "prompt_tokens", None)
+            or getattr(usage, "total_tokens", 0)
+            or 0
+        )
+        self.last_cost_usd = (
+            self.last_input_tokens * self.config.input_cost_per_million / 1_000_000
+        )
+        return vectors
 
 
 class FastEmbedProvider:
@@ -87,6 +125,7 @@ class EmbeddingService:
         session_id: str,
         cache_dir: Path,
         provider_factory: Any = None,
+        external_profiles: dict[str, ExternalEmbeddingConfig] | None = None,
     ) -> None:
         self.repositories, self.workspace, self.session_id = (
             repositories,
@@ -94,6 +133,7 @@ class EmbeddingService:
             session_id,
         )
         self.cache_dir, self.provider_factory = cache_dir, provider_factory
+        self.external_profiles = external_profiles or {}
 
     async def provider(self) -> tuple[EmbeddingBackend, str, EmbeddingProvider] | None:
         settings = await self.repositories.memories.settings(self.workspace)
@@ -101,6 +141,21 @@ class EmbeddingService:
         if backend is EmbeddingBackend.OFF:
             return None
         model = str(settings["embedding_model"] or DEFAULT_FASTEMBED_MODEL)
+        if backend is EmbeddingBackend.EXTERNAL:
+            config = self.external_profiles.get(model)
+            if config is None:
+                raise RuntimeError("external embedding profile is not available")
+            consent_id = settings.get("embedding_consent_id")
+            if not isinstance(consent_id, int):
+                raise RuntimeError("external embedding consent is required")
+            await self.repositories.embedding_audit.require_valid(
+                consent_id,
+                workspace=self.workspace,
+                provider=config.provider,
+                model=config.model,
+                data_policy=config.data_policy,
+            )
+            return backend, model, ExternalOpenAIEmbeddingProvider(config)
         if callable(self.provider_factory):
             return (
                 backend,
@@ -128,7 +183,7 @@ class EmbeddingService:
         text = item.content.encode()[:MAX_EMBEDDING_TEXT_BYTES].decode(
             "utf-8", "ignore"
         )
-        vector = (await provider.embed([text]))[0]
+        vector = (await self._embed(provider, [text], operation="rebuild"))[0]
         await self.repositories.embeddings.put(
             item,
             backend=backend,
@@ -139,12 +194,16 @@ class EmbeddingService:
         )
         return True
 
-    async def semantic_ranks(self, query: str, *, limit: int = 20) -> dict[str, int]:
+    async def semantic_ranks(
+        self, query: str, *, limit: int = 20, run_id: str | None = None
+    ) -> dict[str, int]:
         configured = await self.provider()
         if configured is None:
             return {}
         backend, model, provider = configured
-        query_vector = (await provider.embed([query]))[0]
+        query_vector = (
+            await self._embed(provider, [query], operation="recall", run_id=run_id)
+        )[0]
         scores = []
         for item, packed, dimensions in await self.repositories.embeddings.list(
             workspace=self.workspace,
@@ -160,6 +219,53 @@ class EmbeddingService:
             identifier: rank
             for rank, (identifier, _) in enumerate(scores[:limit], start=1)
         }
+
+    async def _embed(
+        self,
+        provider: EmbeddingProvider,
+        texts: list[str],
+        *,
+        operation: str,
+        run_id: str | None = None,
+    ) -> list[list[float]]:
+        started = time.monotonic()
+        try:
+            vectors = await provider.embed(texts)
+        except Exception as exc:
+            await self._audit_external(
+                provider, texts, operation, run_id, started, type(exc).__name__
+            )
+            raise
+        await self._audit_external(provider, texts, operation, run_id, started, None)
+        return vectors
+
+    async def _audit_external(
+        self,
+        provider: EmbeddingProvider,
+        texts: list[str],
+        operation: str,
+        run_id: str | None,
+        started: float,
+        error_code: str | None,
+    ) -> None:
+        if not isinstance(provider, ExternalOpenAIEmbeddingProvider):
+            return
+        settings = await self.repositories.memories.settings(self.workspace)
+        consent_id = settings.get("embedding_consent_id")
+        if not isinstance(consent_id, int):
+            return
+        await self.repositories.embedding_audit.record_request(
+            consent_id=consent_id,
+            workspace=self.workspace,
+            run_id=run_id,
+            operation=operation,
+            record_count=len(texts),
+            byte_count=sum(len(item.encode("utf-8")) for item in texts),
+            duration_ms=max(0, round((time.monotonic() - started) * 1000)),
+            input_tokens=provider.last_input_tokens,
+            cost_usd=provider.last_cost_usd,
+            error_code=error_code,
+        )
 
     async def rebuild(self, items: list[MemoryInfo]) -> tuple[int, int]:
         await self.repositories.embeddings.clear(workspace=self.workspace)

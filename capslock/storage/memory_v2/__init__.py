@@ -10,6 +10,7 @@ from .candidates import CandidateRepository
 from .core import workspace_key
 from .lifecycle import MemoryRepository
 from .semantic import EmbeddingRepository, RecallRepository
+from .external import EmbeddingAuditRepository
 
 
 @dataclass(frozen=True)
@@ -19,6 +20,7 @@ class MemoryRepositories:
     candidates: CandidateRepository
     embeddings: EmbeddingRepository
     recalls: RecallRepository
+    embedding_audit: EmbeddingAuditRepository
 
     @classmethod
     async def open(cls, path: str | Path) -> "MemoryRepositories":
@@ -29,6 +31,7 @@ class MemoryRepositories:
             CandidateRepository(database),
             EmbeddingRepository(database),
             RecallRepository(database),
+            EmbeddingAuditRepository(database),
         )
 
     async def close(self) -> None:
@@ -38,6 +41,7 @@ class MemoryRepositories:
 __all__ = [
     "CandidateRepository",
     "EmbeddingRepository",
+    "EmbeddingAuditRepository",
     "MemoryRepositories",
     "MemoryRepository",
     "RecallRepository",

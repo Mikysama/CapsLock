@@ -52,6 +52,7 @@ class EmbeddingBackend(StrEnum):
     OFF = "off"
     FASTEMBED = "fastembed"
     LOCAL_HTTP = "local_http"
+    EXTERNAL = "external"
 
 
 @dataclass(frozen=True)

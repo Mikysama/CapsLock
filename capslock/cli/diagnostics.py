@@ -162,6 +162,24 @@ async def doctor(
         ("API key", "configured" if settings.model_config.api_key else "missing"),
         ("Git", "repository" if (workspace / ".git").is_dir() else "not a repository"),
     ]
+    for name, provider in sorted((settings.providers or {}).items()):
+        checks.append(
+            (
+                f"Provider {name}",
+                f"{provider.kind} · key={'configured' if provider.api_key else 'missing'} · policy={provider.data_policy}",
+            )
+        )
+    if settings.routing is not None:
+        for role in ("reasoning", "fast", "embedding", "vision"):
+            profiles = getattr(settings.routing, role)
+            checks.append((f"Route {role}", ", ".join(profiles) or "not configured"))
+    budget = settings.budget
+    checks.append(
+        (
+            "Model budgets",
+            f"run_tokens={budget.max_run_tokens or '-'} · run_usd={budget.max_run_usd or '-'} · session_usd={budget.max_session_usd or '-'}",
+        )
+    )
     render_doctor(console, checks)
     return 0
 

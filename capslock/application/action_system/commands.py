@@ -146,8 +146,8 @@ class CommandActionHandler:
                 process.returncode, stdout_bytes, stderr_bytes, timed_out=True
             )
         except asyncio.CancelledError:
-            await self._stop(process)
-            await process.communicate()
+            cleanup = asyncio.create_task(self._cancel_process(process))
+            await _await_cleanup(cleanup)
             raise
         return self._result(process.returncode, stdout_bytes, stderr_bytes)
 
@@ -195,5 +195,18 @@ class CommandActionHandler:
             except ProcessLookupError:
                 pass
 
+    async def _cancel_process(self, process: asyncio.subprocess.Process) -> None:
+        await self._stop(process)
+        await process.communicate()
+
     async def reverse(self, action: ActionRecord) -> dict[str, Any]:
         raise ValueError("command actions cannot be reversed")
+
+
+async def _await_cleanup(task: asyncio.Task) -> None:
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            continue
+    await task

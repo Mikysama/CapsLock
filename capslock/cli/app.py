@@ -96,6 +96,22 @@ def create_client(settings: Settings) -> AsyncOpenAI:
     )
 
 
+def create_provider_clients(settings: Settings) -> dict[str, AsyncOpenAI]:
+    clients: dict[str, AsyncOpenAI] = {}
+    for name, provider in (settings.providers or {}).items():
+        if not provider.api_key or provider.api_key.startswith("your_"):
+            continue
+        clients[name] = AsyncOpenAI(
+            api_key=provider.api_key,
+            base_url=provider.base_url,
+            timeout=provider.timeout_seconds,
+        )
+    if not clients:
+        # Preserve the existing actionable error for the implicit legacy profile.
+        create_client(settings)
+    return clients
+
+
 async def create_application(
     workspace: Path,
     settings: Settings,
@@ -106,7 +122,7 @@ async def create_application(
     return await WorkspaceApplication.open(
         workspace=workspace,
         settings=settings,
-        client=create_client(settings),
+        client=create_provider_clients(settings),
         session_id=session_id,
         layout=layout,
     )

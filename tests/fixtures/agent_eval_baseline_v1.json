@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "minimum_quality": 1.0,
+  "maximum_p95_case_latency_seconds": 15.0,
+  "maximum_cost_usd": 0.0
+}

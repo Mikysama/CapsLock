@@ -46,7 +46,9 @@ class RecallService:
         )
         lexical_ranks = {item.id: rank for item, rank in lexical}
         try:
-            semantic_ranks = await self.embeddings.semantic_ranks(query, limit=20)
+            semantic_ranks = await self.embeddings.semantic_ranks(
+                query, limit=20, run_id=run_id
+            )
         except Exception as exc:
             semantic_ranks = {}
             self.event(

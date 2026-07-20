@@ -37,6 +37,8 @@ jobs:
         run: python -m ruff check .
       - name: Test
         run: python -m pytest -q
+      - name: Core agent evaluation
+        run: python scripts/evaluate_agent.py --mode deterministic --output "$RUNNER_TEMP/capslock-eval.json"
       - name: Check installed dependencies
         run: .venv-ci/bin/python -m pip check
       - name: Audit dependencies

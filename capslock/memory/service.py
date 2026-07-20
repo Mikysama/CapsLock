@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -21,6 +23,7 @@ from .candidates import CandidateService, MemoryExtractionResult
 from .embeddings import (
     DEFAULT_FASTEMBED_MODEL,
     EmbeddingService,
+    ExternalEmbeddingConfig,
     validate_loopback_endpoint,
 )
 from .recall import RecallService
@@ -37,6 +40,9 @@ class MemorySettingsView:
     embedding_backend: EmbeddingBackend
     embedding_model: str | None
     embedding_endpoint: str | None
+    embedding_provider: str | None = None
+    embedding_data_policy: str | None = None
+    embedding_consent_id: int | None = None
 
     @property
     def write_enabled(self) -> bool:
@@ -57,6 +63,7 @@ class MemoryService:
         project_write_enabled: bool = True,
         event=None,
         embedding_provider_factory: Any = None,
+        external_embedding_profiles: dict[str, ExternalEmbeddingConfig] | None = None,
         source_validator=None,
     ) -> None:
         self.repositories = repositories
@@ -65,12 +72,14 @@ class MemoryService:
         self.session_id = session_id
         self.project_write_enabled = project_write_enabled
         self.event = event or (lambda *args, **kwargs: None)
+        self.external_embedding_profiles = external_embedding_profiles or {}
         self.embeddings = EmbeddingService(
             repositories,
             workspace=self.workspace_key,
             session_id=session_id,
             cache_dir=UserLayout.from_environment().home / "cache" / "fastembed",
             provider_factory=embedding_provider_factory,
+            external_profiles=self.external_embedding_profiles,
         )
         self.recall_service = RecallService(
             repositories,
@@ -105,6 +114,9 @@ class MemoryService:
             raw["embedding_backend"],
             raw["embedding_model"],
             raw["embedding_endpoint"],
+            raw["embedding_provider"],
+            raw["embedding_data_policy"],
+            raw["embedding_consent_id"],
         )
 
     async def set_local_write_enabled(self, enabled: bool) -> None:
@@ -136,6 +148,8 @@ class MemoryService:
         model: str | None = None,
         endpoint: str | None = None,
     ) -> None:
+        if backend is EmbeddingBackend.EXTERNAL:
+            raise ValueError("external embeddings require explicit preview and consent")
         if backend is EmbeddingBackend.LOCAL_HTTP:
             if not endpoint:
                 raise ValueError("local-http embeddings require an endpoint")
@@ -146,6 +160,7 @@ class MemoryService:
             endpoint = None
         if backend is EmbeddingBackend.FASTEMBED:
             model = model or DEFAULT_FASTEMBED_MODEL
+        await self.repositories.embedding_audit.revoke(self.workspace_key)
         await self.repositories.memories.set_setting(
             self.workspace_key, "embedding_backend", backend.value
         )
@@ -155,9 +170,77 @@ class MemoryService:
         await self.repositories.memories.set_setting(
             self.workspace_key, "embedding_endpoint", endpoint
         )
+        for name in (
+            "embedding_provider",
+            "embedding_data_policy",
+            "embedding_consent_id",
+        ):
+            await self.repositories.memories.set_setting(self.workspace_key, name, None)
         await self.repositories.embeddings.clear(workspace=self.workspace_key)
         self.event(
             "memory_embedding_policy_changed", backend=backend.value, model=model
+        )
+
+    async def external_embedding_preview(self, profile: str) -> dict[str, object]:
+        config = self.external_embedding_profiles.get(profile)
+        if config is None:
+            raise ValueError(f"unknown external embedding profile: {profile}")
+        items = await self.list(limit=-1)
+        contents = [item.content for item in items if item.content]
+        fields = ("memory.content", "recall.query")
+        scopes = ("global", "workspace", "session")
+        payload = {
+            "profile": profile,
+            "provider": config.provider,
+            "model": config.model,
+            "data_policy": config.data_policy,
+            "fields": fields,
+            "scopes": scopes,
+            "record_count": len(contents),
+            "byte_count": sum(len(item.encode("utf-8")) for item in contents),
+        }
+        payload["content_hash"] = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()
+        ).hexdigest()
+        return payload
+
+    async def enable_external_embeddings(
+        self, profile: str, preview: dict[str, object]
+    ) -> None:
+        current = await self.external_embedding_preview(profile)
+        if current != preview:
+            raise ValueError("external embedding preview changed; review it again")
+        config = self.external_embedding_profiles[profile]
+        consent_id = await self.repositories.embedding_audit.consent(
+            workspace=self.workspace_key,
+            provider=config.provider,
+            model=config.model,
+            data_policy=config.data_policy,
+            fields=tuple(str(item) for item in current["fields"])
+            + tuple(f"scope.{item}" for item in current["scopes"]),
+            record_count=int(current["record_count"]),
+            byte_count=int(current["byte_count"]),
+            content_hash=str(current["content_hash"]),
+        )
+        values = {
+            "embedding_backend": EmbeddingBackend.EXTERNAL.value,
+            "embedding_model": profile,
+            "embedding_endpoint": None,
+            "embedding_provider": config.provider,
+            "embedding_data_policy": config.data_policy,
+            "embedding_consent_id": consent_id,
+        }
+        for name, value in values.items():
+            await self.repositories.memories.set_setting(
+                self.workspace_key, name, value
+            )
+        await self.repositories.embeddings.clear(workspace=self.workspace_key)
+        self.event(
+            "memory_embedding_policy_changed",
+            backend=EmbeddingBackend.EXTERNAL.value,
+            profile=profile,
+            provider=config.provider,
+            consent_id=consent_id,
         )
 
     async def add(
@@ -356,7 +439,7 @@ class MemoryService:
         return result
 
     async def rebuild_embeddings(self) -> tuple[int, int]:
-        return await self.embeddings.rebuild(await self.list(limit=10000))
+        return await self.embeddings.rebuild(await self.list(limit=-1))
 
     async def export_json(self, *args, **kwargs):
         return await self.transfer.export_json(*args, **kwargs)

@@ -234,6 +234,49 @@ def test_command_cancellation_terminates_process_and_marks_action(
     asyncio.run(scenario())
 
 
+def test_cancellation_during_running_transition_is_persisted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        repositories = await WorkspaceRepositories.open(
+            tmp_path / "state.sqlite3", workspace=tmp_path
+        )
+        transitioned, release = asyncio.Event(), asyncio.Event()
+        try:
+            session, prepared = await workspace_run(repositories)
+            actions = coordinator(
+                repositories,
+                session.id,
+                prepared.run.id,
+                [StubActionHandler(set(ActionType))],
+            )
+            proposal = await actions.propose(ActionType.COMMAND, template="ignored")
+            await repositories.actions.transition(proposal.id, ActionStatus.APPROVED)
+            original = repositories.actions.transition
+
+            async def delayed_transition(action_id, target, **kwargs):
+                result = await original(action_id, target, **kwargs)
+                if target is ActionStatus.RUNNING:
+                    transitioned.set()
+                    await release.wait()
+                return result
+
+            monkeypatch.setattr(repositories.actions, "transition", delayed_transition)
+            task = asyncio.create_task(actions.execute_approved(proposal.id))
+            await transitioned.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert (
+                await repositories.actions.require(proposal.id)
+            ).status is ActionStatus.CANCELLED
+        finally:
+            release.set()
+            await repositories.close()
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("action_type", list(ActionType))
 def test_every_action_type_can_be_explicitly_rejected(
     tmp_path: Path, action_type: ActionType

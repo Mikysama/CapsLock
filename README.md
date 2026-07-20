@@ -2,7 +2,7 @@
 
 CapsLock 是一个本机工作区 Agent，用于读取代码、检索证据、检查 Git、提出受控文件修改、执行固定命令，以及按审批策略访问 Web 和本地 MCP。v2 内核完全异步，运行、动作、审批、记忆和审计分别通过强类型领域接口与 SQLite repository 管理。
 
-当前源码版本为 `1.7.2`，本次交互式会话删除改进见 [v1.7.2 发布说明](docs/releases/v1.7.2.md)。
+当前源码版本为 `1.8.0`，模型路由、外部嵌入、预算和评测说明见 [v1.8.0 发布说明](docs/releases/v1.8.0.md)。
 
 ## 安装
 
@@ -131,6 +131,7 @@ TUI 将模型提供方返回的 reasoning 与最终回答分开显示：`◇ Mod
 /memory policy off|review|automatic
 /memory embeddings enable fastembed
 /memory embeddings enable local-http <endpoint> <model>
+/memory embeddings enable external <model-profile>
 /memory embeddings disable
 /memory embeddings rebuild
 ```
@@ -156,15 +157,48 @@ Inspect relevant files and return an evidence-backed summary.
 
 ## 配置
 
-环境变量优先于 `.capslock/config.toml`。配置按领域显式分组：
+环境变量优先于 `.capslock/config.toml`。单模型 `[model]` 配置继续兼容；多模型使用 provider、profile 和角色路由：
 
 ```toml
-[model]
+[providers.primary]
+kind = "openai_compatible"
 base_url = "https://api.deepseek.com"
-model = "deepseek-v4-flash"
+api_key_env = "CAPSLOCK_API_KEY"
 timeout_seconds = 60
+data_policy = "primary-provider"
+
+[providers.backup]
+kind = "openai_compatible"
+base_url = "https://api.example.com/v1"
+api_key_env = "BACKUP_MODEL_API_KEY"
+data_policy = "primary-provider" # 只有相同策略才允许自动降级
+
+[models.main]
+provider = "primary"
+model = "deepseek-v4-flash"
+context_window = 128000
+max_output_tokens = 8192
 input_cost_per_million = 0
 output_cost_per_million = 0
+
+[models.backup]
+provider = "backup"
+model = "compatible-chat-model"
+context_window = 128000
+max_output_tokens = 8192
+input_cost_per_million = 1
+output_cost_per_million = 2
+
+[routing]
+reasoning = ["main", "backup"]
+fast = ["main"]
+embedding = ["backup"]
+vision = []
+
+[budget]
+max_run_tokens = 100000
+max_run_usd = 2.0
+max_session_usd = 10.0
 
 [runtime]
 max_turns = 32
@@ -188,7 +222,7 @@ mcp_output_bytes = 100000
 enabled = true
 ```
 
-模型与运行限制也可使用对应 `CAPSLOCK_*` 环境变量。`DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL` 和 `DEEPSEEK_MODEL` 仍作为模型提供方变量接受。`CAPSLOCK_HOME` 与 `CAPSLOCK_MEMORY_DATABASE` 必须是 shell 中的绝对路径。
+旧模型设置仍可使用对应 `CAPSLOCK_*` 环境变量；未配置新路由时会映射为隐式 `default` profile。新旧 TOML 模型配置不能混用。`DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL` 和 `DEEPSEEK_MODEL` 继续兼容。`CAPSLOCK_HOME` 与 `CAPSLOCK_MEMORY_DATABASE` 必须是 shell 中的绝对路径。
 
 ## 数据与升级边界
 
@@ -201,7 +235,7 @@ v2 只接受 canonical 布局：
 - 事件日志：`.capslock/state/events.jsonl`
 - 用户记忆：`${CAPSLOCK_HOME:-~/.capslock}/state/memory.sqlite3`
 
-工作区库和记忆库使用不同的 SQLite `application_id`。已有表但 application ID 或 schema version 不匹配时，CapsLock 拒绝启动，不执行 WAL 切换、迁移、删除或覆盖。发现旧布局时会列出冲突路径；请先手工备份，再移走旧路径并创建全新 v2 状态。详见 [v2 架构与迁移说明](docs/development/v2.md)。
+工作区库和记忆库使用不同的 SQLite `application_id`。v1.8.0 会将相同 v2 application ID 的 schema v1 数据库自动备份并迁移到 schema v2；旧 application ID、未知版本或其他已有表仍拒绝启动。详见 [v2 架构与迁移说明](docs/development/v2.md)。
 
 ## 架构
 

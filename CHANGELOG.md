@@ -4,6 +4,30 @@
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-07-20
+
+### Added
+
+- 新增 OpenAI-compatible 多 provider/model profile、`reasoning`/`fast`/`embedding`/`vision` 角色和确定性路由轨迹。
+- 新增 run/session 模型 token 与美元预算、TUI 单次调用确认、模型级延迟/错误/费用统计。
+- 新增经过外发字段、记录数和字节数预览确认的真实外部 embedding，以及请求费用与失败审计。
+- 新增覆盖工作区问答、编辑、执行、Web、MCP、记忆和 Skill 的固定评测套件与 CI 基线。
+
+### Changed
+
+- workspace 和 memory fresh-v2 schema 升至 v2；相同 application ID 的 schema v1 数据库会在一致性备份后事务迁移。
+- 模型 timeout、429 和 5xx 最多重试两次，并只向相同 data-policy 的显式候选降级；流式输出开始后禁止重放。
+- JSONL 继续使用 schema version 2，在终止事件中增加逐模型统计；预算停止使用稳定的 `model_budget_exceeded` 错误。
+
+### Security
+
+- 未确认、已撤销或 provider/model/data-policy 不匹配的外部 embedding 配置不会发送网络请求。
+- 模型路由不会扩大工具权限，也不会静默切换到数据策略不同的提供方。
+
+### Fixed
+
+- 取消命令 action 时，即使取消落在 `approved -> running` 持久化窗口内，也会先完成进程组和 action 状态清理再向调用方传播取消。
+
 ## [1.7.2] - 2026-07-20
 
 ### Added
