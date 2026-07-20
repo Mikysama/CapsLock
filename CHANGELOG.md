@@ -4,6 +4,18 @@
 
 ## [Unreleased]
 
+## [1.7.2] - 2026-07-20
+
+### Added
+
+- 新增 `capslock session` 作为 `capslock sessions` 的兼容别名。
+- 裸 `capslock session delete` 会打开方向键会话选择器，按 Enter 选择后显示会话标题和短 ID 并请求 `y/n` 二次确认。
+
+### Changed
+
+- 交互删除确认输入 `n` 或直接按 Enter 后返回会话列表，便于重新选择；输入 `y` 后永久删除所选会话。
+- 显式 Session ID 或唯一前缀以及 `--yes` 跳过二次确认的原有删除方式保持兼容。
+
 ## [1.7.0] - 2026-07-17
 
 ### Added

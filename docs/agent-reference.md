@@ -91,12 +91,12 @@ v2 不解析旧 alias，也不提供独立 `/cost`、`/context`、`/tasks`、`/c
 capslock
 capslock exec [PROMPT] [--json]
 capslock resume [SESSION] [--limit N]
-capslock sessions [--limit N]
-capslock sessions search <QUERY> [--archived]
-capslock sessions rename <SESSION> <TITLE>
-capslock sessions archive|unarchive <SESSION>
-capslock sessions export <SESSION> <WORKSPACE-RELATIVE-DIRECTORY>
-capslock sessions delete <SESSION> [--yes]
+capslock sessions|session [--limit N]
+capslock sessions|session search <QUERY> [--archived]
+capslock sessions|session rename <SESSION> <TITLE>
+capslock sessions|session archive|unarchive <SESSION>
+capslock sessions|session export <SESSION> <WORKSPACE-RELATIVE-DIRECTORY>
+capslock sessions|session delete [SESSION] [--yes]
 capslock doctor
 ```
 

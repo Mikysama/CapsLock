@@ -59,7 +59,9 @@ def build_parser() -> argparse.ArgumentParser:
     resume.add_argument("--limit", type=int, default=20)
     resume.add_argument("--no-spinner", action="store_true", default=argparse.SUPPRESS)
     resume.add_argument("--quiet", action="store_true", default=argparse.SUPPRESS)
-    sessions = subparsers.add_parser("sessions", help="Manage saved sessions")
+    sessions = subparsers.add_parser(
+        "sessions", aliases=["session"], help="Manage saved sessions"
+    )
     sessions.add_argument("--limit", type=int, default=20)
     commands = sessions.add_subparsers(dest="sessions_command")
     rename = commands.add_parser("rename")
@@ -76,7 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("session_id")
     export.add_argument("destination")
     delete = commands.add_parser("delete")
-    delete.add_argument("session_id")
+    delete.add_argument("session_id", nargs="?")
     delete.add_argument("--yes", action="store_true")
     subparsers.add_parser("doctor", help="Check v2 configuration and state")
     return parser
@@ -138,7 +140,7 @@ async def async_main(
         settings = Settings.load(workspace, layout=layout)
         if args.command == "doctor":
             return await doctor(output, workspace, settings, layout=layout)
-        if args.command == "sessions":
+        if args.command in {"session", "sessions"}:
             return await _sessions(output, args, workspace, layout, settings)
         session_id = getattr(args, "session_id", None)
         if args.command == "resume":
@@ -240,7 +242,12 @@ async def _sessions(
                     output, manager, repositories, args.session_id, args.destination
                 )
             return await delete_session(
-                output, manager, repositories, args.session_id, yes=args.yes
+                output,
+                manager,
+                repositories,
+                args.session_id,
+                yes=args.yes,
+                limit=args.limit,
             )
         return await list_sessions(output, repositories, args.limit)
     finally:

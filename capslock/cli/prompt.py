@@ -121,7 +121,12 @@ def prompt_footer(
     )
 
 
-def select_session(sessions: list[object], width: int | None = None) -> str:
+def select_session(
+    sessions: list[object],
+    width: int | None = None,
+    *,
+    title: str = "Resume a session",
+) -> str:
     if not sessions:
         raise ValueError("no saved sessions are available")
     terminal_width = width or shutil.get_terminal_size(fallback=(80, 24)).columns
@@ -133,7 +138,7 @@ def select_session(sessions: list[object], width: int | None = None) -> str:
     header_indent = " " * (6 + number_width)
     header = FormattedText(
         [
-            ("class:command-name", "Resume a session\n"),
+            ("class:command-name", f"{title}\n"),
             ("", header_indent),
             ("class:footer", _fit_cell("Title", title_width)),
             ("", "  "),

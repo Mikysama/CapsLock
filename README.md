@@ -2,7 +2,7 @@
 
 CapsLock 是一个本机工作区 Agent，用于读取代码、检索证据、检查 Git、提出受控文件修改、执行固定命令，以及按审批策略访问 Web 和本地 MCP。v2 内核完全异步，运行、动作、审批、记忆和审计分别通过强类型领域接口与 SQLite repository 管理。
 
-当前源码版本为 `1.7.1`，本次 TUI 与会话恢复修复见 [v1.7.1 发布说明](docs/releases/v1.7.1.md)。
+当前源码版本为 `1.7.2`，本次交互式会话删除改进见 [v1.7.2 发布说明](docs/releases/v1.7.2.md)。
 
 ## 安装
 
@@ -52,7 +52,7 @@ printf '%s\n' "总结最近的改动" | capslock exec --json
 - `capslock [--no-spinner|--quiet]`：启动默认 TUI。
 - `capslock exec [PROMPT] [--json] [--no-spinner|--quiet]`：执行一次请求。
 - `capslock resume [SESSION]`：恢复 TUI 会话。
-- `capslock sessions ...`：列出、搜索、重命名、归档、导出或删除会话。
+- `capslock sessions ...`（也可写作 `capslock session ...`）：列出、搜索、重命名、归档、导出或删除会话。运行 `capslock session delete` 时可用方向键选择会话、回车确认选择，再输入 `y` 永久删除；输入 `n` 返回会话列表。
 - `capslock doctor`：检查配置与 v2 数据库标识。
 
 TUI 保留以下命令：

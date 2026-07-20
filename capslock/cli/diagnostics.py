@@ -86,32 +86,58 @@ async def delete_session(
     console: Console,
     manager: SessionManager,
     repositories: WorkspaceRepositories,
-    prefix: str,
+    prefix: str | None,
     *,
     yes: bool = False,
+    limit: int = 20,
 ) -> int:
-    session = await repositories.sessions.resolve(prefix)
-    if session is None:
-        raise ValueError(f"session does not exist: {prefix}")
-    if not yes:
-        answer = await asyncio.to_thread(
-            console.input, f"Permanently delete {session.title}? [y/N] "
-        )
-        if answer.strip().casefold() not in {"y", "yes"}:
-            return 0
-    purged = await manager.delete(session.id)
-    console.print(f"[success]Deleted session; purged {purged} session memories.[/]")
-    return 0
+    interactive = prefix is None
+    while True:
+        selected = prefix
+        if selected is None:
+            selected = await select_session(
+                console,
+                repositories,
+                limit,
+                prompt_title="Delete a session",
+            )
+            if selected is None:
+                return 0
+        session = await repositories.sessions.resolve(selected)
+        if session is None:
+            raise ValueError(f"session does not exist: {selected}")
+        if not yes:
+            answer = await asyncio.to_thread(
+                console.input,
+                f'Permanently delete session "{session.title}" '
+                f"({session.id[:12]})? [y/N] ",
+            )
+            if answer.strip().casefold() not in {"y", "yes"}:
+                if interactive:
+                    continue
+                return 0
+        purged = await manager.delete(session.id)
+        console.print(f"[success]Deleted session; purged {purged} session memories.[/]")
+        return 0
 
 
 async def select_session(
-    console: Console, repositories: WorkspaceRepositories, limit: int
+    console: Console,
+    repositories: WorkspaceRepositories,
+    limit: int,
+    *,
+    prompt_title: str = "Resume a session",
 ) -> str | None:
     sessions = await repositories.sessions.list(limit)
     if not sessions:
         console.print("[text.secondary]No sessions available.[/]")
         return None
-    return await asyncio.to_thread(choose_session, sessions, console.width)
+    return await asyncio.to_thread(
+        choose_session,
+        sessions,
+        console.width,
+        title=prompt_title,
+    )
 
 
 async def doctor(

@@ -15,6 +15,7 @@ from rich.console import Console
 from capslock.cli.app import async_main, build_parser
 from capslock.cli.commands import COMMANDS, command_completions, resolve_command
 from capslock.cli.context import CliContext
+from capslock.cli.diagnostics import delete_session
 from capslock.cli.diagnostics import select_session as select_saved_session
 from capslock.cli.dispatch import dispatch_slash_command
 from capslock.cli.exec import run_exec
@@ -82,7 +83,11 @@ def test_parser_exposes_only_v2_top_level_commands() -> None:
     choices = next(
         action.choices for action in parser._actions if getattr(action, "choices", None)
     )
-    assert set(choices) == {"exec", "resume", "sessions", "doctor"}
+    assert set(choices) == {"exec", "resume", "session", "sessions", "doctor"}
+    delete = parser.parse_args(["session", "delete"])
+    assert delete.command == "session"
+    assert delete.sessions_command == "delete"
+    assert delete.session_id is None
     for removed in ("chat", "ask", "migrate-layout"):
         with pytest.raises(SystemExit):
             parser.parse_args([removed])
@@ -371,6 +376,82 @@ def test_resume_entry_uses_interactive_session_selector(tmp_path: Path) -> None:
         with create_app_session(input=pipe, output=DummyOutput()):
             selected = asyncio.run(select_saved_session(console, repositories, 20))
     assert selected == "b" * 32
+
+
+def test_interactive_delete_returns_to_selector_after_no(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sessions = [
+        SessionInfo(
+            char * 32,
+            tmp_path,
+            "model",
+            f"2026-07-{day}T10:00:00+00:00",
+            f"2026-07-{day}T10:00:00+00:00",
+            title,
+            SessionTitleSource.MANUAL,
+        )
+        for char, day, title in (
+            ("a", "15", "Keep this session"),
+            ("b", "16", "Delete this session"),
+        )
+    ]
+
+    class Sessions:
+        async def list(self, limit: int):
+            assert limit == 20
+            return sessions
+
+        async def resolve(self, session_id: str):
+            return next((item for item in sessions if item.id == session_id), None)
+
+    class Manager:
+        deleted: list[str] = []
+
+        async def delete(self, session_id: str) -> int:
+            self.deleted.append(session_id)
+            return 2
+
+    class ConsoleStub:
+        width = 120
+        answers = ["n", "y"]
+        prompts: list[str] = []
+        messages: list[str] = []
+
+        def input(self, prompt: str) -> str:
+            self.prompts.append(prompt)
+            return self.answers.pop(0)
+
+        def print(self, message: str) -> None:
+            self.messages.append(message)
+
+    selected = [sessions[0].id, sessions[1].id]
+    selector_titles: list[str] = []
+
+    def choose_session(items, width, *, title):
+        assert items == sessions
+        assert width == 120
+        selector_titles.append(title)
+        return selected.pop(0)
+
+    monkeypatch.setattr("capslock.cli.diagnostics.choose_session", choose_session)
+    manager = Manager()
+    console = ConsoleStub()
+    result = asyncio.run(
+        delete_session(
+            console,
+            manager,
+            SimpleNamespace(sessions=Sessions()),
+            None,
+        )
+    )
+
+    assert result == 0
+    assert selector_titles == ["Delete a session", "Delete a session"]
+    assert manager.deleted == [sessions[1].id]
+    assert 'session "Keep this session"' in console.prompts[0]
+    assert 'session "Delete this session"' in console.prompts[1]
+    assert "purged 2 session memories" in console.messages[0]
 
 
 def test_quit_alias_exits_tui() -> None:
