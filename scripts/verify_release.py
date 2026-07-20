@@ -12,7 +12,9 @@ import zipfile
 from pathlib import Path, PurePosixPath
 
 __version__ = str(
-    runpy.run_path(Path(__file__).resolve().parents[1] / "capslock" / "_version.py")["__version__"]
+    runpy.run_path(Path(__file__).resolve().parents[1] / "capslock" / "_version.py")[
+        "__version__"
+    ]
 )
 
 
@@ -27,7 +29,11 @@ def metadata_version(content: bytes) -> str:
 def distribution_version(path: Path) -> str:
     if path.suffix == ".whl":
         with zipfile.ZipFile(path) as archive:
-            metadata = [name for name in archive.namelist() if name.endswith(".dist-info/METADATA")]
+            metadata = [
+                name
+                for name in archive.namelist()
+                if name.endswith(".dist-info/METADATA")
+            ]
             if len(metadata) != 1:
                 raise ValueError(f"expected one wheel METADATA file in {path}")
             return metadata_version(archive.read(metadata[0]))

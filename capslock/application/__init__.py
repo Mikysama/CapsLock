@@ -1,5 +1,6 @@
 """Application-layer orchestration."""
 
-from .actions import ActionCoordinator
+from .action_system import ActionCoordinator
+from .workflow import PreparedRun, WorkflowService
 
-__all__ = ["ActionCoordinator"]
+__all__ = ["ActionCoordinator", "PreparedRun", "WorkflowService"]

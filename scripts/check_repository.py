@@ -28,7 +28,9 @@ def forbidden_reason(path: PurePosixPath) -> str | None:
         return "private, runtime, or unsupported .capslock content"
     if any(part == ".venv" or part.startswith(".venv-") for part in parts):
         return "runtime or virtual-environment state"
-    if parts.intersection({"__pycache__", ".pytest_cache", ".ruff_cache", "build", "dist", "htmlcov"}):
+    if parts.intersection(
+        {"__pycache__", ".pytest_cache", ".ruff_cache", "build", "dist", "htmlcov"}
+    ):
         return "cache or build output"
     if any(part.endswith(".egg-info") for part in parts):
         return "generated package metadata"
@@ -38,7 +40,10 @@ def forbidden_reason(path: PurePosixPath) -> str | None:
 
 
 def allowed_capslock_path(path: PurePosixPath) -> bool:
-    if path in {PurePosixPath(".capslock/config.toml"), PurePosixPath(".capslock/mcp.json")}:
+    if path in {
+        PurePosixPath(".capslock/config.toml"),
+        PurePosixPath(".capslock/mcp.json"),
+    }:
         return True
     return (
         len(path.parts) >= 3

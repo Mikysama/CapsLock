@@ -33,7 +33,9 @@ class WorkspacePolicy:
     def command_directory(self, requested_path: str = ".") -> Path:
         path = self.resolve(requested_path)
         relative = path.relative_to(self.root)
-        if not path.is_dir() or any(part in {".git", ".capslock"} for part in relative.parts):
+        if not path.is_dir() or any(
+            part in {".git", ".capslock"} for part in relative.parts
+        ):
             raise PolicyError("command cwd must be a normal workspace directory")
         return path
 
@@ -43,11 +45,15 @@ class WorkspacePolicy:
         if not path.is_file():
             raise PolicyError(f"file does not exist: {path}")
         if path.stat().st_size > self.max_file_bytes:
-            raise PolicyError(f"file exceeds the {self.max_file_bytes} byte read limit: {path}")
+            raise PolicyError(
+                f"file exceeds the {self.max_file_bytes} byte read limit: {path}"
+            )
         try:
             path.read_text(encoding="utf-8")
         except UnicodeDecodeError as exc:
-            raise PolicyError(f"binary or non-UTF-8 files are not supported: {path}") from exc
+            raise PolicyError(
+                f"binary or non-UTF-8 files are not supported: {path}"
+            ) from exc
         return path
 
     def writable_file(self, requested_path: str, *, create: bool = False) -> Path:
@@ -57,12 +63,16 @@ class WorkspacePolicy:
         if ".git" in relative.parts:
             raise PolicyError("writes to .git are not allowed")
         if ".capslock" in relative.parts and not self.is_skill_path(path):
-            raise PolicyError("writes within .capslock are only allowed for project Skills")
+            raise PolicyError(
+                "writes within .capslock are only allowed for project Skills"
+            )
         if path.exists():
             if path.is_dir():
                 raise PolicyError(f"path is a directory: {path}")
             if path.suffix.lower() not in TEXT_SUFFIXES:
-                raise PolicyError(f"unsupported text file type: {path.suffix or '(none)'}")
+                raise PolicyError(
+                    f"unsupported text file type: {path.suffix or '(none)'}"
+                )
             self.readable_file(requested_path)
         elif not create:
             raise PolicyError(f"file does not exist: {path}")
@@ -70,7 +80,9 @@ class WorkspacePolicy:
             if not path.parent.is_dir():
                 raise PolicyError(f"parent directory does not exist: {path.parent}")
             if path.suffix.lower() not in TEXT_SUFFIXES:
-                raise PolicyError(f"unsupported text file type: {path.suffix or '(none)'}")
+                raise PolicyError(
+                    f"unsupported text file type: {path.suffix or '(none)'}"
+                )
         return path
 
     def readable_directory(self, requested_path: str = ".") -> Path:
@@ -89,7 +101,10 @@ class WorkspacePolicy:
 
     def is_skill_path(self, path: Path) -> bool:
         relative = path.relative_to(self.root)
-        return len(relative.parts) >= 3 and relative.parts[:2] == (".capslock", "skills")
+        return len(relative.parts) >= 3 and relative.parts[:2] == (
+            ".capslock",
+            "skills",
+        )
 
     def _ensure_agent_readable(self, path: Path, *, directory: bool = False) -> None:
         relative = path.relative_to(self.root)
@@ -105,7 +120,10 @@ class WorkspacePolicy:
             (".capslock", "config.toml"),
             (".capslock", "mcp.json"),
         }
-        allowed_skill = len(relative.parts) >= 2 and relative.parts[:2] == (".capslock", "skills")
+        allowed_skill = len(relative.parts) >= 2 and relative.parts[:2] == (
+            ".capslock",
+            "skills",
+        )
         if not allowed_file and not allowed_skill:
             raise PolicyError("CapsLock local and runtime state is private")
 
@@ -118,8 +136,12 @@ class WorkspacePolicy:
         for part in relative.parts:
             current /= part
             if current.is_symlink():
-                raise PolicyError(f"workspace paths must not contain symlinks: {current}")
+                raise PolicyError(
+                    f"workspace paths must not contain symlinks: {current}"
+                )
 
     def validate_write_content(self, content: str) -> None:
         if len(content.encode("utf-8")) > self.max_file_bytes:
-            raise PolicyError(f"file exceeds the {self.max_file_bytes} byte write limit")
+            raise PolicyError(
+                f"file exceeds the {self.max_file_bytes} byte write limit"
+            )

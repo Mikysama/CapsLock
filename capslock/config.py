@@ -65,63 +65,100 @@ class Settings:
     permission_mode: str
     memory: MemorySettings = MemorySettings()
 
-    def __getattr__(self, name: str) -> object:
-        for group in (self.model_config, self.runtime, self.command, self.web, self.mcp, self.memory):
-            if hasattr(group, name):
-                return getattr(group, name)
-        raise AttributeError(name)
-
     @classmethod
-    def load(cls, workspace: Path, *, layout: ProjectLayout | None = None) -> "Settings":
+    def load(
+        cls, workspace: Path, *, layout: ProjectLayout | None = None
+    ) -> "Settings":
         layout = layout or ProjectLayout.discover(workspace)
         document: dict[str, object] = {}
         config = layout.config
         if config.is_file():
             document = tomllib.loads(config.read_text(encoding="utf-8"))
-        values = document.get("model", {})
-        if not isinstance(values, dict):
-            values = {}
-        memory_values = document.get("memory", {})
-        if not isinstance(memory_values, dict):
-            memory_values = {}
 
-        def value(name: str, default: object, *aliases: str) -> object:
+        def group(name: str) -> dict[str, object]:
+            values = document.get(name, {})
+            return values if isinstance(values, dict) else {}
+
+        def value(group_name: str, name: str, default: object, *aliases: str) -> object:
             for environment_name in (name, *aliases):
                 if environment_name in os.environ:
                     return os.environ[environment_name]
             config_name = name.lower().removeprefix("capslock_")
-            return values.get(config_name, default)
+            return group(group_name).get(config_name, default)
 
         return cls(
             model_config=ModelSettings(
-                api_key=value("CAPSLOCK_API_KEY", None, "DEEPSEEK_API_KEY"),
-                base_url=str(value("CAPSLOCK_BASE_URL", "https://api.deepseek.com", "DEEPSEEK_BASE_URL")),
-                model=str(value("CAPSLOCK_MODEL", "deepseek-v4-flash", "DEEPSEEK_MODEL")),
-                timeout_seconds=float(value("CAPSLOCK_TIMEOUT_SECONDS", 60)),
-                input_cost_per_million=float(value("CAPSLOCK_INPUT_COST_PER_MILLION", 0)),
-                output_cost_per_million=float(value("CAPSLOCK_OUTPUT_COST_PER_MILLION", 0)),
+                api_key=value("model", "CAPSLOCK_API_KEY", None, "DEEPSEEK_API_KEY"),
+                base_url=str(
+                    value(
+                        "model",
+                        "CAPSLOCK_BASE_URL",
+                        "https://api.deepseek.com",
+                        "DEEPSEEK_BASE_URL",
+                    )
+                ),
+                model=str(
+                    value(
+                        "model",
+                        "CAPSLOCK_MODEL",
+                        "deepseek-v4-flash",
+                        "DEEPSEEK_MODEL",
+                    )
+                ),
+                timeout_seconds=float(value("model", "CAPSLOCK_TIMEOUT_SECONDS", 60)),
+                input_cost_per_million=float(
+                    value("model", "CAPSLOCK_INPUT_COST_PER_MILLION", 0)
+                ),
+                output_cost_per_million=float(
+                    value("model", "CAPSLOCK_OUTPUT_COST_PER_MILLION", 0)
+                ),
             ),
             runtime=RuntimeSettings(
-                max_turns=int(value("CAPSLOCK_MAX_TURNS", DEFAULT_MAX_TURNS)),
-                max_context_messages=int(value("CAPSLOCK_MAX_CONTEXT_MESSAGES", 24)),
+                max_turns=int(
+                    value("runtime", "CAPSLOCK_MAX_TURNS", DEFAULT_MAX_TURNS)
+                ),
+                max_context_messages=int(
+                    value("runtime", "CAPSLOCK_MAX_CONTEXT_MESSAGES", 24)
+                ),
             ),
             command=CommandSettings(
-                command_timeout_seconds=float(value("CAPSLOCK_COMMAND_TIMEOUT_SECONDS", 120)),
-                command_output_bytes=int(value("CAPSLOCK_COMMAND_OUTPUT_BYTES", 100_000)),
+                command_timeout_seconds=float(
+                    value("command", "CAPSLOCK_COMMAND_TIMEOUT_SECONDS", 120)
+                ),
+                command_output_bytes=int(
+                    value("command", "CAPSLOCK_COMMAND_OUTPUT_BYTES", 100_000)
+                ),
             ),
             web=WebSettings(
-                tavily_api_key=value("CAPSLOCK_TAVILY_API_KEY", None, "TAVILY_API_KEY"),
-                web_timeout_seconds=float(value("CAPSLOCK_WEB_TIMEOUT_SECONDS", 20)),
-                web_max_bytes=int(value("CAPSLOCK_WEB_MAX_BYTES", 500_000)),
-                web_max_redirects=int(value("CAPSLOCK_WEB_MAX_REDIRECTS", 3)),
+                tavily_api_key=value(
+                    "web",
+                    "CAPSLOCK_TAVILY_API_KEY",
+                    None,
+                    "TAVILY_API_KEY",
+                ),
+                web_timeout_seconds=float(
+                    value("web", "CAPSLOCK_WEB_TIMEOUT_SECONDS", 20)
+                ),
+                web_max_bytes=int(value("web", "CAPSLOCK_WEB_MAX_BYTES", 500_000)),
+                web_max_redirects=int(value("web", "CAPSLOCK_WEB_MAX_REDIRECTS", 3)),
             ),
             mcp=McpSettings(
-                mcp_timeout_seconds=float(value("CAPSLOCK_MCP_TIMEOUT_SECONDS", 30)),
-                mcp_output_bytes=int(value("CAPSLOCK_MCP_OUTPUT_BYTES", 100_000)),
+                mcp_timeout_seconds=float(
+                    value("mcp", "CAPSLOCK_MCP_TIMEOUT_SECONDS", 30)
+                ),
+                mcp_output_bytes=int(
+                    value("mcp", "CAPSLOCK_MCP_OUTPUT_BYTES", 100_000)
+                ),
             ),
-            permission_mode=str(value("CAPSLOCK_PERMISSION_MODE", "approve_for_me")),
+            permission_mode=str(
+                value(
+                    "runtime",
+                    "CAPSLOCK_PERMISSION_MODE",
+                    "approve_for_me",
+                )
+            ),
             memory=MemorySettings(
-                project_write_enabled=_boolean(memory_values.get("enabled", True)),
+                project_write_enabled=_boolean(group("memory").get("enabled", True)),
                 database=layout.user.memory,
             ),
         )

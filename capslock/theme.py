@@ -28,6 +28,8 @@ THEME_TOKENS: Mapping[str, str] = {
     "borderMuted": "#3D4F61",
     "borderFocus": "#8CB9DC",
     "thinking": "#9A8FC7",
+    "reasoning": "#718397",
+    "answer": "#DCE6F2",
     "running": "#72A7CC",
     "waiting": "#C4A96B",
     "success": "#7FAF9A",
@@ -56,6 +58,8 @@ RICH_STYLE_DEFINITIONS: Mapping[str, str] = {
     "border.muted": THEME_TOKENS["borderMuted"],
     "border.focus": THEME_TOKENS["borderFocus"],
     "thinking": THEME_TOKENS["thinking"],
+    "reasoning": THEME_TOKENS["reasoning"],
+    "answer": THEME_TOKENS["answer"],
     "running": THEME_TOKENS["running"],
     "waiting": THEME_TOKENS["waiting"],
     "success": THEME_TOKENS["success"],
@@ -95,7 +99,11 @@ def _make_rich_theme(color_system: object = None) -> Theme:
         color = Color.parse(value)
         if target is not None:
             color = color.downgrade(target)
-        styles[name] = RichStyle(color=color)
+        styles[name] = RichStyle(
+            color=color,
+            dim=name == "reasoning",
+            italic=name == "reasoning",
+        )
     for name, value in RICH_BOLD_STYLE_DEFINITIONS.items():
         color = Color.parse(value)
         if target is not None:
@@ -147,9 +155,13 @@ def build_prompt_style(*, no_color: bool | None = None) -> PromptStyle:
             "command-name": foreground("command", "bold"),
             "completion-menu": "bg:default",
             "completion-menu.completion": transparent_foreground("textPrimary"),
-            "completion-menu.completion.current": transparent_foreground("primarySoft", "bold"),
+            "completion-menu.completion.current": transparent_foreground(
+                "primarySoft", "bold"
+            ),
             "completion-menu.meta.completion": transparent_foreground("textSecondary"),
-            "completion-menu.meta.completion.current": transparent_foreground("textPrimary", "bold"),
+            "completion-menu.meta.completion.current": transparent_foreground(
+                "textPrimary", "bold"
+            ),
             "input-selection": "bg:default",
             "option": transparent_foreground("textPrimary"),
             "selected-option": transparent_foreground("primarySoft", "bold"),

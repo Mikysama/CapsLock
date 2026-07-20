@@ -18,12 +18,15 @@ from prompt_toolkit.shortcuts import choice
 from prompt_toolkit.utils import get_cwidth
 
 from ..permissions import PermissionMode
+from ..status import SPINNER_FRAMES
 from ..theme import build_prompt_style
 from .commands import command_descriptions, command_menu_completions
 
 
 class SlashCommandCompleter(Completer):
-    def __init__(self, skill_provider: Callable[[], list[tuple[str, str]]] | None = None) -> None:
+    def __init__(
+        self, skill_provider: Callable[[], list[tuple[str, str]]] | None = None
+    ) -> None:
         self.skill_provider = skill_provider or (lambda: [])
 
     def get_completions(self, document: Document, complete_event: object):
@@ -43,7 +46,9 @@ class SlashCommandCompleter(Completer):
             return
         descriptions = command_descriptions()
         for command in command_menu_completions(prefix):
-            insertion = f"{command} " if prefix.casefold() == command.casefold() else command
+            insertion = (
+                f"{command} " if prefix.casefold() == command.casefold() else command
+            )
             yield Completion(
                 insertion,
                 start_position=-len(prefix),
@@ -56,7 +61,12 @@ class SlashCommandLexer(Lexer):
     def lex_document(self, document: Document):
         def get_line(line_number: int):
             line = document.lines[line_number]
-            return [("class:slash-command", line)] if line.startswith("/") else [("class:user-input", line)]
+            return (
+                [("class:slash-command", line)]
+                if line.startswith("/")
+                else [("class:user-input", line)]
+            )
+
         return get_line
 
 
@@ -65,14 +75,17 @@ PROMPT_STYLE = build_prompt_style()
 
 def prompt_tokens(mode: PermissionMode, width: int | None = None) -> FormattedText:
     terminal_width = width or shutil.get_terminal_size(fallback=(80, 24)).columns
-    return FormattedText([("class:input-border", "─" * max(20, terminal_width - 1)), ("", "\n"), ("class:prompt", "❯ ")])
+    return FormattedText(
+        [
+            ("class:input-border", "─" * max(20, terminal_width - 1)),
+            ("", "\n"),
+            ("class:prompt", "❯ "),
+        ]
+    )
 
 
 def permission_rprompt(mode: PermissionMode) -> FormattedText:
     return FormattedText([("class:permission", f"{mode.value} ")])
-
-
-SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
 
 def prompt_footer(
@@ -83,16 +96,26 @@ def prompt_footer(
 ) -> FormattedText:
     terminal_width = width or shutil.get_terminal_size(fallback=(80, 24)).columns
     status = []
-    if activity == "thinking":
+    if activity:
+        activity_label = activity if activity.endswith("...") else f"{activity}..."
+        activity_style = (
+            "class:thinking"
+            if activity.casefold().startswith("thinking")
+            else "class:running"
+        )
         status = [
-            ("class:running", f"{SPINNER_FRAMES[spinner_frame % len(SPINNER_FRAMES)]} "),
-            ("class:thinking", "Thinking...  ·  "),
+            (
+                "class:running class:running.bold",
+                f"{SPINNER_FRAMES[spinner_frame % len(SPINNER_FRAMES)]} ",
+            ),
+            (f"{activity_style} {activity_style}.bold", activity_label),
         ]
     return FormattedText(
         [
             ("class:input-border", "─" * max(20, terminal_width - 1)),
             ("", "\n"),
-            *status,
+            *(status or [("", " ")]),
+            ("", "\n"),
             ("class:footer", "? /help  ·  ↑/↓ 选择  ·  Tab 补全"),
         ]
     )
@@ -127,7 +150,10 @@ def select_session(sessions: list[object], width: int | None = None) -> str:
                     ("", " " * (number_width - max(2, len(str(index))))),
                     ("class:user-input", _fit_cell(session.title, title_width)),
                     ("", "  "),
-                    ("class:footer", _fit_cell(_updated_at(session.updated_at), updated_width)),
+                    (
+                        "class:footer",
+                        _fit_cell(_updated_at(session.updated_at), updated_width),
+                    ),
                     ("", "  "),
                     ("class:command-name", _fit_cell(session.id, session_width)),
                 ]
@@ -144,11 +170,17 @@ def select_session(sessions: list[object], width: int | None = None) -> str:
     )
 
 
-def _session_column_widths(terminal_width: int, number_width: int) -> tuple[int, int, int]:
+def _session_column_widths(
+    terminal_width: int, number_width: int
+) -> tuple[int, int, int]:
     fixed_width = 12 + number_width
     updated_width = 16
-    session_width = 32 if terminal_width >= fixed_width + updated_width + 32 + 12 else 12
-    title_width = max(8, min(50, terminal_width - updated_width - session_width - fixed_width))
+    session_width = (
+        32 if terminal_width >= fixed_width + updated_width + 32 + 12 else 12
+    )
+    title_width = max(
+        8, min(50, terminal_width - updated_width - session_width - fixed_width)
+    )
     return title_width, updated_width, session_width
 
 
@@ -197,25 +229,37 @@ def _delete_and_refresh(event: object) -> None:
 
 def anchor_completion_menus(container: object) -> None:
     seen: set[int] = set()
+
     def visit(node: object) -> None:
         if id(node) in seen:
             return
         seen.add(id(node))
         for floating in getattr(node, "floats", ()):
-            if isinstance(floating.content, (CompletionsMenu, MultiColumnCompletionsMenu)):
+            if isinstance(
+                floating.content, (CompletionsMenu, MultiColumnCompletionsMenu)
+            ):
                 floating.xcursor = False
                 floating.left = 0
         get_children = getattr(node, "get_children", None)
         if get_children is not None:
             for child in get_children():
                 visit(child)
+
     visit(container)
 
 
 def prompt_session(
     skill_provider: Callable[[], list[tuple[str, str]]] | None = None,
 ) -> PromptSession[str]:
-    session = PromptSession(completer=SlashCommandCompleter(skill_provider), lexer=SlashCommandLexer(), key_bindings=SLASH_KEY_BINDINGS, style=PROMPT_STYLE, complete_while_typing=True, complete_style=CompleteStyle.COLUMN, reserve_space_for_menu=16)
+    session = PromptSession(
+        completer=SlashCommandCompleter(skill_provider),
+        lexer=SlashCommandLexer(),
+        key_bindings=SLASH_KEY_BINDINGS,
+        style=PROMPT_STYLE,
+        complete_while_typing=True,
+        complete_style=CompleteStyle.COLUMN,
+        reserve_space_for_menu=16,
+    )
     anchor_completion_menus(session.app.layout.container)
     return session
 

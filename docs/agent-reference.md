@@ -1,120 +1,163 @@
-# CapsLock Agent 工具与指令参考
+# CapsLock v2 Agent Reference
 
-本参考描述当前 v1.7.0 的模型工具、工作流 TUI、记忆、Skill、终端指令和审批边界。CapsLock 是按需运行的本机 Agent，权限模式可在会话内切换。
+本参考描述 v2 的模型工具、TUI 命令、审批边界与持久化契约。
 
-## 权限模式与风险兜底
+## 权限模式
 
-| 模式 | 行为 | 适用场景 |
-| --- | --- | --- |
-| `full_access` | 自动执行普通提案；项目 Skill 文件仍逐次确认。每次自动执行记录风险级别、原因和回滚建议。 | 受控测试工作区中的自动化任务。 |
-| `approve_for_me` | 只要求确认高风险文件写入、命令执行和 MCP 操作；本地读取与 Web 请求按默认流程执行。 | 默认模式。 |
-| `ask_for_approval` | 每次用户 Agent 请求以及后续所有高风险动作均需确认。 | 不熟悉工作区或需要最大人工控制时。 |
+| 模式 | 行为 |
+| --- | --- |
+| `full_access` | 自动批准普通动作；Skill 文件写入仍逐次确认。安全校验、状态与审计始终启用。 |
+| `approve_for_me` | 默认模式。文件、命令和 MCP 等高风险动作需要确认。 |
+| `ask_for_approval` | 发送请求和后续动作都要求人工确认。 |
 
-使用 `/permissions` 查看当前模式，使用 `/permissions full`、`/permissions approve` 或 `/permissions ask` 即时切换。切换会写入工作区 SQLite，并在后续会话恢复。
-
-交互聊天中输入 `/` 会实时打开 Claude Code 风格的“命令 + 功能说明”竖向双列列表；继续输入（例如 `/perm`）会立即过滤掉不匹配当前前缀的命令。完整父命令会展开子命令，完整叶子命令仍保持候选可见，alias 也参与补全。使用 `↑/↓` 选择或 `Tab` 补全，斜杠命令输入会以粗体强调色显示。输入区使用等宽的上下边框与历史和帮助栏分隔，权限状态显示在右侧。该交互由 `prompt-toolkit` 负责渲染，以兼容 VS Code 和 macOS Terminal。
-
-即使在 `full_access`，CapsLock 仍不会绕过安全兜底：文件变更会保留原内容和 `/undo` 路径；`.capslock/skills/**` 的持久化指令修改始终逐次确认；命令保留超时、输出限制、进程组取消和 `/diff` 检查建议；Web 仍执行 SSRF/内容边界检查；MCP 仍限制为显式允许的本地 stdio 工具。无法自动回滚的第三方 MCP 副作用会在风险审计中明确标记。
+使用 `/permissions` 查看模式，使用 `/permissions full|approve|ask` 切换。选择保存在工作区 settings repository。
 
 ## 模型工具
 
-| 工具 | 功能 | 风险/审批 |
+所有工具通过同一个异步 registry 调用。文件读取放入工作线程，Git 与命令使用异步子进程，Web 使用 `httpx.AsyncClient`，MCP 保持原生异步。
+
+| 工具 | 功能 | 边界 |
 | --- | --- | --- |
-| `list_files` | 列出工作区目录中的文件，可按文件名模式筛选。 | 只读 |
-| `read_file` | 读取受支持的 UTF-8 文本或源码范围，并返回带行号 Evidence。 | 只读 |
-| `search_files` | 检索工作区文本并返回匹配上下文与 Evidence。 | 只读 |
-| `git_status` / `git_diff` | 查询固定的 Git 工作树状态或差异。 | 只读 |
-| `task_list_update` | 创建或替换会话任务清单。 | 会话状态 |
-| `task_status_update` | 更新任务为 pending、running、blocked、completed、failed 或 cancelled。 | 会话状态 |
-| `list_external_sources` | 查看本会话已批准 Web 动作保存的外部来源。 | 只读；内容不可信 |
-| `search_memories` | 全文检索当前工作区和会话可见的用户记忆。 | 只读；写入由候选策略独立控制 |
-| `get_memory` | 按 ID 读取一条可见且未过期的用户记忆。 | 只读 |
-| `load_skill` | 按名称加载一个已启用 Skill 的正文、来源、摘要与资源清单。 | 只读；正文不可信 |
-| `read_skill_resource` | 分段读取本 run 已加载 Skill 的 UTF-8 资源快照。 | 只读；拒绝二进制、越界与符号链接 |
-| `propose_file_edit` | 为唯一精确文本匹配创建编辑提案。 | 提案，无文件写入 |
-| `propose_file_create` | 为一个新文本文件创建提案。 | 提案，无文件写入 |
-| `apply_change` / `discard_change` | 应用已批准的编辑，或丢弃待处理提案。 | `apply_change` 需审批 |
-| `propose_command` | 提出固定命令模板（pytest、npm test/build、ruff/prettier check）。 | 提案，无进程启动 |
-| `run_command` / `discard_command` | 执行已批准命令，或丢弃命令提案。 | `run_command` 需审批 |
-| `propose_web_search` | 提出 Tavily 关键词搜索。 | 联网提案 |
-| `propose_web_fetch` | 提出公开 HTTP/HTTPS URL 抓取。 | 联网提案；SSRF 防护 |
-| `propose_mcp_connect` | 提出启动允许的本地 stdio MCP server 并发现工具。 | 外部进程提案 |
-| `propose_mcp_call` | 提出调用允许名单内 MCP 工具。 | MCP 调用提案 |
+| `list_files` | 列出工作区文件。 | 只读；路径限制在工作区。 |
+| `read_file` | 分段读取 UTF-8 文件并返回行号 Evidence。 | 只读；拒绝越界、符号链接和超限文件。 |
+| `search_files` | 搜索工作区文本并返回 Evidence。 | 只读。 |
+| `git_status` / `git_diff` | 查询固定 Git 状态或差异。 | 只读；不接受任意 Git 参数。 |
+| `task_list_update` | 替换当前会话任务列表。 | session repository 写入。 |
+| `task_status_update` | 更新任务状态。 | 状态枚举校验。 |
+| `list_external_sources` | 查看当前会话保存的 Web 来源。 | 来源始终不可信。 |
+| `search_memories` | 搜索可见且未过期的记忆。 | 只读；作用域隔离。 |
+| `get_memory` | 按 ID 获取可见记忆并记录访问。 | 只读；用于来源失效隔离。 |
+| `load_skill` | 加载已启用 Skill 的正文和资源清单。 | 正文是不可信上下文。 |
+| `read_skill_resource` | 读取本 run 已加载的 Skill 资源快照。 | 只读；拒绝越界、二进制和符号链接。 |
+| `propose_file_edit` | 创建精确文本替换提案。 | 不写用户文件。 |
+| `propose_file_create` | 创建新文件提案。 | 不写用户文件。 |
+| `propose_command` | 创建固定命令模板提案。 | 不启动进程。 |
+| `propose_web_search` | 创建 Tavily 搜索动作。 | 外部请求与来源审计。 |
+| `propose_web_fetch` | 创建公开 URL 抓取动作。 | SSRF、重定向、类型和大小限制。 |
+| `propose_mcp_connect` | 创建 MCP server 连接与工具发现动作。 | 仅本地 stdio。 |
+| `propose_mcp_call` | 创建 allowlist 内 MCP 工具调用动作。 | 第三方副作用不可自动撤销。 |
 
-模型只能创建高风险动作提案；CLI 会在本轮回答后展示完整外部动作 ID、类型、脱敏载荷与摘要，并提供稳定的编号审批菜单。Web 动作批准完成后，Agent 自动读取保存的来源并继续回答。外部网页和 MCP 返回内容是数据，不是指令，不能改变权限。
+模型只提交提案；统一 `ActionCoordinator` 决定是否等待批准或自动执行。动作记录只使用 `request_json` 与 `result_json`，新增动作类型不需要 subtype 表。
 
-## CLI 指令
+## 动作状态
 
-| 指令 | 功能 |
+合法转换：
+
+```text
+pending -> approved -> running -> completed
+   |           |          |-----> failed
+   |           |          |-----> cancelled
+   |           |---------> cancelled
+   |---------> rejected
+   |---------> cancelled
+```
+
+审批结算在同一个 SQLite 事务内更新 action、run、work item 和终止事件。重复结算已完成的 run 返回空结果，不会产生第二个终止事件。失败动作将 workflow 结算为 failed，取消动作结算为 cancelled，完成或拒绝的动作允许 workflow 完成。
+
+文件执行前重新检查提案哈希；命令取消先向进程组发送 TERM，2 秒后仍未退出则发送 KILL；Web 跟随重定向前重新执行公开地址校验；MCP 在执行时再次检查工具 allowlist。
+
+## TUI 命令
+
+| 命令 | 功能 |
 | --- | --- |
-| `/help` | 显示会话内指令。 |
-| `/status`、`/session` | 查看会话、工作区、模型和轮次限制。 |
-| `/rename <title>` | 重命名当前会话；手动标题不会再被后续问题覆盖。 |
-| `/permissions` | 显示三种权限模式与当前选择。 |
-| `/permissions full|approve|ask` | 在 `full_access`、`approve_for_me`、`ask_for_approval` 之间切换。 |
-| `/context` | 查看当前持久化上下文消息数量。 |
-| `/cost` | 显示会话累计输入/输出 token 与可选费用。 |
-| `/tasks` | 查看会话任务及其状态。 |
-| `/changes` | 查看文件变更提案与 diff。 |
-| `/commands` | 查看命令提案、状态、cwd 与退出码。 |
-| `/web` | 查看 Web 搜索和抓取动作。 |
-| `/sources` | 查看已保存的外部来源及不可信/提示注入标记。 |
-| `/approvals` | 集中查看待审批文件、命令、Web 和 MCP 动作的风险、原因与回滚建议。 |
-| `/queue`、`/queue move|cancel ...` | 查看、重排或取消尚未开始的前台工作项。 |
-| `/retry <run-id>` | 为失败、取消或中断的 run 创建新尝试，并从最近稳定检查点继续。 |
-| `/memory list [scope] [--all]` | 列出可见记忆；`--all` 包含已过期和已遗忘记录。 |
-| `/memory search <query>`、`/memory show <id>` | 本地全文检索或查看记忆、作用域及来源。 |
-| `/memory add`、`/memory edit <id>` | 交互式创建或修改记忆；敏感片段保存前会被脱敏。 |
-| `/memory forget <id>`、`/memory undo <id>`、`/memory purge <id>` | 可恢复遗忘、撤销，或二次确认后永久清除。 |
-| `/memory export <scope> <path>`、`/memory import <scope> <path>` | 在工作区 JSON 文件与指定作用域之间导入导出。 |
-| `/memory status|enable|disable` | 查看或切换当前工作区的本机写入开关。 |
-| `/memory policy off|review|automatic` | 设置候选提取与自动采纳策略；默认 review。 |
-| `/memory recall on|off`、`/memory context [run-id]` | 控制自动召回，或查看召回排名与来源原因。 |
-| `/memory candidates [pending|all]` | 查看当前会话候选队列。 |
-| `/memory candidate show|review|reject|purge <id>` | 检查、编辑采纳、拒绝或清除候选正文。 |
-| `/memory embeddings ...` | 启用/禁用 FastEmbed 或仅回环 HTTP embeddings，并查看或重建向量。 |
-| `/memory cleanup` | 移除过期向量并清理超过保留期的已拒绝/重复候选正文。 |
-| `/skills list` | 列出合并后的用户级与工作区级 Skill，以及有效、禁用或无效状态。 |
-| `/skills show <name>` | 显示 frontmatter、来源、摘要和资源。 |
-| `/skills validate <name>` | 离线校验 `SKILL.md`、frontmatter、包大小、资源与路径安全。 |
-| `/skills enable|disable <name>` | 在当前工作区启用或禁用有效 Skill。 |
-| `/mcp list` | 列出合并后的 MCP server 配置。 |
-| `/mcp status <server>`、`/mcp tools <server>` | 查看 server 的配置、状态与允许工具。 |
-| `/approve <id>` | 展示动作详情后确认并执行。文件变更和命令使用 `y/yes`；外部动作使用编号菜单。 |
-| `/reject <id>` | 丢弃待处理的变更、命令或外部动作。 |
-| `/undo` | 二次确认后撤销当前会话最近一次由 CapsLock 应用的文件变更。 |
+| `/help` | 显示 v2 命令。 |
+| `/status` | 汇总 session、workspace、model、permissions、context、usage、tasks 和 queue。 |
+| `/permissions [full|approve|ask]` | 查看或切换权限模式。 |
+| `/approvals` | 列出待审批动作；`approve <id>` 或 `reject <id>` 处理动作。 |
+| `/queue` | 查看队列；`move <id> <position>`、`cancel <id>` 或 `retry <run-id>`。 |
+| `/memory ...` | 管理记忆、候选、召回、导入导出和 embeddings。 |
+| `/skills ...` | 列出、查看、校验、启用或禁用 Skill。 |
+| `/sources` | 查看当前会话 Web 来源。 |
+| `/mcp [list|status <server>|tools <server>]` | 检查 MCP 配置。 |
 | `/diff` | 显示当前 Git diff。 |
-| `/clear` | 提示新建会话；历史不会被删除。 |
-| `/cancel` | 说明前台运行可用 Ctrl-C 取消。 |
-| `/exit`、`/quit` | 退出交互会话。 |
+| `/undo` | 撤销最近一次仍可安全反转的文件动作。 |
+| `/rename <title>` | 手工设置会话标题。 |
+| `/exit` | 退出 TUI。 |
+| `/quit` | 退出 TUI，与 `/exit` 等价。 |
 
-`capslock sessions` 按标题列出历史会话；标题默认来自首个问题。使用
-`capslock sessions rename <session-id-or-prefix> <title>` 可在会话外重命名，
-裸 `capslock resume` 会列出标题、最近更新时间和 Session ID，并支持方向键选择；
-`capslock resume <session-id-or-prefix>` 仍可通过完整 ID 或列表显示的唯一短前缀直接恢复。
+v2 不解析旧 alias，也不提供独立 `/cost`、`/context`、`/tasks`、`/changes`、`/commands` 或 `/web` 页面。
 
-TTY 中裸 `capslock` 默认使用流式行内 TUI；`capslock chat --classic` 可回退到旧交互。非交互调用使用 `capslock exec [PROMPT] [--json]`，待审批时不会读取 stdin 确认，而是返回退出码 3。`capslock sessions search/archive/unarchive/export/delete` 提供与 TUI 会话面板等价的管理入口；导出目录包含 `session.json` 和 `session.md`。
+## TUI 输出
 
-## 配置与数据位置
+启动 banner 恢复 v1.7.1 的 `Welcome back`、CapsLock 字符画和 Tips 布局；窄终端使用纵向布局，宽终端使用双栏布局。模型提供方返回的 reasoning 单独显示在低对比度、暗化斜体的 `◇ Model reasoning` 区域；最终回答显示在高对比度主文本样式的 `◆ CapsLock` 区域，不使用额外的 `Final answer` 标签。
 
-- `.capslock/config.toml`：可提交的项目模型、命令、Web 和 MCP 限制配置；不要存 API key。
-- `.env` 或 shell：`CAPSLOCK_API_KEY`、`CAPSLOCK_TAVILY_API_KEY` 等密钥。
-- `.capslock/mcp.json`：可提交的项目 MCP 声明，禁止 `env`/凭据。
-- `.capslock/skills/<name>/`：可提交的工作区 Skill 包；同名时覆盖用户级包。
-- `.capslock/local/mcp.json`：本机私有 MCP 覆盖、路径和环境变量；始终忽略。
-- `.capslock/state/capslock.sqlite3`、`events.jsonl`、`backups/`：本机工作区状态；始终忽略。
-- `${CAPSLOCK_HOME:-~/.capslock}/skills/`：用户级 Skill 包。
-- `${CAPSLOCK_HOME:-~/.capslock}/state/memory.sqlite3`：用户级记忆、历史、索引和无正文审计。
+模型请求和工具执行期间，底部活动行在 `Thinking` 或 `Running <tool>` 左侧循环显示 `◐ ◓ ◑ ◒`。阶段结束后动画消失，并在 scrollback 中留下静态结果：绿色圆点表示成功，红色圆点表示失败，黄色圆点表示等待审批，警告色圆点表示取消。
 
-`capslock migrate-layout [--scope workspace|user|all] [--dry-run|--apply] [--yes]` 显式迁移旧 config、MCP、state 和 memory 布局，默认 `workspace` dry-run。旧 Skill 路径和旧包格式不被发现或迁移。`CAPSLOCK_HOME` 与 `CAPSLOCK_MEMORY_DATABASE` 仅接受启动 shell 中的绝对路径，项目 `.env` 中的同名值会被忽略。
+裸 `capslock resume` 使用方向键和 Enter 选择 session；显式 ID/唯一前缀仍受支持。恢复时重放已完成消息以及中断/失败 run 的用户问题和已产生文本，后续模型请求使用同一份 session 上下文，同时排除当前 run 以避免重复当前问题。
 
-## 引用与安全边界
+## CLI
 
-- 本地结论使用 `[[evidence:ev_…]]`，最终输出显示路径与行号。
-- 外部结论使用 `[[source:<source-id>]]`，最终输出显示标题、URL 与抓取时间。
-- 记忆结论使用 `[[memory:mem_…]]`，最终输出显示类型、作用域和来源；自动注入内容始终是不可信数据。
-- 消息开头的 `$skill-name [raw arguments]` 可显式加载 Skill；普通对话中模型可依据 16 KiB 名称/描述 catalog 调用 `load_skill`，正文不会预先注入。
-- Skill 只接受 `name`、`description`、`license`、`compatibility` 和字符串 `metadata`；工具、权限、hooks、上下文与模型行为字段默认拒绝。
-- Skill 正文和资源是不可信上下文，不能改变当前权限模式或安全策略。资源只读、按 run 快照，`scripts/` 没有专用执行入口。
-- 支持的文件必须位于工作区内、为 UTF-8 且不超过配置上限；Agent 看不到 `.env`、`.capslock/local/`、`.capslock/state/` 或旧运行文件。`.git` 与非 Skill 的 `.capslock` 内容不可修改，命令 cwd 不能进入整个 `.capslock`。
-- URL 抓取拒绝 localhost、私网、链路本地、保留地址和重定向后的非公开地址；仅接受 HTML/纯文本。
+```text
+capslock
+capslock exec [PROMPT] [--json]
+capslock resume [SESSION] [--limit N]
+capslock sessions [--limit N]
+capslock sessions search <QUERY> [--archived]
+capslock sessions rename <SESSION> <TITLE>
+capslock sessions archive|unarchive <SESSION>
+capslock sessions export <SESSION> <WORKSPACE-RELATIVE-DIRECTORY>
+capslock sessions delete <SESSION> [--yes]
+capslock doctor
+```
+
+裸入口只允许 TTY。`exec` 可从 stdin 读取 prompt，不进行交互审批；产生待审批动作时保存 session/run/action 并返回退出码 3。
+
+## JSONL 事件
+
+每行字段顺序与含义固定：
+
+| 字段 | 含义 |
+| --- | --- |
+| `schema_version` | 固定为 `2`。 |
+| `sequence` | run 内从 1 递增。 |
+| `timestamp` | 带时区的 RFC 3339 时间。 |
+| `session_id` | 会话 ID。 |
+| `work_item_id` | 前台工作项 ID。 |
+| `run_id` | 本次执行 ID。 |
+| `event` | 事件枚举。 |
+| `status` | 当前或终止状态。 |
+| `terminal` | 是否为唯一终止事件。 |
+| `data` | 事件载荷。 |
+
+非终止事件：`queued`、`thinking`、`text_delta`、`tool_running`、`tool_completed`。
+
+`thinking.data.text` 是模型提供方显式返回的 reasoning；`text_delta.data.text` 是最终回答的流式正文。TUI 分区渲染二者，`completed.data.answer` 只包含最终回答。
+
+终止事件：
+
+- `completed`：`answer`、`citations`、`memory_recalls`、`usage`、`duration_ms`。
+- `waiting_approval`：`action_ids` 与数量。
+- `failed` / `cancelled`：`error.code` 与 `error.message`。
+
+## Workflow 与恢复
+
+`work_items` 管理队列状态，`runs.work_item_id` 必填。当前 run 由 runs 查询获得；work item 不保存反向 current-run 外键。`run_events` 只保存 `run_id + sequence + kind + payload`，session/work item 通过 run 关系取得。
+
+ToolLoop 每个模型或工具阶段写 `run_steps`。只有 completed 且带 checkpoint 的步骤可用于恢复。`resume` 创建新的 work item 和 run，记录 `parent_run_id` 与 `resume_from_step_id`，不会修改失败 run 的历史。空回答、模型错误或轮次耗尽会将当前模型 step 标为 failed。
+
+`WorkspaceAgent.ask_stream()` 是唯一 Agent 执行 API。每次流只产生一个终止事件；调用方取消流时，内部执行 task 也会被取消并等待资源清理。
+
+## 记忆契约
+
+记忆 identity 与内容 revision 分离：
+
+- `memories`：作用域、状态、来源与 current revision。
+- `memory_revisions`：不可变正文、类型、置信度、过期时间、来源和操作。
+- `memory_candidates` / `memory_extractions`：候选提取与审核。
+- `memory_sources`：来源有效性。
+- `memory_embeddings`：revision 绑定的向量。
+- `memory_recalls` / `memory_recall_items`：run 级召回解释。
+- `memory_audit`：包括 purge 后仍保留的操作轨迹。
+- `memory_fts`：仅索引当前 active revision。
+
+默认策略为 `review`。`automatic` 只接受用户直接陈述、无风险、workspace/session 作用域的新候选；global、冲突与推断仍要求审核。外部网页或 MCP 内容不会直接成为记忆。
+
+记忆 context 最多 5 条、合计最多 4 KiB，并标记为不可信 JSON 数据。`purge` 删除全部 revision 正文、FTS、向量和来源。导入只接受 `capslock-memory-export` version 3。
+
+## 数据库与布局
+
+工作区数据库使用 application ID `0x434C4B32`，记忆数据库使用 `0x434C4D32`。两者开启 foreign keys、WAL 和 5 秒 busy timeout；记忆库额外开启 secure delete 并设置文件权限 `0600`。
+
+应用先读取 application ID 和 schema version，确认兼容后才切换 WAL。空库 schema、application ID 与 version 在一个事务中初始化。旧库或错库只报错，不执行迁移或删除。
+
+canonical 路径与手工迁移步骤见 [v2 architecture and migration](development/v2.md)。

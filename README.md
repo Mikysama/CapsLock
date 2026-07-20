@@ -1,14 +1,12 @@
 # CapsLock
 
-一个单机、可恢复、受控编辑、执行与研究的工作区 Agent。它可分析本地文本和代码、检索带行号的证据、读取 Git 状态/diff，并管理本地记忆和可复用 Skill；文件修改、命令执行、Web 与 MCP 调用始终受现有权限与审计约束。默认不执行任意 Shell；记忆候选默认进入审核队列，不直接成为可信记忆。
+CapsLock 是一个本机工作区 Agent，用于读取代码、检索证据、检查 Git、提出受控文件修改、执行固定命令，以及按审批策略访问 Web 和本地 MCP。v2 内核完全异步，运行、动作、审批、记忆和审计分别通过强类型领域接口与 SQLite repository 管理。
 
-开发计划、架构决策与实施记录见 [v1 开发文档](docs/development/v1/)；当前工具与 CLI 指令见 [Agent 工具与指令参考](docs/agent-reference.md)。
-
-CapsLock 默认使用 `approve_for_me` 权限模式；可在聊天中通过 `/permissions full|approve|ask` 切换为全自动、高风险确认或每次请求确认。即使全自动模式仍保留风险审计、文件撤销、命令超时/取消和外部访问边界。
+当前源码版本为 `1.7.1`，本次 TUI 与会话恢复修复见 [v1.7.1 发布说明](docs/releases/v1.7.1.md)。
 
 ## 安装
 
-需要 Python 3.11 或 3.12。以下流程适用于 Linux 和 macOS：
+需要 Python 3.11 或更高版本：
 
 ```bash
 python -m venv .venv
@@ -17,172 +15,215 @@ python -m pip install --upgrade pip
 python -m pip install -e '.[test]'
 ```
 
-安装会同时获取运行时依赖，包括 `PyYAML`（`SKILL.md` frontmatter 解析）。本项目使用 OpenAI 兼容 Chat Completions 接口（默认 DeepSeek）和 Rich CLI；测试还需要 `pytest`。若安装器不识别可选测试依赖，请执行：
-
-```bash
-pip install -e . pytest
-```
-
-程序启动时只读取 `--workspace` 指定目录中未提交的 `.env`；`.env.example` 仅作为模板，不参与运行时加载。shell 中已设置的同名变量优先级最高。请将真实密钥放在 `.env`（已被 `.gitignore` 排除），不要写入 `.env.example`：
-
-```bash
-cp .env.example .env
-# 编辑 .env，将 DEEPSEEK_API_KEY 替换为真实密钥
-```
-
-也可以通过 shell 临时覆盖：
-
-```bash
-export DEEPSEEK_MODEL='deepseek-v4-pro'
-```
-
-## 使用
-
-```bash
-capslock --version
-python -m capslock --version
-capslock
-```
-
-在支持的 TTY 中，直接运行 `capslock` 或 `capslock chat` 会进入保留 scrollback 的工作流 TUI，持续显示计划、前台队列、运行状态和 token 用量；`capslock chat --classic` 保留 v1.6 交互界面。运行中仍可继续输入请求进入串行队列；`/queue` 可查看，`/queue move|cancel` 可调整，`/retry <run-id>` 从失败 run 的最近稳定步骤继续。输入 `/approvals` 打开集中审批中心，输入 `/exit` 或 `/quit` 结束会话。退出后任务不会在后台继续运行，完全为空的会话仍会自动清理。
-
-会话和执行检查点保存在工作区的 `.capslock/state/capslock.sqlite3`。`capslock resume` 可按标题选择历史，也可使用完整 ID/唯一前缀。会话管理支持当前工作区内的搜索、归档、导出和永久删除：
-
-历史会话可通过完整 ID 或列表中显示的唯一 ID 前缀重命名：
-
-```bash
-capslock sessions rename a14c92ef "修复登录接口超时"
-capslock sessions search "登录 超时"
-capslock sessions archive a14c92ef
-capslock sessions unarchive a14c92ef
-capslock sessions export a14c92ef exports/login-session
-capslock sessions delete a14c92ef --yes
-```
-
-在自然语言中直接指定文件或目录（路径相对于工作区）：
-
-```text
-你> 阅读 examples/company-handbook.md，员工每周可以远程办公几天？
-你> 在 examples 目录中查找报销需要审批的规则。
-```
-
-输出包含答案、证据位置和耗时。可使用 `capslock --debug`（或 `capslock --debug chat`）查看工具执行摘要；`capslock doctor` 检查配置和工作区状态。
-
-### 本地记忆
-
-`global` 记忆跨工作区可见，`workspace` 仅在当前工作区可见，`session` 仅在当前会话可见。v1.6.0 默认在成功回答后提取候选，但使用 `review` 策略，不会直接写成可信记忆：
-
-```text
-/memory add
-/memory list workspace
-/memory search Python 版本偏好
-/memory show mem_...
-/memory forget mem_...
-/memory undo mem_...
-/memory export workspace memories.json
-/memory policy review
-/memory candidates
-/memory candidate review cand_...
-/memory context
-```
-
-`off` 不提取候选，`review` 要求人工采纳，`automatic` 只自动采纳用户直接陈述、无冲突和敏感风险的 workspace/session 候选；global 和记忆推断始终要求审核。项目禁令或 `/memory disable` 会禁止全部写入。
-
-CapsLock 会自动召回最多 5 条相关记忆，并显示召回摘要；`/memory context` 可查看词法/语义排名、作用域、置信度、时效和来源原因。`forget` 可撤销；`purge` 会在二次确认后永久移除正文、索引、来源和向量。导入导出仅允许工作区内的 JSON 路径，v2 导出仍兼容导入 v1。
-
-本地嵌入默认关闭。进程内 FastEmbed 需要可选依赖：
+运行时依赖包括 `aiosqlite`、`openai`、`httpx`、`rich`、`prompt-toolkit`、`mcp` 和 `PyYAML`。本地 FastEmbed 是可选能力：
 
 ```bash
 python -m pip install -e '.[local-embeddings]'
 ```
 
-聊天内可显式启用 FastEmbed，或连接只允许回环地址且不跟随重定向的 OpenAI-compatible `/embeddings` 服务：
+将密钥放入未提交的工作区 `.env` 或启动 shell。工作区 `.env` 不允许重定向用户数据路径：
+
+```bash
+CAPSLOCK_API_KEY=your_api_key
+CAPSLOCK_TAVILY_API_KEY=your_tavily_key
+```
+
+## 使用
+
+TTY 中直接启动 TUI：
+
+```bash
+capslock
+capslock resume
+capslock resume <session-id-or-prefix>
+```
+
+脚本和 CI 使用 `exec`。无 prompt 时从 stdin 读取：
+
+```bash
+capslock exec "检查当前发布状态"
+printf '%s\n' "总结最近的改动" | capslock exec --json
+```
+
+裸 `capslock` 在非 TTY 环境会返回错误并提示使用 `capslock exec`。v2 不再提供 `chat`、`ask`、Classic UI 或 `migrate-layout`。
+
+顶层命令只有：
+
+- `capslock [--no-spinner|--quiet]`：启动默认 TUI。
+- `capslock exec [PROMPT] [--json] [--no-spinner|--quiet]`：执行一次请求。
+- `capslock resume [SESSION]`：恢复 TUI 会话。
+- `capslock sessions ...`：列出、搜索、重命名、归档、导出或删除会话。
+- `capslock doctor`：检查配置与 v2 数据库标识。
+
+TUI 保留以下命令：
 
 ```text
+/help /status /permissions /approvals /queue /memory /skills
+/sources /mcp /diff /undo /rename /exit /quit
+```
+
+队列、任务、上下文和费用汇总到 `/status`；文件、命令、Web 和 MCP 的待处理项汇总到 `/approvals`。旧的 `/cost`、`/context`、`/tasks`、`/changes`、`/commands`、`/web`、`/approve` 和 `/reject` 不再解析。`/exit` 与 `/quit` 均可退出 TUI。
+
+TUI 将模型提供方返回的 reasoning 与最终回答分开显示：`◇ Model reasoning` 使用低对比度、暗化斜体样式，`◆ CapsLock` 下的回答正文使用高对比度主文本样式，不再依赖 `Final answer` 标签区分。输入区底部固定预留一行 Agent 状态；模型思考、读取文件和工具执行期间，状态行循环显示动态字符以及 `Thinking...`、`Reading files: <tool>...` 或 `Running tool: <tool>...`，不会与帮助文字挤在同一行。阶段结束后状态行清空，scrollback 中写入静态结果。可通过 `--no-spinner`、`--quiet`、`CAPSLOCK_NO_SPINNER=1` 或 `CI=true` 禁用动态状态。启动 banner 使用 v1.7.1 的 `Welcome back`、CapsLock 字符画和 Tips 布局，窄终端自动改为纵向排列。
+
+`capslock resume` 使用方向键选择历史 session 并重放完整可见对话；也可显式传入完整 session ID 或唯一前缀。已完成消息以及中断/失败 run 的用户问题和已产生文本都会进入恢复视图与后续模型上下文。
+
+## JSONL v2
+
+`capslock exec --json` 每行输出一个事件，字段固定为：
+
+```json
+{
+  "schema_version": 2,
+  "sequence": 1,
+  "timestamp": "2026-01-01T00:00:00+00:00",
+  "session_id": "...",
+  "work_item_id": "...",
+  "run_id": "...",
+  "event": "completed",
+  "status": "completed",
+  "terminal": true,
+  "data": {}
+}
+```
+
+每个 run 只产生一个终止事件。终止类型为 `completed`、`waiting_approval`、`failed` 或 `cancelled`。完成事件携带 answer、citations、memory recalls、usage 和 duration；等待审批事件携带 action IDs；失败与取消事件携带稳定的 error code 和 message。
+
+`thinking.data.text` 只承载模型提供方返回的 reasoning；`text_delta.data.text` 与 `completed.data.answer` 承载面向用户的最终回答。两类文本不会互相拼接。
+
+退出码：成功 `0`，运行错误 `1`，调用或状态错误 `2`，等待审批 `3`，用户取消 `130`。
+
+## 权限与动作
+
+默认模式为 `approve_for_me`：高风险文件、命令和 MCP 动作需要确认，Web 动作仍经过校验与审计。另有 `full_access` 和 `ask_for_approval`：
+
+```text
+/permissions full
+/permissions approve
+/permissions ask
+```
+
+所有动作共用 `pending -> approved -> running -> completed|failed|cancelled` 状态机。拒绝从 `pending` 进入 `rejected`。Coordinator 负责风险、审批、状态和审计；handler 负责文件、命令、Web 或 MCP 的校验与执行。
+
+- 文件动作在提案和执行时校验路径、内容与哈希，且支持安全 `/undo`。
+- 命令只允许固定模板，使用异步子进程；超时或取消先终止进程组，2 秒后强制结束。
+- Web 只访问公开 HTTP/HTTPS 地址，拒绝私网、重定向越界和非文本响应；来源始终是不可信数据。
+- MCP 只使用显式配置的本地 stdio server 和工具 allowlist。
+
+## 记忆
+
+记忆分为 `global`、`workspace` 和 `session` 作用域。identity 保存在 `memories`，内容写入不可变的 `memory_revisions`。`forget` 与 `undo` 通过新 revision 完成；`purge` 删除正文、FTS、向量和来源，仅保留无正文 identity 与审计。
+
+常用命令：
+
+```text
+/memory list [global|workspace|session]
+/memory search <query>
+/memory show <id>
+/memory add
+/memory forget <id>
+/memory undo <id>
+/memory purge <id>
+/memory candidates [--all]
+/memory candidate accept|reject|purge|show <id>
+/memory export <scope> <path.json>
+/memory import <scope> <path.json>
+/memory policy off|review|automatic
 /memory embeddings enable fastembed
-/memory embeddings enable local-http http://127.0.0.1:11434/v1 embedding-model
+/memory embeddings enable local-http <endpoint> <model>
+/memory embeddings disable
 /memory embeddings rebuild
 ```
 
-### 本地 Skill
+召回保持 4 KiB、最多 5 条的限制，并按词法/语义相关性、作用域、置信度、时效和来源排序。FastEmbed 在工作线程执行；本地 HTTP embedding 使用 `AsyncClient` 且只允许回环地址。
 
-工作区 Skill 放在 `.capslock/skills/<name>/`，用户级 Skill 放在 `${CAPSLOCK_HOME:-~/.capslock}/skills/`。同名工作区包覆盖用户包。每个包以带 YAML frontmatter 的 `SKILL.md` 为入口，可附带 `references/`、`assets/` 和 `scripts/` 只读资源：
+记忆导入导出格式固定为 `capslock-memory-export` version 3，只接受 version 3。会话导出格式为 version 2。v1/v2 记忆导出和 v1 会话导出不提供导入或转换。
+
+## Skill
+
+工作区 Skill 位于 `.capslock/skills/<name>/`，用户 Skill 位于 `${CAPSLOCK_HOME:-~/.capslock}/skills/`。每个包必须包含与目录同名的 `SKILL.md`：
 
 ```markdown
 ---
 name: workspace-summary
-description: Summarize a workspace when the user asks for a project overview.
+description: Summarize a workspace area using local evidence.
 ---
 
-Inspect the relevant files and return a concise evidence-backed summary.
+Inspect relevant files and return an evidence-backed summary.
 ```
 
-消息开头使用 `$skill-name [raw arguments]` 显式调用；普通对话中，模型只先看到有效 Skill 的名称和描述，匹配任务时再按需加载正文：
+可附带 `references/`、`assets/` 和 `scripts/` 只读资源。Skill 不能声明额外权限、hook 或任意脚本执行入口。使用 `$skill-name [arguments]` 显式调用；管理命令为 `/skills list|show|validate|enable|disable`。
 
-```text
-/skills list
-/skills validate workspace-summary
-/skills show workspace-summary
-/skills disable workspace-summary
-$workspace-summary focus on release readiness
+## 配置
+
+环境变量优先于 `.capslock/config.toml`。配置按领域显式分组：
+
+```toml
+[model]
+base_url = "https://api.deepseek.com"
+model = "deepseek-v4-flash"
+timeout_seconds = 60
+input_cost_per_million = 0
+output_cost_per_million = 0
+
+[runtime]
+max_turns = 32
+max_context_messages = 24
+permission_mode = "approve_for_me"
+
+[command]
+command_timeout_seconds = 120
+command_output_bytes = 100000
+
+[web]
+web_timeout_seconds = 20
+web_max_bytes = 500000
+web_max_redirects = 3
+
+[mcp]
+mcp_timeout_seconds = 30
+mcp_output_bytes = 100000
+
+[memory]
+enabled = true
 ```
 
-Skill 输出是普通文本并沿用现有 citations。Skill 不能声明额外工具、权限、hooks 或执行模型，`scripts/` 也没有专用执行入口；所有动作继续服从当前权限模式。Skill 文件可以由 Agent 提出修改，但三种权限模式下都必须逐次人工确认。旧 TOML/Schema 包和旧 Skill 目录不会被发现，也不提供自动转换命令；需要保留的工作流应重新编写为目录名一致的 `SKILL.md` 包。
+模型与运行限制也可使用对应 `CAPSLOCK_*` 环境变量。`DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL` 和 `DEEPSEEK_MODEL` 仍作为模型提供方变量接受。`CAPSLOCK_HOME` 与 `CAPSLOCK_MEMORY_DATABASE` 必须是 shell 中的绝对路径。
 
-无充分本地证据时，Agent 会明确说明信息不足。脚本和 CI 应使用 `exec`；省略 prompt 时从 stdin 读取，`--json` 输出版本化 JSONL 事件。`ask` 作为兼容别名继续可用：
+## 数据与升级边界
 
-```bash
-capslock exec "公司总部在哪里？"
-printf '%s\n' "检查发布状态" | capslock exec --json
-capslock ask "兼容的一次性问题"
-```
+v2 只接受 canonical 布局：
 
-非交互执行不会弹出审批提示。若运行产生待审批动作，事件和会话会被保留，进程以退出码 3 结束，可稍后在交互 TUI 中处理。
+- 工作区配置：`.capslock/config.toml`
+- 工作区 MCP：`.capslock/mcp.json`
+- 本机 MCP：`.capslock/local/mcp.json`
+- 工作区数据库：`.capslock/state/capslock.sqlite3`
+- 事件日志：`.capslock/state/events.jsonl`
+- 用户记忆：`${CAPSLOCK_HOME:-~/.capslock}/state/memory.sqlite3`
 
-## 配置与边界
-
-环境变量优先于 `.capslock/config.toml`。支持 `CAPSLOCK_API_KEY`、`CAPSLOCK_BASE_URL`、`CAPSLOCK_MODEL`、`CAPSLOCK_TIMEOUT_SECONDS` 和 `CAPSLOCK_MAX_TURNS`；工具调用轮次默认上限为 32，达到后额外保留一次最终答案合成机会。为兼容现有使用方式，`DEEPSEEK_*` 变量仍然有效。
-
-需要项目级配置时，创建 `.capslock/config.toml` 并填写模型、命令和权限策略；不要把 API key 写入该文件。项目 MCP 声明位于 `.capslock/mcp.json`，本机私有覆盖位于 `.capslock/local/mcp.json`。
-
-项目可用 `[memory] enabled=false` 禁止记忆变更；本机还可通过 `/memory disable` 关闭写入。项目禁令优先，两种禁用都不影响读取已有记忆。用户级记忆库默认为 `${CAPSLOCK_HOME:-~/.capslock}/state/memory.sqlite3`。`CAPSLOCK_HOME` 和 `CAPSLOCK_MEMORY_DATABASE` 只能在启动 shell 中设置且必须是绝对路径，项目 `.env` 不能重定向用户数据。
-
-v1.x 仍只读兼容 `capslock.toml`、`capslock.mcp.json`、旧 `.capslock` 运行路径及旧用户记忆目录，并在使用时显示迁移提示；这些兼容路径计划在 v2.0 移除。Skill 不参与旧布局兼容或迁移。迁移默认只预览，不加载模型或数据库：
-
-```bash
-capslock migrate-layout
-capslock migrate-layout --scope user
-capslock migrate-layout --scope all --apply --yes
-```
-
-Agent 可调用本地工作区、会话任务、固定命令、Web 研究与本地 stdio MCP 工具。Agent 在对话中提出外部请求后，CLI 会展示完整请求 ID、类型、脱敏载荷和摘要，并用编号菜单选择批准、拒绝或稍后处理。Web 请求获批完成后，Agent 会自动读取来源并继续回答。稍后也可通过 `/web`、`/approve <id>`、`/reject <id>` 处理，或用 `/sources` 回查不可信网页来源。Tavily 搜索需要在环境中设置 `CAPSLOCK_TAVILY_API_KEY`（也兼容 `TAVILY_API_KEY`）。v1.3 仅支持公开 `http/https` URL 和显式配置的 stdio MCP，拒绝私网 URL、远程 MCP、OAuth 与任意 Shell。
+工作区库和记忆库使用不同的 SQLite `application_id`。已有表但 application ID 或 schema version 不匹配时，CapsLock 拒绝启动，不执行 WAL 切换、迁移、删除或覆盖。发现旧布局时会列出冲突路径；请先手工备份，再移走旧路径并创建全新 v2 状态。详见 [v2 架构与迁移说明](docs/development/v2.md)。
 
 ## 架构
 
-- `application/`：工作区资源装配与统一动作审批、执行和撤销流程。
-- `runtime.py` / `model.py`：流式模型协议、工作流事件、检查点恢复、证据校验与 run 状态。
-- `skills/`：`SKILL.md` 校验、双层注册表、catalog 与单次 run 资源快照。
-- `tooling/`：工具注册表，以及工作区/Git、任务/来源和动作适配器。
-- `storage/`：SQLite 连接、版本化迁移和领域 repositories。
-- `memory.py`：作用域、候选提取/审核、生命周期、召回、脱敏、导入导出和模型访问隔离。
-- `embeddings.py`：可选 FastEmbed、本地 HTTP embeddings、向量缓存和语义排序。
-- `policy.py`：工作区路径、文件大小和受控读写安全边界。
-- `changes.py`：编辑提案、审批、哈希校验、应用与撤销。
-- `execution.py`：固定命令模板、审批、执行、超时与输出控制。
-- `external.py`：Tavily 搜索、URL 抓取、来源审计与外部动作。
-- `mcp.py`：双层 MCP 配置和受控 stdio 调用。
-- `evidence.py`：稳定、可定位的文件证据。
-- `session.py` / `session_management.py`：持久化 facade，以及会话搜索、归档、导出和删除。
-- `cli/`：普通 CLI、非交互 JSONL、prompt-toolkit 行内 TUI 和 Rich 展示。
+- `domain/`：session、workflow、action 和 memory 领域类型。
+- `storage/async_database.py`、`storage/schema_v2.py`：数据库所有权与两套 v2 schema。
+- `storage/repositories_v2/`、`storage/memory_v2/`：组合式异步 repositories。
+- `application/workflow.py`：原子 workflow 转换与审批结算。
+- `application/action_system/`：动作协调器和四类 async handler。
+- `runtime/`：异步模型协议、context、ToolLoop、event stream 与 Agent。
+- `memory/`：生命周期、召回、候选、embedding、传输与校验服务。
+- `tooling/`：统一 async tool registry 与 adapters。
+- `cli/`、`cli/views/`：TUI/JSONL 控制器和 typed view 渲染。
+
+公开运行时入口只有 `WorkspaceAgent.ask_stream()`；没有同步 `ask()`、`ToolLoop.run()` 包装、`last_answer` 或上层直接 SQL。
 
 ## 验证
 
 ```bash
-python -m pytest -q
+python -m ruff format --check .
 python -m ruff check .
+python -m pytest -q
 python scripts/check_repository.py
 ```
 
-测试不需要 API 密钥：它们使用模拟客户端验证工具循环、证据 ID、会话恢复、越界路径拒绝和只读工具结果。
-
-v1.7.0 的工作流、会话迁移与发布步骤见 [发布说明](docs/releases/v1.7.0.md)；记忆候选策略见 [v1.6.0 发布说明](docs/releases/v1.6.0.md)。
+测试使用模拟模型、HTTP、MCP 和本地子进程，不需要真实 API 密钥。完整工具与 TUI 参考见 [Agent reference](docs/agent-reference.md)。

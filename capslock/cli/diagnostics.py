@@ -1,154 +1,152 @@
-"""Workspace diagnostics and saved-session commands."""
+"""Async session management and v2 diagnostics."""
 
 from __future__ import annotations
 
+import asyncio
+import sqlite3
 from pathlib import Path
-from urllib.parse import urlsplit, urlunsplit
 
 from rich.console import Console
 
 from ..config import Settings
-from ..execution import CommandService
 from ..layout import ProjectLayout
-from ..policy import WorkspacePolicy
-from ..session import SessionStore
-from ..skills import SkillRegistry
-from ..storage import MemoryStore, workspace_key
 from ..session_management import SessionManager
-from .prompt import select_session
-from .render import render_doctor, render_session_list, render_session_renamed
+from ..storage.repositories_v2 import WorkspaceRepositories
+from .prompt import select_session as choose_session
+from .views.diagnostics import render_doctor, render_sessions
 
 
-def open_store(workspace: Path, *, layout: ProjectLayout | None = None) -> SessionStore:
-    selected = layout or ProjectLayout.discover(workspace)
-    return SessionStore(selected.database)
-
-
-def render_sessions(console: Console, store: SessionStore, limit: int) -> int:
-    render_session_list(console, store.list(limit))
+async def list_sessions(
+    console: Console, repositories: WorkspaceRepositories, limit: int
+) -> int:
+    render_sessions(console, await repositories.sessions.list(limit))
     return 0
 
 
-def rename_saved_session(console: Console, store: SessionStore, prefix: str, title: str) -> int:
-    try:
-        session = store.resolve_session(prefix)
-        if session is None:
-            raise ValueError(f"session does not exist: {prefix}")
-        renamed = store.rename_session(session.id, title)
-    except ValueError as exc:
-        console.print(f"[error]Error:[/] {exc}")
-        return 2
-    render_session_renamed(console, renamed)
-    return 0
-
-
-def search_saved_sessions(console: Console, store: SessionStore, query: str, limit: int, *, include_archived: bool = False) -> int:
-    render_session_list(console, store.search_sessions(query, limit=limit, include_archived=include_archived))
-    return 0
-
-
-def archive_saved_session(console: Console, store: SessionStore, prefix: str, *, archived: bool) -> int:
-    session = store.resolve_session(prefix)
+async def rename_session(
+    console: Console, repositories: WorkspaceRepositories, prefix: str, title: str
+) -> int:
+    session = await repositories.sessions.resolve(prefix)
     if session is None:
-        console.print(f"[error]Error:[/] session does not exist: {prefix}")
-        return 2
-    updated = store.archive_session(session.id, archived=archived)
-    state = "Archived" if archived else "Restored"
-    console.print(f"[success]{state}:[/] {updated.title} [text.muted]({updated.id[:12]})[/]")
+        raise ValueError(f"session does not exist: {prefix}")
+    updated = await repositories.sessions.rename(session.id, title)
+    console.print(f"[success]Renamed:[/] {updated.title}")
     return 0
 
 
-def export_saved_session(console: Console, manager: SessionManager, store: SessionStore, prefix: str, destination: str) -> int:
-    session = store.resolve_session(prefix)
-    if session is None:
-        console.print(f"[error]Error:[/] session does not exist: {prefix}")
-        return 2
-    output = manager.export(session.id, destination)
-    console.print(f"[success]Exported:[/] [path]{output}[/]")
-    return 0
-
-
-def delete_saved_session(console: Console, manager: SessionManager, store: SessionStore, prefix: str, *, yes: bool = False) -> int:
-    session = store.resolve_session(prefix)
-    if session is None:
-        console.print(f"[error]Error:[/] session does not exist: {prefix}")
-        return 2
-    if not yes and console.input(f"Permanently delete '{session.title}'? [y/N] ").strip().casefold() not in {"y", "yes"}:
-        console.print("[waiting]Delete cancelled.[/]")
-        return 0
-    purged = manager.delete(session.id)
-    console.print(f"[success]Deleted session.[/] [text.muted]Purged {purged} session memories.[/]")
-    return 0
-
-
-def select_saved_session(console: Console, store: SessionStore, limit: int) -> str | None:
-    sessions = store.list(limit)
-    if not sessions:
-        console.print("[text.secondary]No saved sessions in this workspace.[/]")
-        return None
-    try:
-        return select_session(sessions)
-    except (EOFError, KeyboardInterrupt):
-        console.print("\n[warning]Cancelled.[/]")
-        return None
-
-
-def doctor(console: Console, workspace: Path, settings: Settings, *, layout: ProjectLayout | None = None) -> int:
-    selected = layout or ProjectLayout.discover(workspace)
-    api_ready = bool(settings.api_key and not settings.api_key.startswith("your_"))
-    git_ready = (workspace / ".git").exists()
-    with open_store(workspace, layout=selected) as store:
-        commands = CommandService(store, WorkspacePolicy(workspace), "doctor", "doctor", lambda *args, **kwargs: None)
-        available = commands.available_templates()
-        registry = SkillRegistry(
-            workspace,
-            disabled=lambda name: not store.skill_enabled(name),
-            layout=selected,
-        )
-        catalog = registry.catalog()
-        invalid_skills = sum(1 for entry in registry.entries() if entry.error is not None)
-    memory_path = settings.memory.database or selected.user.memory
-    with MemoryStore(memory_path) as memory:
-        key = workspace_key(workspace)
-        local_write = memory.local_write_enabled(key)
-        memory_settings = memory.memory_settings(key)
-        fts_available = memory.fts_available
-    render_doctor(
+async def search_sessions(
+    console: Console,
+    repositories: WorkspaceRepositories,
+    query: str,
+    limit: int,
+    *,
+    include_archived: bool = False,
+) -> int:
+    render_sessions(
         console,
-        workspace=workspace,
-        layout_mode=selected.mode,
-        config=selected.config,
-        project_mcp=selected.project_mcp,
-        skills=selected.skills,
-        skill_count=catalog.total,
-        skill_catalog_bytes=catalog.bytes,
-        skill_catalog_truncated=catalog.truncated,
-        invalid_skills=invalid_skills,
-        layout_warnings=selected.warnings,
-        database=selected.database,
-        model=settings.model,
-        endpoint=safe_endpoint(settings.base_url),
-        api_ready=api_ready,
-        git_ready=git_ready,
-        commands=available,
-        memory_database=memory_path,
-        memory_fts=fts_available,
-        memory_write_enabled=settings.memory.project_write_enabled and local_write,
-        memory_policy=memory_settings["policy"].value,
-        memory_recall_enabled=bool(memory_settings["recall_enabled"]),
-        memory_embedding_backend=memory_settings["embedding_backend"].value,
+        await repositories.sessions.search(
+            query, limit=limit, include_archived=include_archived
+        ),
     )
     return 0
 
 
-def safe_endpoint(endpoint: str) -> str:
-    """Remove credentials and query data before diagnostic display."""
-    parsed = urlsplit(endpoint)
-    if not parsed.hostname:
-        return "<invalid endpoint>"
-    hostname = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
+async def archive_session(
+    console: Console,
+    repositories: WorkspaceRepositories,
+    prefix: str,
+    *,
+    archived: bool,
+) -> int:
+    session = await repositories.sessions.resolve(prefix)
+    if session is None:
+        raise ValueError(f"session does not exist: {prefix}")
+    await repositories.sessions.archive(session.id, archived=archived)
+    console.print("[success]Session updated.[/]")
+    return 0
+
+
+async def export_session(
+    console: Console,
+    manager: SessionManager,
+    repositories: WorkspaceRepositories,
+    prefix: str,
+    destination: str,
+) -> int:
+    session = await repositories.sessions.resolve(prefix)
+    if session is None:
+        raise ValueError(f"session does not exist: {prefix}")
+    console.print(
+        f"[success]Exported:[/] {await manager.export(session.id, destination)}"
+    )
+    return 0
+
+
+async def delete_session(
+    console: Console,
+    manager: SessionManager,
+    repositories: WorkspaceRepositories,
+    prefix: str,
+    *,
+    yes: bool = False,
+) -> int:
+    session = await repositories.sessions.resolve(prefix)
+    if session is None:
+        raise ValueError(f"session does not exist: {prefix}")
+    if not yes:
+        answer = await asyncio.to_thread(
+            console.input, f"Permanently delete {session.title}? [y/N] "
+        )
+        if answer.strip().casefold() not in {"y", "yes"}:
+            return 0
+    purged = await manager.delete(session.id)
+    console.print(f"[success]Deleted session; purged {purged} session memories.[/]")
+    return 0
+
+
+async def select_session(
+    console: Console, repositories: WorkspaceRepositories, limit: int
+) -> str | None:
+    sessions = await repositories.sessions.list(limit)
+    if not sessions:
+        console.print("[text.secondary]No sessions available.[/]")
+        return None
+    return await asyncio.to_thread(choose_session, sessions, console.width)
+
+
+async def doctor(
+    console: Console, workspace: Path, settings: Settings, *, layout: ProjectLayout
+) -> int:
+    checks = [
+        ("Workspace", str(workspace)),
+        ("Layout", "v2 canonical"),
+        ("Project config", str(layout.config)),
+        (
+            "Workspace database",
+            await asyncio.to_thread(_database_status, layout.database),
+        ),
+        (
+            "Memory database",
+            await asyncio.to_thread(
+                _database_status,
+                settings.memory.database or layout.user.canonical_memory,
+            ),
+        ),
+        ("Model", settings.model_config.model),
+        ("API key", "configured" if settings.model_config.api_key else "missing"),
+        ("Git", "repository" if (workspace / ".git").is_dir() else "not a repository"),
+    ]
+    render_doctor(console, checks)
+    return 0
+
+
+def _database_status(path: Path) -> str:
+    if not path.exists():
+        return f"new ({path})"
+    connection = sqlite3.connect(path)
     try:
-        port = f":{parsed.port}" if parsed.port is not None else ""
-    except ValueError:
-        return "<invalid endpoint>"
-    return urlunsplit((parsed.scheme, f"{hostname}{port}", parsed.path, "", ""))
+        app_id = int(connection.execute("PRAGMA application_id").fetchone()[0])
+        version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+    finally:
+        connection.close()
+    return f"application_id={app_id} schema={version} ({path})"

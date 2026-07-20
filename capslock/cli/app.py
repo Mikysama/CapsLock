@@ -1,13 +1,14 @@
-"""Composition root for the CapsLock command-line interface."""
+"""CapsLock v2 command-line composition root."""
 
 from __future__ import annotations
 
 import argparse
+import asyncio
 import os
 import sys
 from pathlib import Path
 
-from openai import OpenAI
+from openai import AsyncOpenAI
 from rich.console import Console
 
 from .. import __version__
@@ -16,100 +17,91 @@ from ..config import Settings
 from ..environment import load_project_environment
 from ..layout import LayoutConflict, ProjectLayout
 from ..runtime import AgentRuntimeError
-from ..theme import make_console
-from ..storage import MemoryStore
 from ..session_management import SessionManager
-from .chat import run_chat
+from ..storage.async_database import IncompatibleDatabaseError
+from ..storage.memory_v2 import MemoryRepositories
+from ..storage.repositories_v2 import WorkspaceRepositories
+from ..theme import make_console
 from .context import CliContext
 from .diagnostics import (
-    archive_saved_session,
-    delete_saved_session,
+    archive_session,
+    delete_session,
     doctor,
-    export_saved_session,
-    open_store,
-    rename_saved_session,
-    render_sessions,
-    search_saved_sessions,
-    select_saved_session,
+    export_session,
+    list_sessions,
+    rename_session,
+    search_sessions,
+    select_session,
 )
 from .exec import run_exec
-from .migration import run_layout_migration
+from .status import dynamic_status_supported
 from .tui import run_tui
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="capslock", description="Lock in your focus. Unlock your potential.")
-    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
-    parser.add_argument(
-        "--workspace",
-        type=Path,
-        default=Path.cwd(),
-        help="Workspace root (default: current directory)",
+    parser = argparse.ArgumentParser(
+        prog="capslock", description="A local, recoverable workspace agent"
     )
-    parser.add_argument("--debug", action="store_true", help="Show runtime events after each answer")
+    parser.add_argument(
+        "--version", action="version", version=f"%(prog)s {__version__}"
+    )
+    parser.add_argument("--workspace", type=Path, default=Path.cwd())
+    parser.add_argument("--no-spinner", action="store_true")
+    parser.add_argument("--quiet", action="store_true")
     subparsers = parser.add_subparsers(dest="command")
-    parser.set_defaults(command="chat")
-    chat = subparsers.add_parser("chat", help="Start a new interactive session")
-    chat.add_argument("--classic", action="store_true", help="Use the v1.6 line-oriented interface")
-    ask = subparsers.add_parser("ask", help="Ask one question and exit")
-    ask.add_argument("question")
-    ask.add_argument("--json", action="store_true", help="Emit versioned JSONL workflow events")
     execute = subparsers.add_parser("exec", help="Run one non-interactive request")
-    execute.add_argument("question", nargs="?", help="Prompt; read from stdin when omitted")
-    execute.add_argument("--json", action="store_true", help="Emit versioned JSONL workflow events")
-    resume = subparsers.add_parser("resume", help="Resume a saved interactive session")
-    resume.add_argument("session_id", nargs="?", help="Full session ID or a unique prefix")
-    resume.add_argument("--limit", type=int, default=20, help="Maximum sessions shown in the selector")
-    sessions = subparsers.add_parser("sessions", help="List saved sessions")
+    execute.add_argument("question", nargs="?")
+    execute.add_argument("--json", action="store_true")
+    execute.add_argument("--no-spinner", action="store_true", default=argparse.SUPPRESS)
+    execute.add_argument("--quiet", action="store_true", default=argparse.SUPPRESS)
+    resume = subparsers.add_parser("resume", help="Resume a saved TUI session")
+    resume.add_argument("session_id", nargs="?")
+    resume.add_argument("--limit", type=int, default=20)
+    resume.add_argument("--no-spinner", action="store_true", default=argparse.SUPPRESS)
+    resume.add_argument("--quiet", action="store_true", default=argparse.SUPPRESS)
+    sessions = subparsers.add_parser("sessions", help="Manage saved sessions")
     sessions.add_argument("--limit", type=int, default=20)
-    session_commands = sessions.add_subparsers(dest="sessions_command")
-    rename = session_commands.add_parser("rename", help="Rename a saved session")
-    rename.add_argument("session_id", help="Full session ID or a unique prefix")
-    rename.add_argument("title", nargs="+", help="New session title")
-    search = session_commands.add_parser("search", help="Search session titles and messages")
-    search.add_argument("query", nargs="+", help="Full-text search query")
-    search.add_argument("--archived", action="store_true", help="Include archived sessions")
-    archive = session_commands.add_parser("archive", help="Archive a saved session")
+    commands = sessions.add_subparsers(dest="sessions_command")
+    rename = commands.add_parser("rename")
+    rename.add_argument("session_id")
+    rename.add_argument("title", nargs="+")
+    search = commands.add_parser("search")
+    search.add_argument("query", nargs="+")
+    search.add_argument("--archived", action="store_true")
+    archive = commands.add_parser("archive")
     archive.add_argument("session_id")
-    unarchive = session_commands.add_parser("unarchive", help="Restore an archived session")
+    unarchive = commands.add_parser("unarchive")
     unarchive.add_argument("session_id")
-    export = session_commands.add_parser("export", help="Export a session as JSON and Markdown")
+    export = commands.add_parser("export")
     export.add_argument("session_id")
     export.add_argument("destination")
-    delete = session_commands.add_parser("delete", help="Permanently delete a session")
+    delete = commands.add_parser("delete")
     delete.add_argument("session_id")
     delete.add_argument("--yes", action="store_true")
-    subparsers.add_parser("doctor", help="Check local configuration and workspace access")
-    migrate = subparsers.add_parser("migrate-layout", help="Preview or apply the .capslock layout migration")
-    migrate.add_argument("--scope", choices=("workspace", "user", "all"), default="workspace")
-    mode = migrate.add_mutually_exclusive_group()
-    mode.add_argument("--dry-run", dest="apply", action="store_false", help="Preview without changing files (default)")
-    mode.add_argument("--apply", dest="apply", action="store_true", help="Copy, verify, and remove legacy sources")
-    migrate.set_defaults(apply=False)
-    migrate.add_argument("--yes", action="store_true", help="Confirm apply without an interactive prompt")
+    subparsers.add_parser("doctor", help="Check v2 configuration and state")
     return parser
 
 
-def create_client(settings: Settings) -> OpenAI:
-    if not settings.api_key or settings.api_key.startswith("your_"):
-        raise AgentRuntimeError(
-            "API key is not set; use CAPSLOCK_API_KEY or DEEPSEEK_API_KEY in your environment or .env"
-        )
-    return OpenAI(
-        api_key=settings.api_key,
-        base_url=settings.base_url,
-        timeout=settings.timeout_seconds,
+def create_client(settings: Settings) -> AsyncOpenAI:
+    if not settings.model_config.api_key or settings.model_config.api_key.startswith(
+        "your_"
+    ):
+        raise AgentRuntimeError("API key is not configured")
+    return AsyncOpenAI(
+        api_key=settings.model_config.api_key,
+        base_url=settings.model_config.base_url,
+        timeout=settings.model_config.timeout_seconds,
     )
 
 
-def create_application(
+async def create_application(
     workspace: Path,
     settings: Settings,
     session_id: str | None = None,
     *,
     layout: ProjectLayout | None = None,
 ) -> WorkspaceApplication:
-    return WorkspaceApplication(
+    return await WorkspaceApplication.open(
         workspace=workspace,
         settings=settings,
         client=create_client(settings),
@@ -119,79 +111,142 @@ def create_application(
 
 
 def main(argv: list[str] | None = None, *, console: Console | None = None) -> int:
+    try:
+        return asyncio.run(async_main(argv, console=console))
+    except KeyboardInterrupt:
+        # The active renderer has already restored the cursor and reported cancellation.
+        return 130
+
+
+async def async_main(
+    argv: list[str] | None = None, *, console: Console | None = None
+) -> int:
     args = build_parser().parse_args(argv)
     output = console or make_console()
+    errors = (
+        make_console(file=sys.stderr)
+        if console is None and args.command == "exec"
+        else output
+    )
     workspace = args.workspace.resolve()
     if not workspace.is_dir():
-        output.print(f"[error]Error:[/] [path]{workspace}[/]")
+        output.print(f"[error]Error:[/] workspace is not a directory: {workspace}")
         return 2
     try:
         layout = ProjectLayout.discover(workspace)
-        if args.command == "migrate-layout":
-            return run_layout_migration(
-                output,
-                layout,
-                scope=args.scope,
-                apply=args.apply,
-                yes=args.yes,
-            )
         load_project_environment(workspace)
         settings = Settings.load(workspace, layout=layout)
-        for warning in layout.warnings:
-            output.print(f"[warning]Warning:[/] {warning}")
         if args.command == "doctor":
-            return doctor(output, workspace, settings, layout=layout)
+            return await doctor(output, workspace, settings, layout=layout)
         if args.command == "sessions":
-            with open_store(workspace, layout=layout) as store:
-                if args.sessions_command == "rename":
-                    return rename_saved_session(output, store, args.session_id, " ".join(args.title))
-                if args.sessions_command == "search":
-                    return search_saved_sessions(output, store, " ".join(args.query), args.limit, include_archived=args.archived)
-                if args.sessions_command in {"archive", "unarchive"}:
-                    return archive_saved_session(output, store, args.session_id, archived=args.sessions_command == "archive")
-                if args.sessions_command in {"export", "delete"}:
-                    memory_path = settings.memory.database or layout.user.memory
-                    with MemoryStore(memory_path) as memory:
-                        manager = SessionManager(store, workspace=workspace, memory_store=memory)
-                        if args.sessions_command == "export":
-                            return export_saved_session(output, manager, store, args.session_id, args.destination)
-                        return delete_saved_session(output, manager, store, args.session_id, yes=args.yes)
-                return render_sessions(output, store, args.limit)
+            return await _sessions(output, args, workspace, layout, settings)
         session_id = getattr(args, "session_id", None)
         if args.command == "resume":
-            with open_store(workspace, layout=layout) as store:
+            repositories = await WorkspaceRepositories.open(
+                layout.database, workspace=workspace
+            )
+            try:
                 if session_id is None:
-                    session_id = select_saved_session(output, store, args.limit)
+                    session_id = await select_session(output, repositories, args.limit)
                     if session_id is None:
                         return 0
                 else:
-                    session = store.resolve_session(session_id)
+                    session = await repositories.sessions.resolve(session_id)
                     if session is None:
                         raise AgentRuntimeError(f"session does not exist: {session_id}")
                     session_id = session.id
-        with create_application(workspace, settings, session_id, layout=layout) as application:
-            context = CliContext(output, application.agent)
-            if args.command in {"ask", "exec"}:
-                return run_exec(context, args.question, json_events=args.json)
-            use_tui = (
-                not getattr(args, "classic", False)
-                and sys.stdin.isatty()
-                and output.is_terminal
-                and os.environ.get("TERM", "").casefold() != "dumb"
+            finally:
+                await repositories.close()
+        if args.command is None and not (
+            sys.stdin.isatty()
+            and output.is_terminal
+            and os.environ.get("TERM", "").casefold() != "dumb"
+        ):
+            output.print(
+                "[error]Interactive TUI requires a terminal; use `capslock exec`.[/]"
             )
-            return run_tui(context, args.debug) if use_tui else run_chat(context, args.debug)
+            return 2
+        application = await create_application(
+            workspace, settings, session_id, layout=layout
+        )
+        async with application:
+            context = CliContext(output, application.agent)
+            if args.command == "exec":
+                return await run_exec(
+                    context,
+                    args.question,
+                    json_events=args.json,
+                    spinner=not args.no_spinner,
+                    quiet=args.quiet,
+                )
+            return await run_tui(
+                context,
+                status_enabled=not args.no_spinner
+                and not args.quiet
+                and dynamic_status_supported(
+                    output.file, output_is_tty=output.is_terminal
+                ),
+            )
     except KeyboardInterrupt:
-        output.print("\n[warning]Cancelled.[/]")
+        errors.print("\n[warning]Cancelled.[/]")
         return 130
-    except LayoutConflict as exc:
-        output.print(f"[error]Layout conflict:[/] {exc}")
+    except (LayoutConflict, IncompatibleDatabaseError) as exc:
+        errors.print(f"[error]Incompatible state:[/] {exc}")
         return 2
     except (AgentRuntimeError, ValueError) as exc:
-        output.print(f"[error]Error:[/] {exc}")
+        errors.print(f"[error]Error:[/] {exc}")
         return 2
     except Exception as exc:
-        output.print(f"[error]Model or transport error:[/] {exc}")
+        errors.print(f"[error]Model or transport error:[/] {exc}")
         return 1
+
+
+async def _sessions(
+    output: Console, args, workspace: Path, layout: ProjectLayout, settings: Settings
+) -> int:
+    repositories = await WorkspaceRepositories.open(
+        layout.database, workspace=workspace
+    )
+    memory_repositories = None
+    try:
+        command = args.sessions_command
+        if command == "rename":
+            return await rename_session(
+                output, repositories, args.session_id, " ".join(args.title)
+            )
+        if command == "search":
+            return await search_sessions(
+                output,
+                repositories,
+                " ".join(args.query),
+                args.limit,
+                include_archived=args.archived,
+            )
+        if command in {"archive", "unarchive"}:
+            return await archive_session(
+                output, repositories, args.session_id, archived=command == "archive"
+            )
+        if command in {"export", "delete"}:
+            memory_repositories = await MemoryRepositories.open(
+                settings.memory.database or layout.user.canonical_memory
+            )
+            manager = SessionManager(
+                repositories,
+                workspace=workspace,
+                memory_repositories=memory_repositories,
+            )
+            if command == "export":
+                return await export_session(
+                    output, manager, repositories, args.session_id, args.destination
+                )
+            return await delete_session(
+                output, manager, repositories, args.session_id, yes=args.yes
+            )
+        return await list_sessions(output, repositories, args.limit)
+    finally:
+        if memory_repositories is not None:
+            await memory_repositories.close()
+        await repositories.close()
 
 
 if __name__ == "__main__":

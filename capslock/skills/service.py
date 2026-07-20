@@ -51,7 +51,9 @@ class SkillService:
         )
         return loaded
 
-    def load_data(self, run_id: str, name: str, *, trigger: str) -> tuple[dict[str, object], dict[str, object]]:
+    def load_data(
+        self, run_id: str, name: str, *, trigger: str
+    ) -> tuple[dict[str, object], dict[str, object]]:
         loaded = self.load(run_id, name, trigger=trigger)
         package = loaded.package
         resources = [
@@ -86,7 +88,9 @@ class SkillService:
     ) -> tuple[dict[str, object], dict[str, object]]:
         loaded = self._loaded.get((run_id, name))
         if loaded is None:
-            raise SkillValidationError(f"Skill must be loaded before reading resources: {name}")
+            raise SkillValidationError(
+                f"Skill must be loaded before reading resources: {name}"
+            )
         resource = loaded.package.resource(path)
         content = loaded.resources[resource.path]
         if len(content) > MAX_RESOURCE_READ_BYTES:
@@ -96,7 +100,9 @@ class SkillService:
         try:
             text = content.decode("utf-8")
         except UnicodeDecodeError as exc:
-            raise SkillValidationError(f"Skill resource is binary or non-UTF-8: {path}") from exc
+            raise SkillValidationError(
+                f"Skill resource is binary or non-UTF-8: {path}"
+            ) from exc
         lines = text.splitlines()
         final_line = len(lines) if end_line is None else end_line
         if (

@@ -83,7 +83,9 @@ class SkillRegistry:
         for index, package in enumerate(packages):
             description = html.escape(" ".join(package.description.split()))
             candidate = f"- ${package.name}: {description}"
-            candidate_bytes = len(candidate.encode("utf-8")) - len(name_lines[index].encode("utf-8"))
+            candidate_bytes = len(candidate.encode("utf-8")) - len(
+                name_lines[index].encode("utf-8")
+            )
             if used + candidate_bytes > budget_bytes:
                 continue
             lines[index] = candidate
@@ -129,7 +131,9 @@ class SkillRegistry:
             try:
                 package = load_skill_package(path, scope=scope)
             except SkillValidationError as exc:
-                output[path.name] = SkillEntry(path.name, scope, path, False, error=str(exc))
+                output[path.name] = SkillEntry(
+                    path.name, scope, path, False, error=str(exc)
+                )
             else:
                 output[package.name] = SkillEntry(
                     package.name,

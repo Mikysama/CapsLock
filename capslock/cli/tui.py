@@ -1,43 +1,38 @@
-"""Inline workflow TUI built on the existing prompt-toolkit stack."""
+"""Foreground async workflow TUI."""
 
 from __future__ import annotations
 
 import asyncio
+import shlex
 from collections.abc import Callable
 
 from prompt_toolkit.application import get_app_or_none, run_in_terminal
 from prompt_toolkit.patch_stdout import patch_stdout
+from rich.console import Console
 
-from ..domain import AgentEventKind, ActionType, WorkItemStatus
+from ..domain import AgentEvent, AgentEventKind, MemoryScope
 from ..permissions import PermissionMode
-from ..runtime import AgentRuntimeError
-from ..runtime_support import CancellationToken
-from . import actions
-from .chat import WEB_CONTINUATION, _delete_empty_session
+from ..status import AgentStatus, status_for_event, status_message
 from .context import CliContext
 from .dispatch import dispatch_slash_command
 from .prompt import permission_rprompt, prompt_footer, prompt_session, prompt_tokens
-from .render import (
-    render_answer_metadata,
-    render_session_history,
-    render_workflow_status,
-    render_work_queue,
-    select_choice,
-    startup_banner,
-)
+from .views.common import error, startup
+from .views.workflow import render_history, result_status
 
 
-def run_tui(context: CliContext, debug: bool) -> int:
-    try:
-        return asyncio.run(_run_tui(context, debug))
-    finally:
-        _delete_empty_session(context.agent)
-
-
-async def _run_tui(context: CliContext, debug: bool) -> int:
+async def run_tui(context: CliContext, *, status_enabled: bool = True) -> int:
     agent, console = context.agent, context.console
-    console.print(startup_banner(agent))
-    render_session_history(console, agent)
+    startup(
+        console,
+        workspace=str(agent.workspace),
+        model=agent.model,
+        session_id=agent.session_id,
+        permission_mode=agent.permission_mode,
+    )
+    session = await agent.repositories.sessions.require(agent.session_id)
+    render_history(
+        console, session, await agent.repositories.sessions.transcript(agent.session_id)
+    )
     inputs = prompt_session(
         lambda: [
             (entry.name, entry.package.description)
@@ -45,77 +40,75 @@ async def _run_tui(context: CliContext, debug: bool) -> int:
             if entry.enabled and entry.error is None and entry.package is not None
         ]
     )
-    pending: list[tuple[str, str, str | None]] = []
-    wake = asyncio.Event()
+    queue: asyncio.Queue[tuple[str, str, str | None] | None] = asyncio.Queue()
     state: dict[str, object] = {
-        "token": None,
-        "stopping": False,
+        "task": None,
         "activity": None,
         "spinner_frame": 0,
+        "status_enabled": status_enabled,
+        "stopping": False,
+        "inputs": inputs,
     }
-    worker = asyncio.create_task(_workflow_worker(context, pending, wake, state, debug))
+    worker = asyncio.create_task(_worker(context, queue, state))
     animator = asyncio.create_task(_animate_activity(inputs, state))
     try:
         while True:
-            render_workflow_status(console, agent)
             try:
                 with patch_stdout(raw=True):
-                    question = (await inputs.prompt_async(
-                        prompt_tokens(agent.permission_mode),
-                        rprompt=permission_rprompt(agent.permission_mode),
-                        bottom_toolbar=lambda: prompt_footer(
-                            activity=str(state["activity"]) if state.get("activity") else None,
-                            spinner_frame=int(state.get("spinner_frame", 0)),
-                        ),
-                    )).strip()
+                    question = (
+                        await inputs.prompt_async(
+                            prompt_tokens(agent.permission_mode),
+                            rprompt=permission_rprompt(agent.permission_mode),
+                            bottom_toolbar=lambda: prompt_footer(
+                                activity=str(state["activity"])
+                                if state.get("activity")
+                                else None,
+                                spinner_frame=int(state.get("spinner_frame", 0)),
+                            ),
+                        )
+                    ).strip()
             except KeyboardInterrupt:
-                token = state.get("token")
-                if isinstance(token, CancellationToken) and not token.cancelled:
-                    token.cancel()
+                task = state.get("task")
+                if isinstance(task, asyncio.Task) and not task.done():
+                    task.cancel()
                     console.print("\n[warning]Cancelling the active run...[/]")
                     continue
-                console.print()
                 return 0
             except EOFError:
-                console.print()
                 return 0
-            if question.startswith("/"):
-                try:
-                    if await _dispatch_tui_command(context, question, pending, wake, state) == "exit":
-                        return 0
-                except (AgentRuntimeError, ValueError) as exc:
-                    console.print(f"[error]Error:[/] {exc}")
-                continue
             if not question:
                 continue
+            if question.startswith("/"):
+                try:
+                    if question.startswith("/queue retry "):
+                        await _retry(context, queue, shlex.split(question)[2])
+                    elif await dispatch_slash_command(context, question) == "exit":
+                        return 0
+                except (ValueError, OSError) as exc:
+                    error(console, exc)
+                continue
             if agent.permission_mode is PermissionMode.ASK_FOR_APPROVAL:
-                choice = select_choice(
-                    console,
-                    "Send this request to CapsLock?",
-                    (("approve", "Approve and send"), ("reject", "Do not send")),
-                    escape_key="reject",
+                answer = await asyncio.to_thread(
+                    console.input, "Send this request? [y/N] "
                 )
-                if choice != "approve":
+                if answer.strip().casefold() not in {"y", "yes"}:
                     continue
-            item = agent.enqueue(question)
-            pending.append((item.id, item.question, None))
-            wake.set()
-            console.print(f"[waiting]Queued:[/] {item.question} [text.muted]({item.id[:8]})[/]")
+            item = await agent.enqueue(question)
+            await queue.put((item.id, item.question, None))
+            console.print(
+                f"[waiting]Queued:[/] {item.question} [text.muted]({item.id[:8]})[/]"
+            )
     finally:
         state["stopping"] = True
-        token = state.get("token")
-        if isinstance(token, CancellationToken):
-            token.cancel()
+        await queue.put(None)
         worker.cancel()
         animator.cancel()
-        try:
-            await worker
-        except asyncio.CancelledError:
-            pass
-        try:
-            await animator
-        except asyncio.CancelledError:
-            pass
+        for task in (worker, animator):
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        await _delete_empty_session(context)
 
 
 async def _animate_activity(inputs: object, state: dict[str, object]) -> None:
@@ -129,118 +122,211 @@ async def _animate_activity(inputs: object, state: dict[str, object]) -> None:
             app.invalidate()
 
 
-async def _workflow_worker(
-    context: CliContext,
-    pending: list[tuple[str, str, str | None]],
-    wake: asyncio.Event,
-    state: dict[str, object],
-    debug: bool,
+async def _worker(
+    context: CliContext, queue: asyncio.Queue, state: dict[str, object]
 ) -> None:
-    while not state.get("stopping"):
-        if not pending:
-            wake.clear()
-            await wake.wait()
-            continue
-        item_id, question, resume_from_run_id = pending.pop(0)
-        token = CancellationToken()
-        state["token"] = token
+    while True:
+        request = await queue.get()
+        if request is None:
+            return
+        item_id, question, resume_from = request
+        task = asyncio.create_task(
+            _run_request(context, item_id, question, resume_from, state)
+        )
+        state["task"] = task
         try:
-            await _run_request(
-                context,
-                question,
-                debug,
-                work_item_id=item_id,
-                token=token,
-                resume_from_run_id=resume_from_run_id,
-                set_activity=lambda activity: _set_activity(state, activity),
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            await _TerminalWriter(context.console).print(
+                result_status("Run failed", "failed", detail=str(exc))
             )
         finally:
-            state["token"] = None
+            state["task"] = None
+            _set_activity(state, None)
 
 
 async def _run_request(
     context: CliContext,
+    item_id: str,
     question: str,
-    debug: bool,
-    *,
-    work_item_id: str,
-    token: CancellationToken,
-    resume_from_run_id: str | None = None,
-    set_activity: Callable[[str | None], None] | None = None,
+    resume_from: str | None,
+    state: dict[str, object],
 ) -> None:
-    agent, console = context.agent, context.console
-    writer = _TerminalWriter(console)
-    printed = False
-    failure_reported = False
+    renderer = _RunRenderer(_TerminalWriter(context.console), state)
+    _set_activity(state, status_message(AgentStatus.THINKING))
     try:
-        async for event in agent.ask_stream(
-            question,
-            work_item_id=work_item_id,
-            resume_from_run_id=resume_from_run_id,
-            cancellation=token,
+        async for event in context.agent.ask_stream(
+            question, work_item_id=item_id, resume_from_run_id=resume_from
         ):
-            if event.kind is AgentEventKind.THINKING and not printed:
-                if set_activity is not None:
-                    set_activity("thinking")
-                await writer.print("[running.bold]⠋[/] [thinking]Thinking...[/]")
-            elif event.kind is AgentEventKind.TEXT_DELTA:
-                if set_activity is not None:
-                    set_activity(None)
-                await writer.write_text(str(event.data.get("text", "")))
-                printed = True
-            elif event.kind is AgentEventKind.TOOL_RUNNING:
-                if set_activity is not None:
-                    set_activity(None)
-                await writer.flush()
-                printed = False
-                await writer.print(f"[running]Running tool:[/] {event.data.get('name', 'unknown')}")
-            elif event.kind is AgentEventKind.TOOL_COMPLETED:
-                await writer.print(
-                    f"[{'success' if event.data.get('ok') else 'error'}]Tool "
-                    f"{event.data.get('name')} {'completed' if event.data.get('ok') else 'failed'}[/]"
-                )
-            elif event.kind is AgentEventKind.WAITING_APPROVAL:
-                await writer.flush()
-                await writer.print("[waiting]Waiting for approval.[/] Use [command]/approvals[/], [command]/approve <id>[/], or [command]/reject <id>[/].")
-            elif event.kind is AgentEventKind.FAILED:
-                await writer.flush()
-                await writer.print(f"[error]Error:[/] {event.data.get('error')}")
-                failure_reported = True
-    except (KeyboardInterrupt, asyncio.CancelledError):
-        token.cancel()
-        await writer.flush()
-        await writer.print("[warning]Cancelled.[/]")
-        return
-    except AgentRuntimeError as exc:
-        if not failure_reported:
-            await writer.flush()
-            await writer.print(f"[error]Error:[/] {exc}")
-        return
+            await renderer.handle(event)
+    except asyncio.CancelledError:
+        await renderer.cancel()
+        raise
     except Exception as exc:
-        if not failure_reported:
-            await writer.flush()
-            await writer.print(f"[error]Model or transport error:[/] {exc}")
-        return
+        if not renderer.terminal:
+            await renderer.fail(str(exc) or type(exc).__name__)
     finally:
-        if set_activity is not None:
-            set_activity(None)
-    await writer.flush()
-    if agent.last_answer is not None:
-        await writer.call(render_answer_metadata, console, agent.last_answer, debug)
+        _set_activity(state, None)
 
 
-def _set_activity(state: dict[str, object], activity: str | None) -> None:
-    state["activity"] = activity
+class _RunRenderer:
+    def __init__(self, writer: "_TerminalWriter", state: dict[str, object]) -> None:
+        self.writer = writer
+        self.state = state
+        self.thinking = False
+        self.reasoning_started = False
+        self.answer_started = False
+        self.active_tool: str | None = None
+        self.terminal = False
+
+    async def handle(self, event: AgentEvent) -> None:
+        if event.kind is AgentEventKind.THINKING:
+            await self._thinking(str(event.data.get("text", "")))
+        elif event.kind is AgentEventKind.TEXT_DELTA:
+            await self._answer(str(event.data.get("text", "")))
+        elif event.kind is AgentEventKind.TOOL_RUNNING:
+            await self._tool_running(str(event.data.get("name", "unknown")))
+        elif event.kind is AgentEventKind.TOOL_COMPLETED:
+            await self._tool_completed(event)
+        elif event.terminal:
+            await self._terminal(event)
+
+    async def _thinking(self, text: str) -> None:
+        if not self.thinking:
+            self.thinking = True
+            _set_activity(self.state, status_message(AgentStatus.THINKING))
+        if text:
+            if not self.reasoning_started:
+                await self.writer.print("\n[reasoning]◇ Model reasoning[/]")
+                self.reasoning_started = True
+            await self.writer.write_text(text, style="reasoning")
+
+    async def _finish_thinking(self, status: str = "success") -> None:
+        if not self.thinking:
+            return
+        await self.writer.flush()
+        _set_activity(self.state, None)
+        outcome = {
+            "success": "complete",
+            "failed": "failed",
+            "cancelled": "cancelled",
+        }.get(status, status)
+        label = "Reasoning" if self.reasoning_started else "Thinking"
+        await self.writer.print(result_status(f"{label} {outcome}", status))
+        self.thinking = False
+        self.reasoning_started = False
+
+    async def _answer(self, text: str) -> None:
+        await self._finish_thinking()
+        if not self.answer_started:
+            await self.writer.print("\n[agent.bold]◆ CapsLock[/]")
+            self.answer_started = True
+        await self.writer.write_text(text, style="answer")
+
+    async def _tool_running(self, name: str) -> None:
+        await self._finish_thinking()
+        await self.writer.flush()
+        self.answer_started = False
+        self.active_tool = name
+        status, detail = status_for_event(AgentEventKind.TOOL_RUNNING, {"name": name})
+        _set_activity(self.state, status_message(status, detail))
+
+    async def _tool_completed(self, event: AgentEvent) -> None:
+        await self.writer.flush()
+        _set_activity(self.state, status_message(AgentStatus.ANALYZING))
+        name = str(event.data.get("name", self.active_tool or "unknown"))
+        ok = bool(event.data.get("ok"))
+        duration = int(event.data.get("duration_ms", 0))
+        await self.writer.print(
+            result_status(
+                f"Tool {name} {'completed' if ok else 'failed'}",
+                "success" if ok else "failed",
+                detail=f"{duration}ms",
+            )
+        )
+        self.active_tool = None
+
+    async def _terminal(self, event: AgentEvent) -> None:
+        thinking_status = (
+            "failed"
+            if event.kind is AgentEventKind.FAILED
+            else "cancelled"
+            if event.kind is AgentEventKind.CANCELLED
+            else "success"
+        )
+        await self._finish_thinking(thinking_status)
+        await self.writer.flush()
+        _set_activity(self.state, None)
+        self.terminal = True
+        if event.kind is AgentEventKind.COMPLETED:
+            if not self.answer_started and event.data.get("answer"):
+                await self.writer.print("\n[agent.bold]◆ CapsLock[/]")
+                await self.writer.print(
+                    str(event.data["answer"]),
+                    style="answer",
+                    markup=False,
+                    highlight=False,
+                )
+            usage = event.data.get("usage", {})
+            detail = (
+                f"run {event.run_id[:8]} · {event.data.get('duration_ms', 0)}ms · "
+                f"{usage.get('input_tokens', 0)}/{usage.get('output_tokens', 0)} tokens"
+            )
+            await self.writer.print(
+                result_status("Completed", "success", detail=detail)
+            )
+        elif event.kind is AgentEventKind.WAITING_APPROVAL:
+            count = int(event.data.get("count", len(event.data.get("action_ids", []))))
+            await self.writer.print(
+                result_status(
+                    "Waiting for approval",
+                    "waiting",
+                    detail=f"{count} action(s) · /approvals",
+                )
+            )
+        elif event.kind is AgentEventKind.CANCELLED:
+            error = event.data.get("error", {})
+            await self.writer.print(
+                result_status(
+                    "Cancelled", "cancelled", detail=str(error.get("message", ""))
+                )
+            )
+        else:
+            error = event.data.get("error", {})
+            await self.writer.print(
+                result_status("Failed", "failed", detail=str(error.get("message", "")))
+            )
+
+    async def cancel(self) -> None:
+        if self.terminal:
+            return
+        await self._finish_thinking("cancelled")
+        await self.writer.flush()
+        _set_activity(self.state, None)
+        await self.writer.print(result_status("Cancelled", "cancelled"))
+        self.terminal = True
+
+    async def fail(self, message: str) -> None:
+        await self._finish_thinking("failed")
+        await self.writer.flush()
+        _set_activity(self.state, None)
+        await self.writer.print(result_status("Failed", "failed", detail=message))
+        self.terminal = True
 
 
 class _TerminalWriter:
-    """Write above an active prompt without letting its redraw erase model output."""
+    """Write above an active prompt so redraws cannot erase streamed output."""
 
-    def __init__(self, console: object) -> None:
+    def __init__(self, console: Console) -> None:
         self.console = console
         self.buffer = ""
+        self.style: str | None = None
 
-    async def call(self, function: Callable[..., None], *args: object, **kwargs: object) -> None:
+    async def call(
+        self, function: Callable[..., None], *args: object, **kwargs: object
+    ) -> None:
         def invoke() -> None:
             function(*args, **kwargs)
 
@@ -253,134 +339,60 @@ class _TerminalWriter:
     async def print(self, *args: object, **kwargs: object) -> None:
         await self.call(self.console.print, *args, **kwargs)
 
-    async def write_text(self, text: str) -> None:
+    async def write_text(self, text: str, *, style: str | None = None) -> None:
+        if self.buffer and style != self.style:
+            await self.flush()
+        self.style = style
         self.buffer += text
         while "\n" in self.buffer:
             line, self.buffer = self.buffer.split("\n", 1)
-            await self.print(line, markup=False, highlight=False)
+            await self.print(
+                line,
+                style=self.style,
+                markup=False,
+                highlight=False,
+            )
 
     async def flush(self) -> None:
         if not self.buffer:
+            self.style = None
             return
         text, self.buffer = self.buffer, ""
-        await self.print(text, markup=False, highlight=False)
+        style, self.style = self.style, None
+        await self.print(text, style=style, markup=False, highlight=False)
 
 
-async def _dispatch_tui_command(
-    context: CliContext,
-    text: str,
-    pending: list[tuple[str, str, str | None]],
-    wake: asyncio.Event,
-    state: dict[str, object],
-) -> str:
-    if text == "/exit" or text == "/quit":
-        return "exit"
-    if text.startswith("/approve "):
-        await _approve_tui_action(context, text.partition(" ")[2].strip(), pending, wake)
-        return "handled"
-    if text == "/cancel":
-        token = state.get("token")
-        if isinstance(token, CancellationToken) and not token.cancelled:
-            token.cancel()
-            context.console.print("[warning]Cancelling the active run...[/]")
-        else:
-            context.console.print("[text.secondary]No active run.[/]")
-        return "handled"
-    if text.startswith("/queue"):
-        _queue_command(context, text, pending)
-        return "handled"
-    if text.startswith("/retry "):
-        _retry_command(context, text.partition(" ")[2].strip(), pending, wake)
-        return "handled"
-    return dispatch_slash_command(context, text)
+def _set_activity(state: dict[str, object], activity: str | None) -> None:
+    if not state.get("status_enabled", True):
+        activity = None
+    state["activity"] = activity
+    if activity is None:
+        state["spinner_frame"] = 0
+    inputs = state.get("inputs")
+    app = getattr(inputs, "app", None)
+    if app is not None and app.is_running:
+        app.invalidate()
 
 
-async def _approve_tui_action(
-    context: CliContext,
-    action_id: str,
-    pending: list[tuple[str, str, str | None]],
-    wake: asyncio.Event,
-) -> None:
-    agent, console = context.agent, context.console
-    item = actions.action_coordinator(agent).resolve(action_id)
-    actions.render_approvals(context)
-    choice = select_choice(
-        console,
-        f"{item.type.value} · {item.id[:12]}",
-        (("approve", "Approve and run"), ("later", "Decide later")),
-        escape_key="later",
+async def _retry(context: CliContext, queue: asyncio.Queue, prefix: str) -> None:
+    run = await context.agent.repositories.workflow.retryable_run(
+        context.agent.session_id, prefix
     )
-    if choice != "approve":
-        return
-    result = await actions.action_coordinator(agent, item.run_id).approve_and_execute_async(item.id)
-    console.print(f"[success]Completed:[/] {result.id[:12]} · {item.type.value}")
-    actions.settle_workflow(agent, result.run_id)
-    if item.type in {ActionType.WEB_SEARCH, ActionType.WEB_FETCH}:
-        continuation = agent.enqueue(WEB_CONTINUATION)
-        pending.append((continuation.id, continuation.question, None))
-        wake.set()
+    item = await context.agent.enqueue(
+        run.question, parent_work_item_id=run.work_item_id
+    )
+    await queue.put((item.id, item.question, run.id))
+    context.console.print(f"[waiting]Retry queued:[/] {run.id[:8]}")
 
 
-def _queue_command(
-    context: CliContext,
-    text: str,
-    pending: list[tuple[str, str, str | None]],
-) -> None:
-    parts = text.split()
-    if len(parts) == 1:
-        render_work_queue(context.console, context.agent.store.list_work_items(context.agent.session_id, active_only=True))
-        return
-    if len(parts) == 3 and parts[1] == "cancel":
-        matches = [index for index, item in enumerate(pending) if item[0].startswith(parts[2])]
-        if len(matches) == 1:
-            item_id, _, _ = pending.pop(matches[0])
-        else:
-            queued = [
-                item for item in context.agent.store.list_work_items(context.agent.session_id, active_only=True)
-                if item.status is WorkItemStatus.QUEUED and item.id.startswith(parts[2])
-            ]
-            if len(queued) != 1:
-                raise ValueError("queued work item id is missing or ambiguous")
-            item_id = queued[0].id
-        context.agent.store.update_work_item(item_id, WorkItemStatus.CANCELLED, error="cancelled before start")
-        context.console.print(f"[warning]Cancelled queued work:[/] {item_id[:12]}")
-        return
-    if len(parts) == 4 and parts[1] == "move" and parts[3].isdigit():
-        index = _pending_index(pending, parts[2])
-        item = pending.pop(index)
-        position = max(0, min(len(pending), int(parts[3]) - 1))
-        pending.insert(position, item)
-        context.agent.store.reorder_work_item(item[0], position)
-        context.console.print(f"[success]Moved queued work to position {position + 1}.[/]")
-        return
-    raise ValueError("usage: /queue | /queue cancel <id> | /queue move <id> <position>")
-
-
-def _retry_command(
-    context: CliContext,
-    prefix: str,
-    pending: list[tuple[str, str, str | None]],
-    wake: asyncio.Event,
-) -> None:
-    rows = context.agent.store._connection.execute(
-        "SELECT id,question,status,work_item_id FROM runs WHERE session_id=? AND substr(id,1,?)=? ORDER BY started_at DESC LIMIT 2",
-        (context.agent.session_id, len(prefix), prefix),
-    ).fetchall()
-    if len(rows) != 1:
-        raise ValueError("run id is missing or ambiguous")
-    row = rows[0]
-    if row["status"] not in {"failed", "cancelled", "interrupted"}:
-        raise ValueError(f"run is not retryable: {row['status']}")
-    if context.agent.store.last_stable_step(str(row["id"])) is None:
-        raise ValueError("run has no stable checkpoint")
-    item = context.agent.enqueue(str(row["question"]), parent_work_item_id=row["work_item_id"])
-    pending.append((item.id, item.question, str(row["id"])))
-    wake.set()
-    context.console.print(f"[waiting]Retry queued:[/] {item.question} [text.muted]({item.id[:8]})[/]")
-
-
-def _pending_index(pending: list[tuple[str, str, str | None]], prefix: str) -> int:
-    matches = [index for index, item in enumerate(pending) if item[0].startswith(prefix)]
-    if len(matches) != 1:
-        raise ValueError("queued work item id is missing or ambiguous")
-    return matches[0]
+async def _delete_empty_session(context: CliContext) -> None:
+    memory = context.agent.memory
+    if memory is not None:
+        try:
+            if await memory.list(
+                scope=MemoryScope.SESSION, include_inactive=True, limit=1
+            ):
+                return
+        except Exception:
+            return
+    await context.agent.repositories.sessions.delete_if_empty(context.agent.session_id)

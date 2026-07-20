@@ -8,16 +8,40 @@ from typing import Any
 
 
 TEXT_SUFFIXES = {
-    ".c", ".cpp", ".css", ".csv", ".go", ".h", ".html", ".java",
-    ".js", ".json", ".md", ".py", ".rs", ".sh", ".sql", ".toml",
-    ".ts", ".tsx", ".txt", ".yaml", ".yml",
+    ".c",
+    ".cpp",
+    ".css",
+    ".csv",
+    ".go",
+    ".h",
+    ".html",
+    ".java",
+    ".js",
+    ".json",
+    ".md",
+    ".py",
+    ".rs",
+    ".sh",
+    ".sql",
+    ".toml",
+    ".ts",
+    ".tsx",
+    ".txt",
+    ".yaml",
+    ".yml",
 }
 
 _SECRET_KEY = re.compile(r"(?i)(api[_-]?key|authorization|token|secret|password)")
-_SECRET_TEXT = re.compile(r"(?i)(api[_-]?key|authorization|token|secret|password)\s*[=:]\s*[^\s,]+")
+_SECRET_TEXT = re.compile(
+    r"(?i)(api[_-]?key|authorization|token|secret|password)\s*[=:]\s*[^\s,]+"
+)
 _BEARER_TEXT = re.compile(r"(?i)\b(bearer)\s+[A-Za-z0-9._~+/-]+=*")
-_PRIVATE_KEY = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.DOTALL)
-_KNOWN_TOKEN = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{20,}|AKIA[A-Z0-9]{16})\b")
+_PRIVATE_KEY = re.compile(
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.DOTALL
+)
+_KNOWN_TOKEN = re.compile(
+    r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{20,}|AKIA[A-Z0-9]{16})\b"
+)
 
 
 def redact(value: Any) -> Any:
@@ -41,7 +65,9 @@ def sanitize_memory_text(value: str) -> tuple[str, tuple[str, ...]]:
     """Replace secret-like memory content and report rule names without exposing values."""
     rules: list[str] = []
 
-    def replace(pattern: re.Pattern[str], replacement: str, name: str, text: str) -> str:
+    def replace(
+        pattern: re.Pattern[str], replacement: str, name: str, text: str
+    ) -> str:
         if pattern.search(text):
             rules.append(name)
             return pattern.sub(replacement, text)

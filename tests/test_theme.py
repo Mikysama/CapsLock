@@ -30,6 +30,11 @@ def test_theme_declares_transparent_layers_and_requested_tokens() -> None:
     assert THEME_TOKENS["textPrimary"] == "#DCE6F2"
     assert THEME_TOKENS["borderFocus"] == "#8CB9DC"
     assert THEME_TOKENS["agent"] == "#8FB6D6"
+    assert THEME_TOKENS["reasoning"] != THEME_TOKENS["answer"]
+    assert RICH_THEME.styles["reasoning"].dim
+    assert RICH_THEME.styles["reasoning"].italic
+    assert not RICH_THEME.styles["answer"].dim
+    assert not RICH_THEME.styles["answer"].italic
     component_styles = set(RICH_STYLE_DEFINITIONS) | set(RICH_BOLD_STYLE_DEFINITIONS)
     assert all(RICH_THEME.styles[name].bgcolor is None for name in component_styles)
 
@@ -47,11 +52,15 @@ def test_rich_theme_degrades_between_truecolor_ansi256_and_no_color() -> None:
     assert plain.strip() == "CapsLock ready"
 
 
-def test_no_color_convention_and_prompt_style_use_only_terminal_default_background() -> None:
+def test_no_color_convention_and_prompt_style_use_only_terminal_default_background() -> (
+    None
+):
     assert no_color_enabled({"NO_COLOR": ""})
     assert not no_color_enabled({})
 
     colored = build_prompt_style(no_color=False)
     plain = build_prompt_style(no_color=True)
-    assert all("bg:" not in style or "bg:default" in style for _, style in colored.style_rules)
+    assert all(
+        "bg:" not in style or "bg:default" in style for _, style in colored.style_rules
+    )
     assert all("#" not in style for _, style in plain.style_rules)

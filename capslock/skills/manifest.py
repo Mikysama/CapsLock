@@ -28,7 +28,9 @@ class _UniqueKeyLoader(yaml.SafeLoader):
     pass
 
 
-def _construct_mapping(loader: _UniqueKeyLoader, node: yaml.MappingNode, deep: bool = False) -> dict[object, object]:
+def _construct_mapping(
+    loader: _UniqueKeyLoader, node: yaml.MappingNode, deep: bool = False
+) -> dict[object, object]:
     loader.flatten_mapping(node)
     output: dict[object, object] = {}
     for key_node, value_node in node.value:
@@ -36,7 +38,9 @@ def _construct_mapping(loader: _UniqueKeyLoader, node: yaml.MappingNode, deep: b
         try:
             duplicate = key in output
         except TypeError as exc:
-            raise SkillValidationError("Skill frontmatter keys must be scalar values") from exc
+            raise SkillValidationError(
+                "Skill frontmatter keys must be scalar values"
+            ) from exc
         if duplicate:
             raise SkillValidationError(f"Duplicate Skill frontmatter field: {key}")
         output[key] = loader.construct_object(value_node, deep=deep)
@@ -71,9 +75,13 @@ class SkillPackage:
 
     def resource(self, requested_path: str) -> SkillResource:
         normalized = _normalized_resource_path(requested_path)
-        resource = next((item for item in self.resources if item.path == normalized), None)
+        resource = next(
+            (item for item in self.resources if item.path == normalized), None
+        )
         if resource is None:
-            raise SkillValidationError(f"Skill resource does not exist: {requested_path}")
+            raise SkillValidationError(
+                f"Skill resource does not exist: {requested_path}"
+            )
         return resource
 
 
@@ -94,7 +102,9 @@ def _load_skill_package(root: Path, *, scope: str) -> SkillPackage:
     if skill_path.is_symlink() or not skill_path.is_file():
         raise SkillValidationError(f"Skill package requires SKILL.md: {root}")
     if skill_path.stat().st_size > MAX_SKILL_BYTES:
-        raise SkillValidationError(f"SKILL.md exceeds {MAX_SKILL_BYTES} bytes: {skill_path}")
+        raise SkillValidationError(
+            f"SKILL.md exceeds {MAX_SKILL_BYTES} bytes: {skill_path}"
+        )
     try:
         text = skill_path.read_text(encoding="utf-8")
     except (OSError, UnicodeError) as exc:
@@ -102,7 +112,9 @@ def _load_skill_package(root: Path, *, scope: str) -> SkillPackage:
     frontmatter, instructions = _parse_skill_document(text)
     unknown = sorted(str(item) for item in set(frontmatter) - FRONTMATTER_FIELDS)
     if unknown:
-        raise SkillValidationError(f"Unsupported Skill frontmatter fields: {', '.join(unknown)}")
+        raise SkillValidationError(
+            f"Unsupported Skill frontmatter fields: {', '.join(unknown)}"
+        )
 
     name = _required_string(frontmatter, "name")
     if len(name) > 64 or not NAME_PATTERN.fullmatch(name):
@@ -110,7 +122,9 @@ def _load_skill_package(root: Path, *, scope: str) -> SkillPackage:
             "Skill name must be 1-64 lowercase letters, numbers, or single hyphen-separated words"
         )
     if root.name != name:
-        raise SkillValidationError(f"Skill directory must match frontmatter name: {name}")
+        raise SkillValidationError(
+            f"Skill directory must match frontmatter name: {name}"
+        )
     description = _required_string(frontmatter, "description").strip()
     if not description or len(description) > MAX_DESCRIPTION_CHARS:
         raise SkillValidationError("Skill description must contain 1-1024 characters")
@@ -120,7 +134,9 @@ def _load_skill_package(root: Path, *, scope: str) -> SkillPackage:
     license_value = _optional_string(frontmatter, "license")
     compatibility = _optional_string(frontmatter, "compatibility")
     if compatibility is not None and len(compatibility) > MAX_COMPATIBILITY_CHARS:
-        raise SkillValidationError("Skill compatibility must contain at most 500 characters")
+        raise SkillValidationError(
+            "Skill compatibility must contain at most 500 characters"
+        )
     metadata = _metadata(frontmatter.get("metadata"))
     paths = _package_files(root)
     resources = tuple(
@@ -153,7 +169,9 @@ def _parse_skill_document(text: str) -> tuple[dict[str, object], str]:
     try:
         closing = lines.index("---", 1)
     except ValueError as exc:
-        raise SkillValidationError("SKILL.md frontmatter is missing its closing ---") from exc
+        raise SkillValidationError(
+            "SKILL.md frontmatter is missing its closing ---"
+        ) from exc
     try:
         raw = yaml.load("\n".join(lines[1:closing]), Loader=_UniqueKeyLoader)
     except SkillValidationError:
@@ -161,7 +179,9 @@ def _parse_skill_document(text: str) -> tuple[dict[str, object], str]:
     except yaml.YAMLError as exc:
         raise SkillValidationError("Invalid SKILL.md YAML frontmatter") from exc
     if not isinstance(raw, dict) or not all(isinstance(key, str) for key in raw):
-        raise SkillValidationError("Skill frontmatter must be a string-keyed YAML mapping")
+        raise SkillValidationError(
+            "Skill frontmatter must be a string-keyed YAML mapping"
+        )
     return raw, "\n".join(lines[closing + 1 :])
 
 
@@ -177,7 +197,9 @@ def _optional_string(raw: dict[str, object], key: str) -> str | None:
     if value is None:
         return None
     if not isinstance(value, str) or not value.strip():
-        raise SkillValidationError(f"Skill frontmatter field {key} must be a non-empty string")
+        raise SkillValidationError(
+            f"Skill frontmatter field {key} must be a non-empty string"
+        )
     return value.strip()
 
 
@@ -187,27 +209,39 @@ def _metadata(value: object) -> dict[str, str]:
     if not isinstance(value, dict) or not all(
         isinstance(key, str) and isinstance(item, str) for key, item in value.items()
     ):
-        raise SkillValidationError("Skill metadata must map string keys to string values")
+        raise SkillValidationError(
+            "Skill metadata must map string keys to string values"
+        )
     return dict(value)
 
 
 def _package_files(root: Path) -> tuple[Path, ...]:
     paths: list[Path] = []
     total = 0
-    for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
+    for path in sorted(
+        root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()
+    ):
         if path.is_symlink():
-            raise SkillValidationError(f"Skill package must not contain symlinks: {path}")
+            raise SkillValidationError(
+                f"Skill package must not contain symlinks: {path}"
+            )
         if path.is_dir():
             continue
         if not path.is_file():
-            raise SkillValidationError(f"Skill package contains a non-regular file: {path}")
+            raise SkillValidationError(
+                f"Skill package contains a non-regular file: {path}"
+            )
         size = path.stat().st_size
         if size > MAX_RESOURCE_BYTES and path.name != "SKILL.md":
-            raise SkillValidationError(f"Skill resource exceeds {MAX_RESOURCE_BYTES} bytes: {path}")
+            raise SkillValidationError(
+                f"Skill resource exceeds {MAX_RESOURCE_BYTES} bytes: {path}"
+            )
         total += size
         paths.append(path)
     if len(paths) - 1 > MAX_RESOURCES:
-        raise SkillValidationError(f"Skill cannot contain more than {MAX_RESOURCES} resources")
+        raise SkillValidationError(
+            f"Skill cannot contain more than {MAX_RESOURCES} resources"
+        )
     if total > MAX_PACKAGE_BYTES:
         raise SkillValidationError(f"Skill package exceeds {MAX_PACKAGE_BYTES} bytes")
     return tuple(paths)
@@ -215,8 +249,15 @@ def _package_files(root: Path) -> tuple[Path, ...]:
 
 def _normalized_resource_path(value: str) -> str:
     candidate = PurePosixPath(value)
-    if not value or candidate.is_absolute() or ".." in candidate.parts or candidate == PurePosixPath("SKILL.md"):
-        raise SkillValidationError(f"Skill resource must use a package-relative path: {value}")
+    if (
+        not value
+        or candidate.is_absolute()
+        or ".." in candidate.parts
+        or candidate == PurePosixPath("SKILL.md")
+    ):
+        raise SkillValidationError(
+            f"Skill resource must use a package-relative path: {value}"
+        )
     return candidate.as_posix()
 
 
