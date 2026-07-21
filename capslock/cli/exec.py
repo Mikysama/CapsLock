@@ -7,13 +7,14 @@ import json
 import sys
 from typing import TextIO
 
-from ..domain import AgentEvent, AgentEventKind
+from ..domain import AgentEvent, AgentEventKind, RunLimits, RunMode
 from ..status import AgentStatus, status_for_event
 from .context import CliContext
 from .status import AsyncStatusRenderer
 
 EXEC_EVENT_SCHEMA_VERSION = 2
 APPROVAL_REQUIRED_EXIT = 3
+GOVERNANCE_STOP_EXIT = 4
 
 
 async def run_exec(
@@ -24,6 +25,7 @@ async def run_exec(
     spinner: bool = True,
     quiet: bool = False,
     status_renderer: AsyncStatusRenderer | None = None,
+    limits: RunLimits | None = None,
 ) -> int:
     prompt = question if question is not None else sys.stdin.read()
     if not prompt.strip():
@@ -42,7 +44,12 @@ async def run_exec(
         )
         await renderer.start()
     try:
-        async for event in context.agent.ask_stream(prompt):
+        stream = (
+            context.agent.ask_stream(prompt, mode=RunMode.EXEC, limits=limits)
+            if limits is not None or hasattr(context.agent, "default_limits")
+            else context.agent.ask_stream(prompt)
+        )
+        async for event in stream:
             if json_events:
                 record = {
                     "schema_version": EXEC_EVENT_SCHEMA_VERSION,
@@ -68,6 +75,8 @@ async def run_exec(
                 exit_code = 1
             elif event.kind.value == "cancelled":
                 exit_code = 130
+            elif event.kind is AgentEventKind.STOPPED:
+                exit_code = GOVERNANCE_STOP_EXIT
             terminal_seen = terminal_seen or event.terminal
     except asyncio.CancelledError:
         if renderer is not None:
@@ -122,6 +131,9 @@ class _ExecStreamRenderer:
             AgentEventKind.QUEUED,
             AgentEventKind.THINKING,
             AgentEventKind.TOOL_COMPLETED,
+            AgentEventKind.BUDGET_UPDATED,
+            AgentEventKind.BUDGET_EXTENDED,
+            AgentEventKind.LIMIT_REACHED,
         }:
             if self.status.running:
                 await self.status.update(state, detail)
@@ -143,6 +155,9 @@ class _ExecStreamRenderer:
             await self.status.stop(AgentStatus.DONE)
         elif event.kind is AgentEventKind.CANCELLED:
             await self.status.stop(AgentStatus.CANCELLED)
+            self._print_error(event)
+        elif event.kind is AgentEventKind.STOPPED:
+            await self.status.stop(AgentStatus.STOPPED)
             self._print_error(event)
         elif event.kind is AgentEventKind.FAILED:
             await self.status.stop(AgentStatus.ERROR)

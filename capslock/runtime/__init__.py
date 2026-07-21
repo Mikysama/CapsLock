@@ -11,6 +11,7 @@ from .model import (
     ModelUsage,
 )
 from .routing import ModelRouter
+from .governance import RunGovernor
 
 __all__ = [
     "AgentRuntimeError",
@@ -23,4 +24,5 @@ __all__ = [
     "ModelUsage",
     "WorkspaceAgent",
     "ModelRouter",
+    "RunGovernor",
 ]

@@ -19,13 +19,27 @@ from capslock.cli.diagnostics import delete_session
 from capslock.cli.diagnostics import select_session as select_saved_session
 from capslock.cli.dispatch import dispatch_slash_command
 from capslock.cli.exec import run_exec
-from capslock.cli.prompt import prompt_footer, select_session
-from capslock.cli.tui import _RunRenderer, _TerminalWriter, _set_activity
+from capslock.cli.prompt import (
+    prompt_footer,
+    select_action_decision,
+    select_permission_mode,
+    select_session,
+)
+from capslock.cli.tui import (
+    _RunRenderer,
+    _TerminalWriter,
+    _authorize_action,
+    _set_activity,
+)
 from capslock.cli.views.common import CAPSLOCK_ART, startup
 from capslock.cli.views.workflow import StatusView, render_status, result_status
 from capslock.domain import (
     AgentEvent,
     AgentEventKind,
+    ApprovalDecision,
+    ActionRecord,
+    ActionStatus,
+    ActionType,
     SessionInfo,
     SessionTitleSource,
     WorkItemInfo,
@@ -83,7 +97,19 @@ def test_parser_exposes_only_v2_top_level_commands() -> None:
     choices = next(
         action.choices for action in parser._actions if getattr(action, "choices", None)
     )
-    assert set(choices) == {"exec", "resume", "session", "sessions", "doctor"}
+    assert set(choices) == {
+        "exec",
+        "resume",
+        "session",
+        "sessions",
+        "doctor",
+        "init",
+        "config",
+        "credentials",
+        "backup",
+        "export",
+        "import",
+    }
     delete = parser.parse_args(["session", "delete"])
     assert delete.command == "session"
     assert delete.sessions_command == "delete"
@@ -345,6 +371,164 @@ def test_session_selector_uses_arrow_keys_and_enter(tmp_path: Path) -> None:
         with create_app_session(input=pipe, output=DummyOutput()):
             selected = select_session(sessions, width=120)
     assert selected == "b" * 32
+
+
+def test_permission_selector_uses_current_default_and_arrow_keys() -> None:
+    with create_pipe_input() as pipe:
+        pipe.send_text("\x1b[B\r")
+        with create_app_session(input=pipe, output=DummyOutput()):
+            selected = select_permission_mode(PermissionMode.APPROVE_FOR_ME)
+    assert selected is PermissionMode.ASK_FOR_APPROVAL
+
+
+def test_action_selector_uses_arrow_keys_and_enter() -> None:
+    action = ActionRecord(
+        "action-id",
+        "session",
+        "run",
+        ActionType.FILE_EDIT,
+        ActionStatus.PENDING,
+        "Update README",
+        {"path": "README.md", "diff": "change"},
+        None,
+        None,
+        "2026-07-21T00:00:00+00:00",
+        risk_level="high",
+    )
+    with create_pipe_input() as pipe:
+        pipe.send_text("\x1b[B\r")
+        with create_app_session(input=pipe, output=DummyOutput()):
+            selected = select_action_decision(action)
+    assert selected == "approve"
+
+
+def test_action_selector_defaults_to_reject() -> None:
+    action = ActionRecord(
+        "action-id",
+        "session",
+        "run",
+        ActionType.FILE_EDIT,
+        ActionStatus.PENDING,
+        "Update README",
+        {"path": "README.md"},
+        None,
+        None,
+        "2026-07-21T00:00:00+00:00",
+        risk_level="high",
+    )
+    with create_pipe_input() as pipe:
+        pipe.send_text("\r")
+        with create_app_session(input=pipe, output=DummyOutput()):
+            selected = select_action_decision(action)
+    assert selected is ApprovalDecision.REJECT
+
+
+def test_bare_permissions_opens_selector(monkeypatch: pytest.MonkeyPatch) -> None:
+    selected: list[str] = []
+
+    class Settings:
+        async def set_workspace(self, key: str, value: str) -> None:
+            selected.extend((key, value))
+
+    agent = SimpleNamespace(
+        permission_mode=PermissionMode.APPROVE_FOR_ME,
+        repositories=SimpleNamespace(settings=Settings()),
+    )
+    monkeypatch.setattr(
+        "capslock.cli.actions.select_permission_mode",
+        lambda current: PermissionMode.ASK_FOR_APPROVAL,
+    )
+    console, output = console_buffer()
+    asyncio.run(dispatch_slash_command(CliContext(console, agent), "/permissions"))
+    assert agent.permission_mode is PermissionMode.ASK_FOR_APPROVAL
+    assert selected == ["permission_mode", "ask_for_approval"]
+    assert "Permission mode: ask_for_approval" in output.getvalue()
+
+
+def test_inline_action_authorizer_returns_selected_decision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    action = ActionRecord(
+        "action-id",
+        "session",
+        "run",
+        ActionType.COMMAND,
+        ActionStatus.PENDING,
+        "Run tests",
+        {"template": "pytest"},
+        None,
+        None,
+        "2026-07-21T00:00:00+00:00",
+        risk_level="high",
+    )
+
+    async def run_selector(function, **kwargs):
+        assert kwargs == {"in_executor": True}
+        return function()
+
+    monkeypatch.setattr("capslock.cli.tui.run_in_terminal", run_selector)
+    monkeypatch.setattr(
+        "capslock.cli.tui.select_action_decision",
+        lambda proposal: ApprovalDecision.APPROVE,
+    )
+    console, _ = console_buffer()
+    context = CliContext(console, SimpleNamespace())
+    decision = asyncio.run(_authorize_action(context, action))
+    assert decision is ApprovalDecision.APPROVE
+
+
+def test_inline_action_authorizer_runs_choice_outside_active_event_loop() -> None:
+    action = ActionRecord(
+        "action-id",
+        "session",
+        "run",
+        ActionType.FILE_CREATE,
+        ActionStatus.PENDING,
+        "Create a large file whose payload must stay hidden",
+        {"path": "secret.py", "after_content": "sensitive payload"},
+        None,
+        None,
+        "2026-07-21T00:00:00+00:00",
+        risk_level="high",
+    )
+    console, output = console_buffer()
+    with create_pipe_input() as pipe:
+        pipe.send_text("\x1b[B\r")
+        with create_app_session(input=pipe, output=DummyOutput()):
+            decision = asyncio.run(
+                _authorize_action(CliContext(console, SimpleNamespace()), action)
+            )
+    assert decision is ApprovalDecision.APPROVE
+    assert "sensitive payload" not in output.getvalue()
+    assert "secret.py" not in output.getvalue()
+
+
+@pytest.mark.parametrize("error_type", [EOFError, KeyboardInterrupt])
+def test_inline_action_authorizer_cancellation_rejects(
+    monkeypatch: pytest.MonkeyPatch, error_type: type[BaseException]
+) -> None:
+    action = ActionRecord(
+        "action-id",
+        "session",
+        "run",
+        ActionType.COMMAND,
+        ActionStatus.PENDING,
+        "Run tests",
+        {"template": "pytest"},
+        None,
+        None,
+        "2026-07-21T00:00:00+00:00",
+    )
+
+    async def cancelled(function, **kwargs):
+        raise error_type()
+
+    monkeypatch.setattr("capslock.cli.tui.run_in_terminal", cancelled)
+    console, _ = console_buffer()
+    decision = asyncio.run(
+        _authorize_action(CliContext(console, SimpleNamespace()), action)
+    )
+    assert decision is ApprovalDecision.REJECT
 
 
 def test_resume_entry_uses_interactive_session_selector(tmp_path: Path) -> None:

@@ -53,6 +53,9 @@ jobs:
           wheel=$(find dist -maxdepth 1 -type f -name '*.whl')
           sdist=$(find dist -maxdepth 1 -type f -name '*.tar.gz')
           python scripts/verify_release.py --dist "$wheel" --dist "$sdist"
+          version=$(python -c 'from capslock import __version__; print(__version__)')
+          python -m pip_audit --format cyclonedx-json --output "dist/capslock-$version.sbom.json"
+          python scripts/write_checksums.py --output dist/SHA256SUMS "$wheel" "$sdist" "dist/capslock-$version.sbom.json"
       - name: Smoke test editable installation outside checkout
         env:
           EXPECTED_SOURCE: ${{ github.workspace }}/capslock/__init__.py
@@ -63,7 +66,8 @@ jobs:
           cd "$RUNNER_TEMP"
           python -c 'import os; from pathlib import Path; import capslock; assert Path(capslock.__file__).resolve() == Path(os.environ["EXPECTED_SOURCE"]).resolve()'
           capslock --version | grep -Fx "capslock $expected"
-          capslock --workspace "$workspace" doctor
+          CAPSLOCK_API_KEY=smoke capslock --workspace "$workspace" init --non-interactive
+          CAPSLOCK_API_KEY=smoke capslock --workspace "$workspace" doctor
       - name: Smoke test wheel installation outside checkout
         run: |
           expected=$(python -c 'from capslock import __version__; print(__version__)')
@@ -76,7 +80,8 @@ jobs:
           cd "$RUNNER_TEMP"
           EXPECTED_VERSION="$expected" "$RUNNER_TEMP/wheel-venv/bin/python" -c 'import os; from importlib.metadata import version; from pathlib import Path; import capslock; assert version("capslock") == os.environ["EXPECTED_VERSION"]; assert "site-packages" in Path(capslock.__file__).as_posix()'
           "$RUNNER_TEMP/wheel-venv/bin/capslock" --version | grep -Fx "capslock $expected"
-          "$RUNNER_TEMP/wheel-venv/bin/capslock" --workspace "$workspace" doctor
+          CAPSLOCK_API_KEY=smoke "$RUNNER_TEMP/wheel-venv/bin/capslock" --workspace "$workspace" init --non-interactive
+          CAPSLOCK_API_KEY=smoke "$RUNNER_TEMP/wheel-venv/bin/capslock" --workspace "$workspace" doctor
           "$RUNNER_TEMP/wheel-venv/bin/python" -m pip check
 
   security:
@@ -120,13 +125,16 @@ jobs:
           echo "notes=$notes" >> "$GITHUB_OUTPUT"
       - name: Build final distributions
         run: |
-          python -m pip install --upgrade pip build twine
+          python -m pip install --upgrade pip build twine pip-audit
           rm -rf build dist capslock.egg-info
           python -m build
           python -m twine check dist/*
           wheel=$(find dist -maxdepth 1 -type f -name '*.whl')
           sdist=$(find dist -maxdepth 1 -type f -name '*.tar.gz')
           python scripts/verify_release.py --tag "$GITHUB_REF_NAME" --dist "$wheel" --dist "$sdist"
+          version=$(python -c 'from capslock import __version__; print(__version__)')
+          python -m pip_audit --format cyclonedx-json --output "dist/capslock-$version.sbom.json"
+          python scripts/write_checksums.py --output dist/SHA256SUMS "$wheel" "$sdist" "dist/capslock-$version.sbom.json"
       - name: Publish GitHub Release assets
         uses: softprops/action-gh-release@v2
         with:

@@ -4,6 +4,45 @@
 
 ## [Unreleased]
 
+## [1.10.0] - 2026-07-21
+
+### Added
+
+- 新增交互式 32 工具轮次软限制、固定增量续期和停止总结。
+- 新增 `capslock exec` 的工具轮次、工具调用数、时长、token 和美元硬预算参数。
+- 新增规范化脱敏工具指纹、连续重复/短周期/失败重试循环检测和结构化 `stopped` 事件。
+- 新增 run 治理快照、lineage 累计预算、schema v4 迁移和 portable archive v2 兼容导入。
+- TUI 在需要审批的工具调用内阻塞，只弹出是否执行的拒绝/执行选择框且不输出动作载荷，决策结果返回同一个 run；裸 `/permissions` 弹出三档权限选择框。
+
+### Changed
+
+- `max_turns` 语义改为 `max_tool_rounds`；旧配置键和环境变量保留弃用兼容。
+- JSONL schema 保持 v2，新增预算事件与稳定停止原因；预算或循环停止退出码为 4。
+
+### Fixed
+
+- 审批选择器改在终端工作线程运行，避免活动 TUI 事件循环中触发 `asyncio.run() cannot be called from a running event loop`。
+
+## [1.9.0] - 2026-07-20
+
+### Added
+
+- 新增交互/非交互 `capslock init`、版本化配置校验迁移和环境变量/keyring 凭据引用。
+- 新增本机 `backup create/list/verify/restore`，以及可脱敏、校验、幂等合并的 portable `export/import`。
+- 新增结构化 `doctor --json/--strict/--network/--fix`，覆盖配置、凭据、数据库、MCP、Skill 和未完成生命周期操作。
+- 新增 import 批次、实体映射和确定性 ID 冲突记录，以及 `/queue start` 显式恢复导入队列。
+
+### Changed
+
+- workspace 与 memory fresh-v2 schema 升至 v3；v1.8 schema v2 在一致性备份后自动迁移。
+- provider 配置使用 `credential = "env:NAME"` 或 `credential = "keyring:NAME"`；旧 `api_key_env` 自动迁移。
+- 导入的 approved/running action 重置为 pending，并在执行前重新通过当前安全策略和人工确认。
+
+### Security
+
+- portable export 不含模型配置、keyring、`.env`、MCP env 值、embedding 同意或向量，并拒绝路径穿越、符号链接、特殊文件、超限和校验失败的归档。
+- 导入的已完成副作用仅作为历史记录，不能在目标工作区执行 undo；任何未完成工作都不会自动启动。
+
 ## [1.8.0] - 2026-07-20
 
 ### Added

@@ -192,7 +192,7 @@ def test_session_export_v2_includes_all_snapshot_tables(tmp_path: Path) -> None:
             target = await manager.export(session.id, "exports/session")
             document = json.loads((target / "session.json").read_text(encoding="utf-8"))
             assert document["format"] == "capslock-session-export"
-            assert document["version"] == 2
+            assert document["version"] == 3
             assert document["sessions"][0]["id"] == session.id
             assert document["messages"][0]["content"] == "Export this"
             assert document["runs"][0]["work_item_id"] == prepared.work_item.id

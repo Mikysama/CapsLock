@@ -5,13 +5,14 @@ from __future__ import annotations
 import asyncio
 import shlex
 
-from ..domain import ActionStatus
+from ..domain import ActionRecord, ActionStatus
 from ..layout import ProjectLayout
 from ..mcp import McpRegistry
 from ..permissions import PermissionMode
 from .context import CliContext
 from .views.actions import render_approvals as render_approval_view
 from .views.actions import render_sources as render_source_view
+from .prompt import select_permission_mode
 
 
 async def render_approvals(context: CliContext) -> None:
@@ -66,6 +67,33 @@ async def reject_action(context: CliContext, prefix: str) -> None:
         context.console.print(f"[error]Error:[/] {exc}")
 
 
+async def apply_action_decision(
+    context: CliContext, action: ActionRecord, decision: str
+) -> None:
+    coordinator = context.agent.action_factory("cli").for_run(action.run_id)
+    if decision == "later":
+        context.console.print(f"[waiting]Action remains pending:[/] {action.id[:12]}")
+        return
+    if decision == "reject":
+        await coordinator.reject(action.id)
+        await context.agent.workflow.settle_approval(
+            context.agent.session_id, action.run_id
+        )
+        context.console.print(
+            f"[warning]Rejected {action.type.value}:[/] {action.id[:12]}"
+        )
+        return
+    if decision != "approve":
+        raise ValueError(f"unsupported action decision: {decision}")
+    result = await coordinator.approve_and_execute(action.id)
+    context.console.print(
+        f"[success]{result.status.value}:[/] {result.id[:12]} {result.result or ''}"
+    )
+    await context.agent.workflow.settle_approval(
+        context.agent.session_id, action.run_id
+    )
+
+
 async def undo(context: CliContext) -> None:
     try:
         action = await context.agent.action_factory("cli").reverse_last_file_action()
@@ -88,10 +116,18 @@ async def set_permission_mode(context: CliContext, value: str) -> None:
 
 async def permissions(context: CliContext, text: str) -> None:
     parts = shlex.split(text)
+    if len(parts) == 1:
+        try:
+            selected = await asyncio.to_thread(
+                select_permission_mode, context.agent.permission_mode
+            )
+        except (EOFError, KeyboardInterrupt):
+            context.console.print("[waiting]Permission mode unchanged.[/]")
+            return
+        await set_permission_mode(context, selected.value)
+        return
     if len(parts) != 2:
-        context.console.print(
-            f"permission_mode={context.agent.permission_mode.value}\nusage: /permissions <full|approve|ask>"
-        )
+        context.console.print("[error]Usage:[/] /permissions [full|approve|ask]")
         return
     await set_permission_mode(context, parts[1])
 

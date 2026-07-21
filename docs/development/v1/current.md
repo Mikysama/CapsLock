@@ -8,6 +8,7 @@ CLI package
  ├─ commands.py / dispatch.py # 声明式命令目录、alias 与路由
  ├─ actions.py                # ActionCoordinator 的 CLI 适配器
  ├─ diagnostics.py            # sessions、doctor 与 provider 脱敏诊断
+ ├─ setup.py / lifecycle.py   # init、配置/凭据、备份与 portable transfer
  ├─ prompt.py                 # 输入、补全、按键与输入区边框
  └─ views/                    # typed Rich 输出
       │
@@ -54,6 +55,7 @@ SkillRegistry / progressive loading
 - `observability.py`：脱敏事件日志。
 - `layout.py`：canonical 项目/用户目录契约和冲突检测。
 - `config.py`：旧单模型兼容配置、provider/profile/role 路由和预算配置。
+- `credentials.py`、`lifecycle.py`：env/keyring 引用、回滚快照、脱敏归档与安全合并。
 - `cli/`：组合根、显式上下文、TUI/exec、命令与 alias 路由、动作适配、诊断、输入和 Rich 展示。
 
 ## 验证
@@ -67,7 +69,7 @@ SkillRegistry / progressive loading
 - CLI 版本、启动、`doctor` 脱敏、工作区 `.env` 加载与配置优先级。
 - CLI 输入区上下边框、父命令子树、完整叶子命令候选以及 `/quit`、`/session` alias。
 - Web/MCP 权限、真实 stdio server、超时/崩溃恢复和子进程清理。
-- fresh-v2 工作区与用户记忆 schema v1 到 v2 的一致性备份、迁移、失败回滚和幂等启动。
+- fresh-v2 workspace schema v1→v2→v3→v4 与 memory schema v1→v2→v3 的一致性备份、迁移、失败恢复和幂等启动。
 - 动作状态转换、跨会话访问、模型 adapter、当前 run 事件作用域和资源关闭。
 - v1.0–v1.3.2 的路径、证据、会话、编辑、命令、来源、权限和主题回归。
 - v1.4.0 的跨工作区记忆作用域、FTS、脱敏、生命周期、导入导出、模型引用和失效上下文隔离。
@@ -77,6 +79,8 @@ SkillRegistry / progressive loading
 - v1.6.0 的候选策略、审核/自动采纳、来源失效、混合召回、排名解释和本地嵌入降级。
 - v1.7.0 的流式事件、取消、工作项、稳定点恢复、审批风险、会话治理、JSONL 和响应式状态视图。
 - v1.8.0 的多 provider 路由、上下文筛选、重试/同策略降级、预算、逐模型统计、外部 embedding 同意和固定评测。
+- v1.9.0 的配置 v0→v1、双库 schema v2→v3、初始化、归档校验、幂等合并、重新审批和 Doctor 修复。
+- v1.10.0 的配置 v1→v2、workspace schema v3→v4、软/硬预算、循环检测、lineage 恢复和结构化停止。
 - `.capslock` 新旧布局冲突、dry-run、幂等迁移、目录合并、符号链接拒绝、shell-only 用户路径、state/local 读取隔离和 Skill 强制确认。
 
 运行：
@@ -90,7 +94,7 @@ python scripts/check_repository.py
 python -m build
 python -m twine check dist/*
 python scripts/evaluate_agent.py --mode deterministic
-python scripts/verify_release.py --tag v1.8.0
+python scripts/verify_release.py --tag v1.10.0
 capslock doctor
 python -m capslock --version
 ```

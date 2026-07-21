@@ -15,6 +15,7 @@ class WorkItemStatus(StrEnum):
     FAILED = "failed"
     CANCELLED = "cancelled"
     INTERRUPTED = "interrupted"
+    STOPPED = "stopped"
 
 
 class RunStepKind(StrEnum):
@@ -36,10 +37,14 @@ class AgentEventKind(StrEnum):
     TEXT_DELTA = "text_delta"
     TOOL_RUNNING = "tool_running"
     TOOL_COMPLETED = "tool_completed"
+    BUDGET_UPDATED = "budget_updated"
+    LIMIT_REACHED = "limit_reached"
+    BUDGET_EXTENDED = "budget_extended"
     WAITING_APPROVAL = "waiting_approval"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    STOPPED = "stopped"
 
 
 TERMINAL_EVENT_KINDS = frozenset(
@@ -48,6 +53,7 @@ TERMINAL_EVENT_KINDS = frozenset(
         AgentEventKind.COMPLETED,
         AgentEventKind.FAILED,
         AgentEventKind.CANCELLED,
+        AgentEventKind.STOPPED,
     }
 )
 
@@ -111,3 +117,4 @@ class RunInfo:
     error_message: str | None = None
     parent_run_id: str | None = None
     resume_from_step_id: str | None = None
+    stop_reason: str | None = None

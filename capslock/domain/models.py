@@ -40,6 +40,10 @@ class ModelRoutingError(RuntimeError):
 class ModelBudgetExceeded(ModelRoutingError):
     code = ModelErrorCode.BUDGET_EXCEEDED
 
+    def __init__(self, message: str, *, limit_type: str = "tokens") -> None:
+        super().__init__(message)
+        self.limit_type = limit_type
+
 
 class ModelDataPolicyMismatch(ModelRoutingError):
     code = ModelErrorCode.DATA_POLICY_MISMATCH

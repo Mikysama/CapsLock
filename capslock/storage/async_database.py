@@ -108,11 +108,51 @@ class AsyncDatabase:
                     raise IncompatibleDatabaseError(
                         f"no {self.label} database migration from schema {current}"
                     )
-                await self.connection.executescript(
-                    "BEGIN IMMEDIATE;\n"
-                    + script
-                    + f"\nPRAGMA user_version={current + 1};\nCOMMIT;"
-                )
+                if current == 2 and self.label == "workspace":
+                    columns = {
+                        str(row[1])
+                        for row in await (
+                            await self.connection.execute("PRAGMA table_info(actions)")
+                        ).fetchall()
+                    }
+                    for name, definition in (
+                        (
+                            "import_id",
+                            "TEXT REFERENCES lifecycle_imports(id) ON DELETE SET NULL",
+                        ),
+                        (
+                            "historical_only",
+                            "INTEGER NOT NULL DEFAULT 0 CHECK(historical_only IN (0,1))",
+                        ),
+                        (
+                            "requires_reapproval",
+                            "INTEGER NOT NULL DEFAULT 0 CHECK(requires_reapproval IN (0,1))",
+                        ),
+                    ):
+                        if name not in columns:
+                            await self.connection.execute(
+                                f"ALTER TABLE actions ADD COLUMN {name} {definition}"
+                            )
+                rebuild_foreign_keys = current == 3 and self.label == "workspace"
+                if rebuild_foreign_keys:
+                    await self.connection.execute("PRAGMA foreign_keys=OFF")
+                try:
+                    await self.connection.executescript(
+                        "BEGIN IMMEDIATE;\n"
+                        + script
+                        + f"\nPRAGMA user_version={current + 1};\nCOMMIT;"
+                    )
+                finally:
+                    if rebuild_foreign_keys:
+                        await self.connection.execute("PRAGMA foreign_keys=ON")
+                if rebuild_foreign_keys:
+                    violations = await (
+                        await self.connection.execute("PRAGMA foreign_key_check")
+                    ).fetchall()
+                    if violations:
+                        raise IncompatibleDatabaseError(
+                            "workspace schema migration produced invalid references"
+                        )
                 current += 1
         except BaseException as exc:
             await self.connection.rollback()

@@ -160,6 +160,8 @@ class SnapshotRepository(Repository):
         "sources",
         "tool_calls",
         "citations",
+        "run_governance",
+        "tool_call_attempts",
     )
 
     async def session(self, session_id: str) -> dict[str, Any]:
@@ -167,7 +169,14 @@ class SnapshotRepository(Repository):
         for table in self.TABLES:
             if table == "sessions":
                 query = "SELECT * FROM sessions WHERE id=?"
-            elif table in {"run_steps", "run_events", "tool_calls", "citations"}:
+            elif table in {
+                "run_steps",
+                "run_events",
+                "tool_calls",
+                "citations",
+                "run_governance",
+                "tool_call_attempts",
+            }:
                 query = f"SELECT t.* FROM {table} t JOIN runs r ON r.id=t.run_id WHERE r.session_id=? ORDER BY t.rowid"
             else:
                 query = f"SELECT * FROM {table} WHERE session_id=? ORDER BY rowid"
@@ -183,6 +192,8 @@ def _decode(record: dict[str, Any]) -> dict[str, Any]:
         "payload_json",
         "checkpoint_json",
         "arguments_json",
+        "limits_json",
+        "history_json",
     ):
         if record.get(key):
             record[key.removesuffix("_json")] = json.loads(record.pop(key))

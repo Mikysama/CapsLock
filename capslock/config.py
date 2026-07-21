@@ -4,14 +4,22 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
+import tempfile
 import tomllib
+import warnings
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
+from .credentials import parse_reference, resolve_credential
+from .domain import LoopDetectionSettings
 from .layout import ProjectLayout
 
 
-DEFAULT_MAX_TURNS = 32
+DEFAULT_MAX_TOOL_ROUNDS = 32
+DEFAULT_MAX_TURNS = DEFAULT_MAX_TOOL_ROUNDS
+CONFIG_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -33,6 +41,7 @@ class ProviderSettings:
     api_key: str | None
     timeout_seconds: float
     data_policy: str
+    credential_ref: str | None = None
 
 
 @dataclass(frozen=True)
@@ -63,8 +72,13 @@ class BudgetSettings:
 
 @dataclass(frozen=True)
 class RuntimeSettings:
-    max_turns: int
+    max_tool_rounds: int
     max_context_messages: int
+
+    @property
+    def max_turns(self) -> int:
+        """Compatibility alias retained through 2.0.0."""
+        return self.max_tool_rounds
 
 
 @dataclass(frozen=True)
@@ -79,6 +93,7 @@ class WebSettings:
     web_timeout_seconds: float
     web_max_bytes: int
     web_max_redirects: int
+    tavily_credential_ref: str | None = None
 
 
 @dataclass(frozen=True)
@@ -106,6 +121,7 @@ class Settings:
     models: dict[str, ModelProfileSettings] | None = None
     routing: RoutingSettings | None = None
     budget: BudgetSettings = BudgetSettings()
+    loop_detection: LoopDetectionSettings = LoopDetectionSettings()
 
     @classmethod
     def load(
@@ -115,7 +131,7 @@ class Settings:
         document: dict[str, object] = {}
         config = layout.config
         if config.is_file():
-            document = tomllib.loads(config.read_text(encoding="utf-8"))
+            document = load_config_document(config, migrate=True)
 
         def group(name: str) -> dict[str, object]:
             values = document.get(name, {})
@@ -168,9 +184,7 @@ class Settings:
         return cls(
             model_config=compatibility_model,
             runtime=RuntimeSettings(
-                max_turns=int(
-                    value("runtime", "CAPSLOCK_MAX_TURNS", DEFAULT_MAX_TURNS)
-                ),
+                max_tool_rounds=_max_tool_rounds(group("runtime")),
                 max_context_messages=int(
                     value("runtime", "CAPSLOCK_MAX_CONTEXT_MESSAGES", 24)
                 ),
@@ -184,17 +198,23 @@ class Settings:
                 ),
             ),
             web=WebSettings(
-                tavily_api_key=value(
-                    "web",
-                    "CAPSLOCK_TAVILY_API_KEY",
-                    None,
-                    "TAVILY_API_KEY",
+                tavily_api_key=_web_credential(
+                    group("web"),
+                    value(
+                        "web",
+                        "CAPSLOCK_TAVILY_API_KEY",
+                        None,
+                        "TAVILY_API_KEY",
+                    ),
                 ),
                 web_timeout_seconds=float(
                     value("web", "CAPSLOCK_WEB_TIMEOUT_SECONDS", 20)
                 ),
                 web_max_bytes=int(value("web", "CAPSLOCK_WEB_MAX_BYTES", 500_000)),
                 web_max_redirects=int(value("web", "CAPSLOCK_WEB_MAX_REDIRECTS", 3)),
+                tavily_credential_ref=_optional_string(
+                    group("web").get("tavily_credential")
+                ),
             ),
             mcp=McpSettings(
                 mcp_timeout_seconds=float(
@@ -219,7 +239,302 @@ class Settings:
             models=models,
             routing=routing,
             budget=_budget(group("budget")),
+            loop_detection=_loop_detection(group("loop_detection")),
         )
+
+
+@dataclass(frozen=True)
+class ConfigIssue:
+    severity: str
+    code: str
+    path: str
+    message: str
+
+
+_GROUP_FIELDS = {
+    "model": {
+        "api_key",
+        "base_url",
+        "model",
+        "timeout_seconds",
+        "input_cost_per_million",
+        "output_cost_per_million",
+    },
+    "runtime": {
+        "max_tool_rounds",
+        "max_turns",
+        "max_context_messages",
+        "permission_mode",
+    },
+    "command": {"command_timeout_seconds", "command_output_bytes"},
+    "web": {
+        "tavily_api_key",
+        "tavily_credential",
+        "web_timeout_seconds",
+        "web_max_bytes",
+        "web_max_redirects",
+    },
+    "mcp": {"mcp_timeout_seconds", "mcp_output_bytes"},
+    "memory": {"enabled"},
+    "routing": {"reasoning", "fast", "embedding", "vision"},
+    "budget": {"max_run_tokens", "max_run_usd", "max_session_usd"},
+    "loop_detection": {
+        "consecutive_repeats",
+        "failed_retries",
+        "cycle_repetitions",
+        "max_cycle_length",
+    },
+}
+_TOP_LEVEL = {"config_version", "providers", "models", *_GROUP_FIELDS}
+_PROVIDER_FIELDS = {
+    "kind",
+    "base_url",
+    "api_key_env",
+    "credential",
+    "timeout_seconds",
+    "data_policy",
+}
+_MODEL_FIELDS = {
+    "provider",
+    "model",
+    "context_window",
+    "max_output_tokens",
+    "input_cost_per_million",
+    "output_cost_per_million",
+}
+
+
+def read_config_document(path: Path) -> dict[str, object]:
+    try:
+        document = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise ValueError(f"invalid project configuration: {path}: {exc}") from exc
+    if not isinstance(document, dict):
+        raise ValueError("project configuration must be a TOML document")
+    return document
+
+
+def validate_config_document(document: dict[str, object]) -> tuple[ConfigIssue, ...]:
+    issues: list[ConfigIssue] = []
+    version = document.get("config_version", 0)
+    if not isinstance(version, int) or isinstance(version, bool):
+        issues.append(
+            ConfigIssue(
+                "error", "config_version_type", "config_version", "must be an integer"
+            )
+        )
+    elif version not in {0, 1, CONFIG_VERSION}:
+        issues.append(
+            ConfigIssue(
+                "error",
+                "config_version_unsupported",
+                "config_version",
+                f"unsupported configuration version {version}",
+            )
+        )
+    if version == 0:
+        issues.append(
+            ConfigIssue(
+                "warning",
+                "config_deprecated",
+                "config_version",
+                "v1.8 configuration requires migration",
+            )
+        )
+    if version == 1:
+        issues.append(
+            ConfigIssue(
+                "warning",
+                "config_deprecated",
+                "config_version",
+                "v1.9 configuration requires migration",
+            )
+        )
+    for name in sorted(set(document) - _TOP_LEVEL):
+        issues.append(
+            ConfigIssue("error", "unknown_field", name, "unknown top-level field")
+        )
+    for group_name, allowed in _GROUP_FIELDS.items():
+        raw = document.get(group_name)
+        if raw is None:
+            continue
+        if not isinstance(raw, dict):
+            issues.append(
+                ConfigIssue("error", "group_type", group_name, "must be a table")
+            )
+            continue
+        for field in sorted(set(raw) - allowed):
+            issues.append(
+                ConfigIssue(
+                    "error", "unknown_field", f"{group_name}.{field}", "unknown field"
+                )
+            )
+        if group_name == "runtime" and "max_turns" in raw:
+            issues.append(
+                ConfigIssue(
+                    "warning",
+                    "max_turns_deprecated",
+                    "runtime.max_turns",
+                    "use runtime.max_tool_rounds; max_turns is removed in 2.0.0",
+                )
+            )
+        for secret_field in (
+            {"api_key"}
+            if group_name == "model"
+            else {"tavily_api_key"}
+            if group_name == "web"
+            else set()
+        ):
+            if raw.get(secret_field):
+                issues.append(
+                    ConfigIssue(
+                        "error",
+                        "plaintext_credential",
+                        f"{group_name}.{secret_field}",
+                        "plaintext credentials are not allowed; use an env: or keyring: reference",
+                    )
+                )
+    for group_name, allowed in (
+        ("providers", _PROVIDER_FIELDS),
+        ("models", _MODEL_FIELDS),
+    ):
+        raw = document.get(group_name)
+        if raw is None:
+            continue
+        if not isinstance(raw, dict):
+            issues.append(
+                ConfigIssue("error", "group_type", group_name, "must be a table")
+            )
+            continue
+        for item_name, item in raw.items():
+            if not isinstance(item, dict):
+                issues.append(
+                    ConfigIssue(
+                        "error",
+                        "entry_type",
+                        f"{group_name}.{item_name}",
+                        "must be a table",
+                    )
+                )
+                continue
+            for field in sorted(set(item) - allowed):
+                issues.append(
+                    ConfigIssue(
+                        "error",
+                        "unknown_field",
+                        f"{group_name}.{item_name}.{field}",
+                        "unknown field",
+                    )
+                )
+            if group_name == "providers" and "api_key_env" in item:
+                issues.append(
+                    ConfigIssue(
+                        "warning",
+                        "api_key_env_deprecated",
+                        f"providers.{item_name}.api_key_env",
+                        'use credential = "env:NAME"',
+                    )
+                )
+            if group_name == "providers" and "credential" in item:
+                try:
+                    parse_reference(str(item["credential"]))
+                except ValueError as exc:
+                    issues.append(
+                        ConfigIssue(
+                            "error",
+                            "credential_reference",
+                            f"providers.{item_name}.credential",
+                            str(exc),
+                        )
+                    )
+    if not any(item.severity == "error" for item in issues):
+        try:
+            _validate_semantics(document)
+        except (TypeError, ValueError) as exc:
+            issues.append(ConfigIssue("error", "config_semantics", "config", str(exc)))
+    return tuple(issues)
+
+
+def load_config_document(path: Path, *, migrate: bool = False) -> dict[str, object]:
+    document = read_config_document(path)
+    if document.get("config_version", 0) < CONFIG_VERSION and migrate:
+        migrate_config(path, apply=True)
+        document = read_config_document(path)
+    issues = validate_config_document(document)
+    errors = [item for item in issues if item.severity == "error"]
+    if errors:
+        first = errors[0]
+        raise ValueError(f"invalid config at {first.path}: {first.message}")
+    return document
+
+
+def migrate_config(path: Path, *, apply: bool) -> tuple[bool, str | None]:
+    document = read_config_document(path)
+    version = document.get("config_version", 0)
+    if version == CONFIG_VERSION:
+        return False, None
+    if version not in {0, 1}:
+        raise ValueError(f"unsupported configuration version {version}")
+    plaintext = [
+        item
+        for item in validate_config_document(document)
+        if item.code == "plaintext_credential"
+    ]
+    if plaintext:
+        raise ValueError(plaintext[0].message)
+    try:
+        import tomlkit
+    except ImportError as exc:  # pragma: no cover - packaging guard
+        raise RuntimeError("tomlkit is required for configuration migration") from exc
+    parsed = tomlkit.parse(path.read_text(encoding="utf-8"))
+    parsed["config_version"] = CONFIG_VERSION
+    runtime = parsed.get("runtime")
+    if runtime is not None and "max_turns" in runtime:
+        if "max_tool_rounds" not in runtime:
+            runtime["max_tool_rounds"] = runtime["max_turns"]
+        del runtime["max_turns"]
+    providers = parsed.get("providers")
+    if providers is not None:
+        for provider in providers.values():
+            if "credential" not in provider and "api_key_env" in provider:
+                provider["credential"] = f"env:{provider['api_key_env']}"
+                del provider["api_key_env"]
+    rendered = tomlkit.dumps(parsed)
+    if not apply:
+        return True, rendered
+    backup_dir = path.parent / "state" / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+    backup = backup_dir / f"config.v{version}.{stamp}.toml"
+    shutil.copy2(path, backup)
+    _atomic_write(path, rendered)
+    return True, str(backup)
+
+
+def _atomic_write(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", dir=path.parent, prefix=".config-", delete=False
+        ) as handle:
+            temporary = handle.name
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary and Path(temporary).exists():
+            Path(temporary).unlink()
+
+
+def _optional_string(value: object) -> str | None:
+    return None if value in {None, ""} else str(value)
+
+
+def _web_credential(raw: dict[str, object], fallback: object) -> str | None:
+    reference = _optional_string(raw.get("tavily_credential"))
+    return resolve_credential(reference) if reference else _optional_string(fallback)
 
 
 def _boolean(value: object) -> bool:
@@ -237,7 +552,10 @@ _CONFIG_ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}\Z")
 
 
 def _model_routes(
-    document: dict[str, object], legacy: ModelSettings
+    document: dict[str, object],
+    legacy: ModelSettings,
+    *,
+    resolve_credentials: bool = True,
 ) -> tuple[
     dict[str, ProviderSettings],
     dict[str, ModelProfileSettings],
@@ -255,6 +573,7 @@ def _model_routes(
             legacy.api_key,
             legacy.timeout_seconds,
             "provider:default",
+            "env:CAPSLOCK_API_KEY",
         )
         model = ModelProfileSettings(
             "default",
@@ -300,9 +619,13 @@ def _model_routes(
         base_url = str(value.get("base_url", "")).rstrip("/")
         if not base_url.startswith(("https://", "http://")):
             raise ValueError(f"provider {name} requires an http(s) base_url")
-        key_env = str(value.get("api_key_env", "CAPSLOCK_API_KEY"))
-        if not re.fullmatch(r"[A-Z][A-Z0-9_]*", key_env):
-            raise ValueError(f"provider {name} has an invalid api_key_env")
+        credential_ref = str(
+            value.get(
+                "credential", f"env:{value.get('api_key_env', 'CAPSLOCK_API_KEY')}"
+            )
+        )
+        source, credential_name = parse_reference(credential_ref)
+        key_env = credential_name if source == "env" else ""
         timeout = float(value.get("timeout_seconds", 60))
         if timeout <= 0:
             raise ValueError(f"provider {name} timeout_seconds must be positive")
@@ -314,9 +637,10 @@ def _model_routes(
             kind,
             base_url,
             key_env,
-            os.environ.get(key_env),
+            resolve_credential(credential_ref) if resolve_credentials else None,
             timeout,
             data_policy,
+            credential_ref,
         )
     models: dict[str, ModelProfileSettings] = {}
     for name, value in raw_models.items():
@@ -395,6 +719,84 @@ def _budget(raw: dict[str, object]) -> BudgetSettings:
         positive("max_run_usd", float),
         positive("max_session_usd", float),
     )
+
+
+def _max_tool_rounds(runtime: dict[str, object]) -> int:
+    for name in ("CAPSLOCK_MAX_TOOL_ROUNDS", "CAPSLOCK_MAX_TURNS"):
+        if name in os.environ:
+            if name == "CAPSLOCK_MAX_TURNS":
+                warnings.warn(
+                    "CAPSLOCK_MAX_TURNS is deprecated; use CAPSLOCK_MAX_TOOL_ROUNDS",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            value = int(os.environ[name])
+            if value <= 0:
+                raise ValueError(f"{name} must be positive")
+            return value
+    value = runtime.get(
+        "max_tool_rounds", runtime.get("max_turns", DEFAULT_MAX_TOOL_ROUNDS)
+    )
+    if "max_tool_rounds" not in runtime and "max_turns" in runtime:
+        warnings.warn(
+            "runtime.max_turns is deprecated; use runtime.max_tool_rounds",
+            UserWarning,
+            stacklevel=2,
+        )
+    parsed = int(value)
+    if parsed <= 0:
+        raise ValueError("runtime.max_tool_rounds must be positive")
+    return parsed
+
+
+def _loop_detection(raw: dict[str, object]) -> LoopDetectionSettings:
+    return LoopDetectionSettings(
+        consecutive_repeats=int(raw.get("consecutive_repeats", 3)),
+        failed_retries=int(raw.get("failed_retries", 3)),
+        cycle_repetitions=int(raw.get("cycle_repetitions", 3)),
+        max_cycle_length=int(raw.get("max_cycle_length", 4)),
+    )
+
+
+def _validate_semantics(document: dict[str, object]) -> None:
+    model = document.get("model", {})
+    model = model if isinstance(model, dict) else {}
+    legacy = ModelSettings(
+        None,
+        str(model.get("base_url", "https://api.deepseek.com")),
+        str(model.get("model", "deepseek-v4-flash")),
+        float(model.get("timeout_seconds", 60)),
+        float(model.get("input_cost_per_million", 0)),
+        float(model.get("output_cost_per_million", 0)),
+    )
+    _model_routes(document, legacy, resolve_credentials=False)
+    _budget(
+        document.get("budget", {}) if isinstance(document.get("budget"), dict) else {}
+    )
+    runtime = document.get("runtime", {})
+    if isinstance(runtime, dict):
+        rounds = runtime.get(
+            "max_tool_rounds", runtime.get("max_turns", DEFAULT_MAX_TOOL_ROUNDS)
+        )
+        if int(rounds) <= 0:
+            raise ValueError("runtime.max_tool_rounds must be positive")
+        if int(runtime.get("max_context_messages", 24)) <= 0:
+            raise ValueError("runtime.max_context_messages must be positive")
+        if str(runtime.get("permission_mode", "approve_for_me")) not in {
+            "full_access",
+            "approve_for_me",
+            "ask_for_approval",
+            "full",
+            "approve",
+            "ask",
+        }:
+            raise ValueError("runtime.permission_mode is invalid")
+    memory = document.get("memory", {})
+    if isinstance(memory, dict):
+        _boolean(memory.get("enabled", True))
+    loop_detection = document.get("loop_detection", {})
+    if isinstance(loop_detection, dict):
+        _loop_detection(loop_detection)
 
 
 def _identifier(kind: str, value: object) -> None:

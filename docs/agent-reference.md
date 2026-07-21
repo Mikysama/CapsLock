@@ -10,7 +10,7 @@
 | `approve_for_me` | 默认模式。文件、命令和 MCP 等高风险动作需要确认。 |
 | `ask_for_approval` | 发送请求和后续动作都要求人工确认。 |
 
-使用 `/permissions` 查看模式，使用 `/permissions full|approve|ask` 切换。选择保存在工作区 settings repository。
+使用 `/permissions` 打开三档权限选择框，或使用 `/permissions full|approve|ask` 直接切换。选择保存在工作区 settings repository。
 
 ## 模型工具
 
@@ -29,15 +29,15 @@
 | `get_memory` | 按 ID 获取可见记忆并记录访问。 | 只读；用于来源失效隔离。 |
 | `load_skill` | 加载已启用 Skill 的正文和资源清单。 | 正文是不可信上下文。 |
 | `read_skill_resource` | 读取本 run 已加载的 Skill 资源快照。 | 只读；拒绝越界、二进制和符号链接。 |
-| `propose_file_edit` | 创建精确文本替换提案。 | 不写用户文件。 |
-| `propose_file_create` | 创建新文件提案。 | 不写用户文件。 |
-| `propose_command` | 创建固定命令模板提案。 | 不启动进程。 |
+| `propose_file_edit` | 创建精确文本替换提案。 | 未获批准不写用户文件。 |
+| `propose_file_create` | 创建新文件提案。 | 未获批准不写用户文件。 |
+| `propose_command` | 创建固定命令模板提案。 | 未获批准不启动进程。 |
 | `propose_web_search` | 创建 Tavily 搜索动作。 | 外部请求与来源审计。 |
 | `propose_web_fetch` | 创建公开 URL 抓取动作。 | SSRF、重定向、类型和大小限制。 |
 | `propose_mcp_connect` | 创建 MCP server 连接与工具发现动作。 | 仅本地 stdio。 |
 | `propose_mcp_call` | 创建 allowlist 内 MCP 工具调用动作。 | 第三方副作用不可自动撤销。 |
 
-模型只提交提案；统一 `ActionCoordinator` 决定是否等待批准或自动执行。动作记录只使用 `request_json` 与 `result_json`，新增动作类型不需要 subtype 表。
+模型只提交提案；统一 `ActionCoordinator` 决定是否等待批准或自动执行。TUI 为 Coordinator 安装阻塞式审批器：越过权限边界时只询问是否执行，不显示动作载荷，用户只能拒绝或执行；最终动作状态返回同一个模型工具调用，run 随后继续。非交互 `exec` 不安装审批器，仍保留 pending action、`waiting_approval` 终止事件和退出码 `3`。动作记录只使用 `request_json` 与 `result_json`，新增动作类型不需要 subtype 表。
 
 ## 动作状态
 
@@ -52,7 +52,7 @@ pending -> approved -> running -> completed
    |---------> cancelled
 ```
 
-审批结算在同一个 SQLite 事务内更新 action、run、work item 和终止事件。重复结算已完成的 run 返回空结果，不会产生第二个终止事件。失败动作将 workflow 结算为 failed，取消动作结算为 cancelled，完成或拒绝的动作允许 workflow 完成。
+交互审批在 Action 工具调用内完成，因此批准执行或拒绝后由同一个 run 继续推理，不产生中间终止事件。非交互或导入数据的待审批动作仍可通过 `/approvals` 结算；该兼容路径在同一个 SQLite 事务内更新 action、run、work item 和终止事件。重复结算已完成的 run 返回空结果，不会产生第二个终止事件。
 
 文件执行前重新检查提案哈希；命令取消先向进程组发送 TERM，2 秒后仍未退出则发送 KILL；Web 跟随重定向前重新执行公开地址校验；MCP 在执行时再次检查工具 allowlist。
 
@@ -62,9 +62,9 @@ pending -> approved -> running -> completed
 | --- | --- |
 | `/help` | 显示 v2 命令。 |
 | `/status` | 汇总 session、workspace、model、permissions、context、usage、tasks 和 queue。 |
-| `/permissions [full|approve|ask]` | 查看或切换权限模式。 |
-| `/approvals` | 列出待审批动作；`approve <id>` 或 `reject <id>` 处理动作。 |
-| `/queue` | 查看队列；`move <id> <position>`、`cancel <id>` 或 `retry <run-id>`。 |
+| `/permissions [full|approve|ask]` | 无参数时打开权限选择框；带参数时直接切换。 |
+| `/approvals` | 处理非交互、导入或旧数据留下的待审批动作。 |
+| `/queue` | 查看队列；`start <id>` 显式启动导入队列，另有 `move`、`cancel` 和 `retry`。 |
 | `/memory ...` | 管理记忆、候选、召回、导入导出和 embeddings。 |
 | `/skills ...` | 列出、查看、校验、启用或禁用 Skill。 |
 | `/sources` | 查看当前会话 Web 来源。 |
@@ -81,7 +81,7 @@ v2 不解析旧 alias，也不提供独立 `/cost`、`/context`、`/tasks`、`/c
 
 启动 banner 恢复 v1.7.1 的 `Welcome back`、CapsLock 字符画和 Tips 布局；窄终端使用纵向布局，宽终端使用双栏布局。模型提供方返回的 reasoning 单独显示在低对比度、暗化斜体的 `◇ Model reasoning` 区域；最终回答显示在高对比度主文本样式的 `◆ CapsLock` 区域，不使用额外的 `Final answer` 标签。
 
-模型请求和工具执行期间，底部活动行在 `Thinking` 或 `Running <tool>` 左侧循环显示 `◐ ◓ ◑ ◒`。阶段结束后动画消失，并在 scrollback 中留下静态结果：绿色圆点表示成功，红色圆点表示失败，黄色圆点表示等待审批，警告色圆点表示取消。
+模型请求和工具执行期间，底部活动行在 `Thinking` 或 `Running <tool>` 左侧循环显示 `◐ ◓ ◑ ◒`。产生待审批提案后，输入框暂停并逐条显示完整脱敏载荷与选择框；选择批准即直接进入执行前复检，不再追加 `y/N`。阶段结束后动画消失，并在 scrollback 中留下静态结果：绿色圆点表示成功，红色圆点表示失败，黄色圆点表示等待审批，警告色圆点表示取消。
 
 裸 `capslock resume` 使用方向键和 Enter 选择 session；显式 ID/唯一前缀仍受支持。恢复时重放已完成消息以及中断/失败 run 的用户问题和已产生文本，后续模型请求使用同一份 session 上下文，同时排除当前 run 以避免重复当前问题。
 
@@ -89,7 +89,8 @@ v2 不解析旧 alias，也不提供独立 `/cost`、`/context`、`/tasks`、`/c
 
 ```text
 capslock
-capslock exec [PROMPT] [--json]
+capslock exec [PROMPT] [--json] [--max-tool-rounds N] [--max-tool-calls N]
+  [--max-duration-seconds N] [--max-tokens N] [--max-budget-usd N]
 capslock resume [SESSION] [--limit N]
 capslock sessions|session [--limit N]
 capslock sessions|session search <QUERY> [--archived]
@@ -97,10 +98,16 @@ capslock sessions|session rename <SESSION> <TITLE>
 capslock sessions|session archive|unarchive <SESSION>
 capslock sessions|session export <SESSION> <WORKSPACE-RELATIVE-DIRECTORY>
 capslock sessions|session delete [SESSION] [--yes]
-capslock doctor
+capslock init [--non-interactive ...] [--update] [--check-provider]
+capslock config validate|migrate
+capslock credentials status|set|delete
+capslock backup create|list|verify|restore
+capslock export <ARCHIVE> [--include-global-memory]
+capslock import <ARCHIVE> [--yes]
+capslock doctor [--json] [--strict] [--network] [--fix] [--yes]
 ```
 
-裸入口只允许 TTY。`exec` 可从 stdin 读取 prompt，不进行交互审批；产生待审批动作时保存 session/run/action 并返回退出码 3。
+裸入口只允许 TTY。`exec` 可从 stdin 读取 prompt，不进行交互审批；产生待审批动作时保存 session/run/action 并返回退出码 3，预算或循环停止返回退出码 4。
 
 ## JSONL 事件
 
@@ -119,7 +126,7 @@ capslock doctor
 | `terminal` | 是否为唯一终止事件。 |
 | `data` | 事件载荷。 |
 
-非终止事件：`queued`、`thinking`、`text_delta`、`tool_running`、`tool_completed`。
+非终止事件：`queued`、`thinking`、`text_delta`、`tool_running`、`tool_completed`、`budget_updated`、`limit_reached`、`budget_extended`。
 
 `thinking.data.text` 是模型提供方显式返回的 reasoning；`text_delta.data.text` 是最终回答的流式正文。TUI 分区渲染二者，`completed.data.answer` 只包含最终回答。
 
@@ -128,6 +135,7 @@ capslock doctor
 - `completed`：`answer`、`citations`、`memory_recalls`、`usage`、`duration_ms`。
 - `waiting_approval`：`action_ids` 与数量。
 - `failed` / `cancelled`：`error.code` 与 `error.message`。
+- `stopped`：`stop_reason`、`budget` 和已用量；每个 run 仍只有一个终止事件。
 
 ## Workflow 与恢复
 
@@ -158,7 +166,9 @@ ToolLoop 每个模型或工具阶段写 `run_steps`。只有 completed 且带 ch
 
 工作区数据库使用 application ID `0x434C4B32`，记忆数据库使用 `0x434C4D32`。两者开启 foreign keys、WAL 和 5 秒 busy timeout；记忆库额外开启 secure delete 并设置文件权限 `0600`。
 
-应用先读取 application ID 和 schema version，确认兼容后才切换 WAL。空库 schema、application ID 与 version 在一个事务中初始化。v1.8.0 可将相同 v2 application ID 的 schema v1 数据库在备份后事务迁移至 schema v2；旧 application ID 和未知版本仍只报错。
+应用先读取 application ID 和 schema version，确认兼容后才切换 WAL。v1.10.0 的 workspace schema v4 增加 run 治理快照、工具调用指纹和结构化停止原因；memory schema 保持 v3。正式升级保证 v1.9 schema v3 在备份后迁移到 v4；旧 application ID 和未知版本仍只报错。
+
+portable import 使用 archive ID 幂等记录。相同 ID 与内容跳过，同 ID 不同内容确定性重映射并重写引用。running run 转为 interrupted，approved/running action 转为 pending；导入的历史副作用不能在目标工作区执行 undo。
 
 ## 模型路由、预算与外部嵌入
 

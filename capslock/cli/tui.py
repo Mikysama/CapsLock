@@ -10,12 +10,28 @@ from prompt_toolkit.application import get_app_or_none, run_in_terminal
 from prompt_toolkit.patch_stdout import patch_stdout
 from rich.console import Console
 
-from ..domain import AgentEvent, AgentEventKind, BudgetRequest, MemoryScope
+from ..domain import (
+    ActionRecord,
+    AgentEvent,
+    AgentEventKind,
+    ApprovalDecision,
+    BudgetRequest,
+    BudgetSnapshot,
+    MemoryScope,
+    WorkItemStatus,
+    RunMode,
+)
 from ..permissions import PermissionMode
 from ..status import AgentStatus, status_for_event, status_message
 from .context import CliContext
 from .dispatch import dispatch_slash_command
-from .prompt import permission_rprompt, prompt_footer, prompt_session, prompt_tokens
+from .prompt import (
+    permission_rprompt,
+    prompt_footer,
+    prompt_session,
+    prompt_tokens,
+    select_action_decision,
+)
 from .views.common import error, startup
 from .views.workflow import render_history, result_status
 
@@ -61,9 +77,28 @@ async def run_tui(context: CliContext, *, status_enabled: bool = True) -> int:
         answer = await run_in_terminal(lambda: console.input(prompt))
         return str(answer).strip().casefold() in {"y", "yes"}
 
+    async def authorize_limit(snapshot: BudgetSnapshot) -> bool:
+        used = snapshot.as_dict()["used"]
+        prompt = (
+            f"Soft limit reached: {used['tool_rounds']} rounds, "
+            f"{used['tool_calls']} tool calls, {used['tokens']} tokens, "
+            f"${float(used['budget_usd']):.6f}, {int(used['duration_ms'])}ms. "
+            "Continue 32 more rounds? [y/N] "
+        )
+        answer = await run_in_terminal(lambda: console.input(prompt))
+        return str(answer).strip().casefold() in {"y", "yes"}
+
+    state["limit_authorizer"] = authorize_limit
+
+    async def authorize_action(action: ActionRecord) -> ApprovalDecision:
+        return await _authorize_action(context, action)
+
     set_authorizer = getattr(router, "set_budget_authorizer", None)
     if callable(set_authorizer):
         set_authorizer(authorize_budget)
+    set_action_authorizer = getattr(agent, "set_action_authorizer", None)
+    if callable(set_action_authorizer):
+        set_action_authorizer(authorize_action)
     worker = asyncio.create_task(_worker(context, queue, state))
     animator = asyncio.create_task(_animate_activity(inputs, state))
     try:
@@ -97,6 +132,8 @@ async def run_tui(context: CliContext, *, status_enabled: bool = True) -> int:
                 try:
                     if question.startswith("/queue retry "):
                         await _retry(context, queue, shlex.split(question)[2])
+                    elif question.startswith("/queue start "):
+                        await _start_queued(context, queue, shlex.split(question)[2])
                     elif await dispatch_slash_command(context, question) == "exit":
                         return 0
                 except (ValueError, OSError) as exc:
@@ -116,6 +153,8 @@ async def run_tui(context: CliContext, *, status_enabled: bool = True) -> int:
     finally:
         if callable(set_authorizer):
             set_authorizer(None)
+        if callable(set_action_authorizer):
+            set_action_authorizer(None)
         state["stopping"] = True
         await queue.put(None)
         worker.cancel()
@@ -175,7 +214,11 @@ async def _run_request(
     _set_activity(state, status_message(AgentStatus.THINKING))
     try:
         async for event in context.agent.ask_stream(
-            question, work_item_id=item_id, resume_from_run_id=resume_from
+            question,
+            work_item_id=item_id,
+            resume_from_run_id=resume_from,
+            mode=RunMode.INTERACTIVE,
+            authorize_limit=state.get("limit_authorizer"),
         ):
             await renderer.handle(event)
     except asyncio.CancelledError:
@@ -186,6 +229,18 @@ async def _run_request(
             await renderer.fail(str(exc) or type(exc).__name__)
     finally:
         _set_activity(state, None)
+
+
+async def _authorize_action(
+    _context: CliContext, action: ActionRecord
+) -> ApprovalDecision:
+    def choose() -> ApprovalDecision:
+        return select_action_decision(action)
+
+    try:
+        return ApprovalDecision(await run_in_terminal(choose, in_executor=True))
+    except (EOFError, KeyboardInterrupt):
+        return ApprovalDecision.REJECT
 
 
 class _RunRenderer:
@@ -207,6 +262,19 @@ class _RunRenderer:
             await self._tool_running(str(event.data.get("name", "unknown")))
         elif event.kind is AgentEventKind.TOOL_COMPLETED:
             await self._tool_completed(event)
+        elif event.kind in {
+            AgentEventKind.BUDGET_UPDATED,
+            AgentEventKind.BUDGET_EXTENDED,
+        }:
+            budget = event.data.get("budget", {})
+            used = budget.get("used", {}) if isinstance(budget, dict) else {}
+            _set_activity(
+                self.state,
+                f"Budget: {used.get('tool_rounds', 0)} rounds / "
+                f"{used.get('tool_calls', 0)} calls",
+            )
+        elif event.kind is AgentEventKind.LIMIT_REACHED:
+            _set_activity(self.state, "Waiting for run-limit decision...")
         elif event.terminal:
             await self._terminal(event)
 
@@ -317,6 +385,9 @@ class _RunRenderer:
                     "Cancelled", "cancelled", detail=str(error.get("message", ""))
                 )
             )
+        elif event.kind is AgentEventKind.STOPPED:
+            reason = str(event.data.get("stop_reason", "stopped"))
+            await self.writer.print(result_status("Stopped", "stopped", detail=reason))
         else:
             error = event.data.get("error", {})
             await self.writer.print(
@@ -407,6 +478,17 @@ async def _retry(context: CliContext, queue: asyncio.Queue, prefix: str) -> None
     )
     await queue.put((item.id, item.question, run.id))
     context.console.print(f"[waiting]Retry queued:[/] {run.id[:8]}")
+
+
+async def _start_queued(context: CliContext, queue: asyncio.Queue, prefix: str) -> None:
+    repository = context.agent.repositories.workflow
+    item = await repository.require_work_item(prefix)
+    if item.session_id != context.agent.session_id:
+        raise ValueError("work item does not belong to this session")
+    if item.status is not WorkItemStatus.QUEUED:
+        raise ValueError("only queued work can be started")
+    await queue.put((item.id, item.question, None))
+    context.console.print(f"[waiting]Queued work activated:[/] {item.id[:8]}")
 
 
 async def _delete_empty_session(context: CliContext) -> None:

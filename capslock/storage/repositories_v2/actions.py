@@ -175,6 +175,33 @@ class ActionRepository(Repository):
             raise ValueError("action changed concurrently")
         return await self.require(action_id)
 
+    async def mark_revalidated(
+        self,
+        action_id: str,
+        *,
+        summary: str,
+        request: dict[str, Any],
+        level: str,
+        reason: str,
+        rollback: str,
+    ) -> ActionRecord:
+        updated = await self.execute(
+            """UPDATE actions SET summary=?,request_json=?,risk_level=?,risk_reason=?,rollback=?,
+               requires_reapproval=0,approved_at=NULL,started_at=NULL,decided_at=NULL
+               WHERE id=? AND status='pending' AND historical_only=0""",
+            (
+                summary,
+                json.dumps(request, ensure_ascii=False),
+                level,
+                reason,
+                rollback,
+                action_id,
+            ),
+        )
+        if not updated:
+            raise ValueError("imported action cannot be revalidated")
+        return await self.require(action_id)
+
     async def cancel_run(self, run_id: str, *, error_message: str) -> int:
         timestamp = now()
         return await self.execute(
@@ -188,6 +215,7 @@ class ActionRepository(Repository):
         row = await self.one(
             """SELECT * FROM actions WHERE session_id=? AND action_type IN ('file_edit','file_create')
                AND status='completed' AND result_kind='applied' AND reversed_at IS NULL
+               AND historical_only=0
                ORDER BY finished_at DESC LIMIT 1""",
             (session_id,),
         )
@@ -227,4 +255,7 @@ def _action(row) -> ActionRecord:
         rollback=row["rollback"],
         error_code=row["error_code"],
         error_message=row["error_message"],
+        import_id=row["import_id"],
+        historical_only=bool(row["historical_only"]),
+        requires_reapproval=bool(row["requires_reapproval"]),
     )

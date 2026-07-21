@@ -24,6 +24,7 @@ from ..domain import (
     ModelErrorCode,
     ModelRole,
     ModelRoutingError,
+    RunLimits,
 )
 from ..storage.repositories_v2 import WorkspaceRepositories
 from .model import ChatModel, ModelDelta, ModelResponse, ModelUsage
@@ -58,16 +59,38 @@ class ModelRouter:
             "model_role", default=ModelRole.REASONING
         )
         self._budget_authorizer: BudgetAuthorizer | None = None
+        self._run_limits: ContextVar[RunLimits | None] = ContextVar(
+            "model_run_limits", default=None
+        )
+        self._run_budget_base: ContextVar[tuple[int, float]] = ContextVar(
+            "model_run_budget_base", default=(0, 0.0)
+        )
+        self._hard_budget: ContextVar[bool] = ContextVar(
+            "model_hard_budget", default=False
+        )
 
     def set_budget_authorizer(self, authorizer: BudgetAuthorizer | None) -> None:
         self._budget_authorizer = authorizer
 
     @contextmanager
-    def bind_run(self, run_id: str):
+    def bind_run(
+        self,
+        run_id: str,
+        *,
+        limits: RunLimits | None = None,
+        budget_base: tuple[int, float] = (0, 0.0),
+        hard: bool = False,
+    ):
         token = self._run_id.set(run_id)
+        limit_token = self._run_limits.set(limits)
+        base_token = self._run_budget_base.set(budget_base)
+        hard_token = self._hard_budget.set(hard)
         try:
             yield
         finally:
+            self._hard_budget.reset(hard_token)
+            self._run_budget_base.reset(base_token)
+            self._run_limits.reset(limit_token)
             self._run_id.reset(token)
 
     @contextmanager
@@ -283,7 +306,12 @@ class ModelRouter:
         names = getattr(self.routing, role.value)
         estimated = _estimate_tokens((messages, tools))
         candidates, exclusions = [], []
-        finite_usd_budget = bool(self.budget.max_run_usd or self.budget.max_session_usd)
+        override = self._run_limits.get()
+        finite_usd_budget = bool(
+            self.budget.max_run_usd
+            or self.budget.max_session_usd
+            or (override and override.max_budget_usd)
+        )
         for name in names:
             profile = self.profiles[name]
             provider = self.providers[profile.provider]
@@ -311,6 +339,9 @@ class ModelRouter:
     ) -> None:
         input_used, output_used, run_cost = await self.repositories.models.usage(run_id)
         current_tokens = input_used + output_used
+        base_tokens, base_cost = self._run_budget_base.get()
+        current_tokens += base_tokens
+        run_cost += base_cost
         estimated_input = _estimate_tokens((messages, tools))
         reserved_tokens = estimated_input + profile.max_output_tokens
         reserved_cost = (
@@ -318,20 +349,27 @@ class ModelRouter:
             + profile.max_output_tokens * profile.output_cost_per_million
         ) / 1_000_000
         checks = []
-        if self.budget.max_run_tokens:
+        override = self._run_limits.get()
+        token_limit = _tighter(
+            self.budget.max_run_tokens,
+            override.max_tokens if override else None,
+        )
+        cost_limit = _tighter(
+            self.budget.max_run_usd,
+            override.max_budget_usd if override else None,
+        )
+        if token_limit:
             checks.append(
                 (
                     "run",
                     "tokens",
                     current_tokens,
                     reserved_tokens,
-                    self.budget.max_run_tokens,
+                    token_limit,
                 )
             )
-        if self.budget.max_run_usd:
-            checks.append(
-                ("run", "cost_usd", run_cost, reserved_cost, self.budget.max_run_usd)
-            )
+        if cost_limit:
+            checks.append(("run", "cost_usd", run_cost, reserved_cost, cost_limit))
         if self.budget.max_session_usd:
             session_cost = await self.repositories.models.session_cost(run_id)
             checks.append(
@@ -356,7 +394,9 @@ class ModelRouter:
                 profile.name,
             )
             allowed = bool(
-                self._budget_authorizer and await self._budget_authorizer(request)
+                not self._hard_budget.get()
+                and self._budget_authorizer
+                and await self._budget_authorizer(request)
             )
             await self.repositories.models.record_budget(
                 run_id,
@@ -370,7 +410,8 @@ class ModelRouter:
             )
             if not allowed:
                 raise ModelBudgetExceeded(
-                    f"{scope} {limit_type} budget would be exceeded by profile {profile.name}"
+                    f"{scope} {limit_type} budget would be exceeded by profile {profile.name}",
+                    limit_type=limit_type,
                 )
 
     async def _start_call(
@@ -422,10 +463,12 @@ class ModelRouter:
         )
 
     def _usage_required(self) -> bool:
+        override = self._run_limits.get()
         return bool(
             self.budget.max_run_tokens
             or self.budget.max_run_usd
             or self.budget.max_session_usd
+            or (override and (override.max_tokens or override.max_budget_usd))
         )
 
     async def _record_failed_route(
@@ -463,6 +506,14 @@ class ModelRouter:
 def _estimate_tokens(value: object) -> int:
     payload = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
     return max(1, math.ceil(len(payload.encode("utf-8")) / 4))
+
+
+def _tighter(configured, requested):
+    if configured is None:
+        return requested
+    if requested is None:
+        return configured
+    return min(configured, requested)
 
 
 def _cost(profile: ModelProfileSettings, usage: ModelUsage) -> float:

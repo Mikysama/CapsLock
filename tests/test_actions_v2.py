@@ -17,7 +17,12 @@ from capslock.application.action_system import (
     WebActionHandler,
 )
 from capslock.application.action_system.commands import CommandTemplate, TEMPLATES
-from capslock.domain import ActionResultKind, ActionStatus, ActionType
+from capslock.domain import (
+    ActionResultKind,
+    ActionStatus,
+    ActionType,
+    ApprovalDecision,
+)
 from capslock.layout import ProjectLayout, UserLayout
 from capslock.permissions import PermissionMode
 from capslock.policy import PolicyError, WorkspacePolicy
@@ -32,6 +37,7 @@ def coordinator(
     handlers: list[object],
     *,
     mode: PermissionMode = PermissionMode.ASK_FOR_APPROVAL,
+    approval_authorizer=None,
 ) -> ActionCoordinator:
     covered = {item for handler in handlers for item in handler.types}
     if missing := set(ActionType) - covered:
@@ -43,7 +49,225 @@ def coordinator(
         handlers=handlers,
         event=lambda *args, **kwargs: None,
         permission_mode=mode,
+        approval_authorizer=approval_authorizer,
     )
+
+
+def test_required_file_action_is_approved_and_executed_inline(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        repositories = await WorkspaceRepositories.open(
+            tmp_path / "state.sqlite3", workspace=tmp_path
+        )
+        seen = []
+
+        async def authorize(action):
+            seen.append(action)
+            assert not (tmp_path / "created.txt").exists()
+            return ApprovalDecision.APPROVE
+
+        try:
+            session, prepared = await workspace_run(repositories)
+            actions = coordinator(
+                repositories,
+                session.id,
+                prepared.run.id,
+                [FileActionHandler(WorkspacePolicy(tmp_path))],
+                mode=PermissionMode.APPROVE_FOR_ME,
+                approval_authorizer=authorize,
+            )
+            result = await actions.propose(
+                ActionType.FILE_CREATE,
+                path="created.txt",
+                content="approved\n",
+                summary="Create a file",
+            )
+            assert len(seen) == 1
+            assert result.status is ActionStatus.COMPLETED
+            assert (tmp_path / "created.txt").read_text() == "approved\n"
+        finally:
+            await repositories.close()
+
+    asyncio.run(scenario())
+
+
+def test_required_file_action_is_rejected_inline(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        repositories = await WorkspaceRepositories.open(
+            tmp_path / "state.sqlite3", workspace=tmp_path
+        )
+
+        async def reject(action):
+            return ApprovalDecision.REJECT
+
+        try:
+            session, prepared = await workspace_run(repositories)
+            actions = coordinator(
+                repositories,
+                session.id,
+                prepared.run.id,
+                [FileActionHandler(WorkspacePolicy(tmp_path))],
+                mode=PermissionMode.APPROVE_FOR_ME,
+                approval_authorizer=reject,
+            )
+            result = await actions.propose(
+                ActionType.FILE_CREATE,
+                path="rejected.txt",
+                content="must not exist",
+            )
+            assert result.status is ActionStatus.REJECTED
+            assert not (tmp_path / "rejected.txt").exists()
+        finally:
+            await repositories.close()
+
+    asyncio.run(scenario())
+
+
+def test_required_action_without_authorizer_remains_pending(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        repositories = await WorkspaceRepositories.open(
+            tmp_path / "state.sqlite3", workspace=tmp_path
+        )
+        try:
+            session, prepared = await workspace_run(repositories)
+            actions = coordinator(
+                repositories,
+                session.id,
+                prepared.run.id,
+                [FileActionHandler(WorkspacePolicy(tmp_path))],
+                mode=PermissionMode.APPROVE_FOR_ME,
+            )
+            result = await actions.propose(
+                ActionType.FILE_CREATE, path="pending.txt", content="pending"
+            )
+            assert result.status is ActionStatus.PENDING
+            assert not (tmp_path / "pending.txt").exists()
+        finally:
+            await repositories.close()
+
+    asyncio.run(scenario())
+
+
+def test_cancelling_inline_approval_rejects_instead_of_leaving_pending(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        repositories = await WorkspaceRepositories.open(
+            tmp_path / "state.sqlite3", workspace=tmp_path
+        )
+        waiting = asyncio.Event()
+        records = []
+
+        async def authorize(action):
+            records.append(action)
+            waiting.set()
+            await asyncio.Event().wait()
+            return ApprovalDecision.APPROVE
+
+        try:
+            session, prepared = await workspace_run(repositories)
+            actions = coordinator(
+                repositories,
+                session.id,
+                prepared.run.id,
+                [FileActionHandler(WorkspacePolicy(tmp_path))],
+                mode=PermissionMode.APPROVE_FOR_ME,
+                approval_authorizer=authorize,
+            )
+            task = asyncio.create_task(
+                actions.propose(
+                    ActionType.FILE_CREATE,
+                    path="cancelled.txt",
+                    content="must not exist",
+                )
+            )
+            await waiting.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            persisted = await repositories.actions.require(records[0].id)
+            assert persisted.status is ActionStatus.REJECTED
+            assert not (tmp_path / "cancelled.txt").exists()
+        finally:
+            await repositories.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("mode", "action_type", "expected_calls"),
+    [
+        (PermissionMode.APPROVE_FOR_ME, ActionType.WEB_SEARCH, 0),
+        (PermissionMode.ASK_FOR_APPROVAL, ActionType.WEB_SEARCH, 1),
+        (PermissionMode.FULL_ACCESS, ActionType.WEB_SEARCH, 0),
+    ],
+)
+def test_authorizer_obeys_permission_granularity(
+    tmp_path: Path,
+    mode: PermissionMode,
+    action_type: ActionType,
+    expected_calls: int,
+) -> None:
+    async def scenario() -> None:
+        repositories = await WorkspaceRepositories.open(
+            tmp_path / f"{mode.value}.sqlite3", workspace=tmp_path
+        )
+        calls = []
+
+        async def authorize(action):
+            calls.append(action)
+            return ApprovalDecision.APPROVE
+
+        try:
+            session, prepared = await workspace_run(repositories)
+            actions = coordinator(
+                repositories,
+                session.id,
+                prepared.run.id,
+                [StubActionHandler(set(ActionType))],
+                mode=mode,
+                approval_authorizer=authorize,
+            )
+            result = await actions.propose(action_type, query="capslock")
+            assert len(calls) == expected_calls
+            assert result.status is ActionStatus.COMPLETED
+        finally:
+            await repositories.close()
+
+    asyncio.run(scenario())
+
+
+def test_full_access_skill_file_change_still_uses_authorizer(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        repositories = await WorkspaceRepositories.open(
+            tmp_path / "state.sqlite3", workspace=tmp_path
+        )
+        calls = []
+
+        async def reject(action):
+            calls.append(action)
+            return ApprovalDecision.REJECT
+
+        try:
+            session, prepared = await workspace_run(repositories)
+            actions = coordinator(
+                repositories,
+                session.id,
+                prepared.run.id,
+                [StubActionHandler(set(ActionType))],
+                mode=PermissionMode.FULL_ACCESS,
+                approval_authorizer=reject,
+            )
+            result = await actions.propose(
+                ActionType.FILE_CREATE,
+                path=".capslock/skills/example/SKILL.md",
+                content="instructions",
+            )
+            assert len(calls) == 1
+            assert result.status is ActionStatus.REJECTED
+        finally:
+            await repositories.close()
+
+    asyncio.run(scenario())
 
 
 def test_file_action_requires_approval_and_supports_safe_undo(tmp_path: Path) -> None:

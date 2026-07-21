@@ -87,6 +87,7 @@ class WorkflowService:
         input_tokens: int = 0,
         output_tokens: int = 0,
         cost_usd: float = 0,
+        stop_reason: str | None = None,
     ) -> AgentEvent:
         return await self.repositories.workflow.finalize(
             run_id,
@@ -99,6 +100,7 @@ class WorkflowService:
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cost_usd=cost_usd,
+            stop_reason=stop_reason,
         )
 
     async def settle_approval(self, session_id: str, run_id: str) -> AgentEvent | None:

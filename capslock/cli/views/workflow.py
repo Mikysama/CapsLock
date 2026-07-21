@@ -25,6 +25,7 @@ class StatusView:
     cost_usd: float
     context_messages: int
     context_limit: int
+    budget: dict[str, Any] | None = None
 
 
 def render_status(console: Console, view: StatusView) -> None:
@@ -54,6 +55,23 @@ def render_status(console: Console, view: StatusView) -> None:
         for item in view.tasks:
             output.add_row(item.id[:12], status_text(item.status), item.text)
         console.print(output)
+    if view.budget:
+        used = view.budget.get("used", {})
+        limits = view.budget.get("limits", {})
+        console.print(
+            Text.assemble(
+                ("run budget=", "text.muted"),
+                (
+                    f"{used.get('tool_rounds', 0)}/{limits.get('max_tool_rounds', '-')} rounds · "
+                    f"{used.get('tool_calls', 0)}/{limits.get('max_tool_calls') or '-'} calls · "
+                    f"{used.get('duration_ms', 0)}ms · {used.get('tokens', 0)} tokens · "
+                    f"${float(used.get('budget_usd', 0)):.6f}",
+                    "text.secondary",
+                ),
+            )
+        )
+        if view.budget.get("stop_reason"):
+            console.print(f"[warning]stop reason:[/] {view.budget['stop_reason']}")
     render_queue(console, view.work_items)
 
 
@@ -97,6 +115,7 @@ def result_status(label: str, status: str, *, detail: str | None = None) -> Text
         "success": "success",
         "failed": "error",
         "cancelled": "warning",
+        "stopped": "warning",
         "waiting": "waiting",
     }.get(status, "text.secondary")
     suffix = f" · {detail}" if detail else ""

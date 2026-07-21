@@ -163,6 +163,9 @@ class WorkspaceApplication:
                     permission_mode=agent_ref["agent"].permission_mode
                     if "agent" in agent_ref
                     else permission_mode,
+                    approval_authorizer=agent_ref["agent"].action_authorizer
+                    if "agent" in agent_ref
+                    else None,
                 )
 
             agent = WorkspaceAgent(
@@ -179,10 +182,13 @@ class WorkspaceApplication:
                 events=events,
                 memory=memory,
                 permission_mode=permission_mode,
-                max_turns=settings.runtime.max_turns,
+                max_tool_rounds=settings.runtime.max_tool_rounds,
                 max_context_messages=settings.runtime.max_context_messages,
                 input_cost_per_million=settings.model_config.input_cost_per_million,
                 output_cost_per_million=settings.model_config.output_cost_per_million,
+                max_run_tokens=settings.budget.max_run_tokens,
+                max_run_usd=settings.budget.max_run_usd,
+                loop_detection=settings.loop_detection,
             )
             agent_ref["agent"] = agent
             return cls(

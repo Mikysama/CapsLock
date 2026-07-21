@@ -86,6 +86,7 @@ class WorkflowRepository(Repository):
                 WorkItemStatus.FAILED,
                 WorkItemStatus.CANCELLED,
                 WorkItemStatus.INTERRUPTED,
+                WorkItemStatus.STOPPED,
             },
             WorkItemStatus.WAITING_APPROVAL: {
                 WorkItemStatus.COMPLETED,
@@ -189,7 +190,7 @@ class WorkflowRepository(Repository):
     async def retryable_run(self, session_id: str, prefix: str) -> RunInfo:
         rows = await self.all(
             """SELECT * FROM runs WHERE session_id=? AND substr(id,1,?)=?
-               AND status IN ('failed','cancelled','interrupted') ORDER BY started_at DESC LIMIT 2""",
+               AND status IN ('failed','cancelled','interrupted','stopped') ORDER BY started_at DESC LIMIT 2""",
             (session_id, len(prefix), prefix),
         )
         if len(rows) > 1:
@@ -212,6 +213,7 @@ class WorkflowRepository(Repository):
         input_tokens: int = 0,
         output_tokens: int = 0,
         cost_usd: float = 0,
+        stop_reason: str | None = None,
     ) -> RunInfo:
         allowed = {
             "waiting_approval",
@@ -219,12 +221,13 @@ class WorkflowRepository(Repository):
             "failed",
             "cancelled",
             "interrupted",
+            "stopped",
         }
         if status not in allowed:
             raise ValueError(f"unsupported terminal run status: {status}")
         updated = await self.execute(
             """UPDATE runs SET status=?,finished_at=?,duration_ms=?,error_code=?,error_message=?,
-               input_tokens=?,output_tokens=?,cost_usd=? WHERE id=? AND status='running'""",
+               input_tokens=?,output_tokens=?,cost_usd=?,stop_reason=? WHERE id=? AND status='running'""",
             (
                 status,
                 now(),
@@ -234,6 +237,7 @@ class WorkflowRepository(Repository):
                 input_tokens,
                 output_tokens,
                 cost_usd,
+                stop_reason,
                 run_id,
             ),
         )
@@ -254,6 +258,7 @@ class WorkflowRepository(Repository):
         input_tokens: int = 0,
         output_tokens: int = 0,
         cost_usd: float = 0,
+        stop_reason: str | None = None,
     ) -> AgentEvent:
         run_status = status.value
         if status not in {
@@ -262,6 +267,7 @@ class WorkflowRepository(Repository):
             WorkItemStatus.FAILED,
             WorkItemStatus.CANCELLED,
             WorkItemStatus.INTERRUPTED,
+            WorkItemStatus.STOPPED,
         }:
             raise ValueError(f"unsupported workflow final status: {status.value}")
         async with self.database.transaction() as connection:
@@ -276,7 +282,7 @@ class WorkflowRepository(Repository):
             timestamp = now()
             await connection.execute(
                 """UPDATE runs SET status=?,finished_at=?,duration_ms=?,error_code=?,error_message=?,
-                   input_tokens=?,output_tokens=?,cost_usd=? WHERE id=? AND status='running'""",
+                   input_tokens=?,output_tokens=?,cost_usd=?,stop_reason=? WHERE id=? AND status='running'""",
                 (
                     run_status,
                     timestamp,
@@ -286,6 +292,7 @@ class WorkflowRepository(Repository):
                     input_tokens,
                     output_tokens,
                     cost_usd,
+                    stop_reason,
                     run_id,
                 ),
             )
@@ -304,6 +311,7 @@ class WorkflowRepository(Repository):
                 WorkItemStatus.CANCELLED,
                 WorkItemStatus.FAILED,
                 WorkItemStatus.INTERRUPTED,
+                WorkItemStatus.STOPPED,
             }:
                 await connection.execute(
                     """UPDATE run_steps SET status=?,finished_at=?,error=coalesce(error,?)
@@ -314,6 +322,7 @@ class WorkflowRepository(Repository):
                 WorkItemStatus.CANCELLED,
                 WorkItemStatus.FAILED,
                 WorkItemStatus.INTERRUPTED,
+                WorkItemStatus.STOPPED,
             }:
                 action_status = (
                     "cancelled" if status is WorkItemStatus.CANCELLED else "failed"
@@ -642,6 +651,7 @@ def _run(row) -> RunInfo:
         error_message=row["error_message"],
         parent_run_id=row["parent_run_id"],
         resume_from_step_id=row["resume_from_step_id"],
+        stop_reason=row["stop_reason"],
     )
 
 

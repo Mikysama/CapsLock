@@ -6,8 +6,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from capslock.application.action_system import ActionCoordinator, FileActionHandler
 from capslock.application.workflow import WorkflowService
 from capslock.domain import (
+    ApprovalDecision,
     ActionStatus,
     ActionType,
     AgentEventKind,
@@ -26,12 +28,14 @@ from capslock.runtime.model import (
 from capslock.runtime.tool_loop import ToolLoop, ToolLoopError
 from capslock.storage.repositories_v2 import WorkspaceRepositories
 from capslock.tooling.async_core import RunContext, Tool, ToolRegistry, ToolResult
+from capslock.tooling.async_catalog import workspace_tools
 from tests.helpers import (
     DummySkillRegistry,
     DummySkillService,
     FakeChatModel,
     answer,
     workspace_run,
+    StubActionHandler,
 )
 
 
@@ -77,6 +81,94 @@ def make_agent(
         permission_mode=PermissionMode.APPROVE_FOR_ME,
         max_turns=3,
     )
+
+
+def test_interactive_approval_executes_action_inside_same_run(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        repositories = await WorkspaceRepositories.open(
+            tmp_path / "state.sqlite3", workspace=tmp_path
+        )
+        try:
+            session = await repositories.sessions.create("test-model")
+            model = FakeChatModel(
+                ModelResponse(
+                    ModelMessage(
+                        None,
+                        (
+                            ModelToolCall(
+                                "create",
+                                "propose_file_create",
+                                '{"path":"approved.txt","content":"done\\n"}',
+                            ),
+                        ),
+                    )
+                ),
+                answer("The approved file was created."),
+            )
+            agent_ref = {}
+
+            def actions(run_id: str) -> ActionCoordinator:
+                return ActionCoordinator(
+                    repositories,
+                    session_id=session.id,
+                    run_id=run_id,
+                    handlers=[
+                        FileActionHandler(WorkspacePolicy(tmp_path)),
+                        StubActionHandler(
+                            set(ActionType)
+                            - {ActionType.FILE_CREATE, ActionType.FILE_EDIT}
+                        ),
+                    ],
+                    event=lambda *args, **kwargs: None,
+                    permission_mode=agent_ref["agent"].permission_mode,
+                    approval_authorizer=agent_ref["agent"].action_authorizer,
+                )
+
+            agent = WorkspaceAgent(
+                workspace=tmp_path,
+                model_name="test-model",
+                chat_model=model,
+                repositories=repositories,
+                workflow=WorkflowService(repositories),
+                session_id=session.id,
+                policy=WorkspacePolicy(tmp_path),
+                action_factory=actions,
+                skill_registry=DummySkillRegistry(),
+                skill_service=DummySkillService(),
+                events=EventSink(),
+                tools=workspace_tools(),
+                permission_mode=PermissionMode.APPROVE_FOR_ME,
+                max_turns=3,
+            )
+            agent_ref["agent"] = agent
+            decisions = []
+
+            async def approve(action):
+                decisions.append(action.id)
+                return ApprovalDecision.APPROVE
+
+            agent.set_action_authorizer(approve)
+            events = await collect(agent, "Create approved.txt")
+            assert len(decisions) == 1
+            assert (tmp_path / "approved.txt").read_text() == "done\n"
+            assert events[-1].kind is AgentEventKind.COMPLETED
+            assert all(
+                event.kind is not AgentEventKind.WAITING_APPROVAL for event in events
+            )
+            actions_for_run = await repositories.actions.list(
+                session.id, run_id=events[-1].run_id
+            )
+            assert [item.status for item in actions_for_run] == [ActionStatus.COMPLETED]
+            tool_message = next(
+                message
+                for message in model.requests[1]["messages"]
+                if message.get("role") == "tool"
+            )
+            assert '"status": "completed"' in tool_message["content"]
+        finally:
+            await repositories.close()
+
+    asyncio.run(scenario())
 
 
 def test_tool_loop_handles_invalid_arguments_and_continues(tmp_path: Path) -> None:

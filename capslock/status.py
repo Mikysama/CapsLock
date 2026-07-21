@@ -19,6 +19,7 @@ class AgentStatus(StrEnum):
     DONE = "done"
     ERROR = "error"
     CANCELLED = "cancelled"
+    STOPPED = "stopped"
 
 
 STATUS_MESSAGES: dict[AgentStatus, str] = {
@@ -32,6 +33,7 @@ STATUS_MESSAGES: dict[AgentStatus, str] = {
     AgentStatus.DONE: "Done",
     AgentStatus.ERROR: "Failed",
     AgentStatus.CANCELLED: "Cancelled",
+    AgentStatus.STOPPED: "Stopped",
 }
 
 SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
@@ -80,10 +82,16 @@ def status_for_event(
         return AgentStatus.GENERATING, None
     if kind is AgentEventKind.WAITING_APPROVAL:
         return AgentStatus.WAITING, None
+    if kind is AgentEventKind.LIMIT_REACHED:
+        return AgentStatus.WAITING, None
+    if kind in {AgentEventKind.BUDGET_UPDATED, AgentEventKind.BUDGET_EXTENDED}:
+        return AgentStatus.ANALYZING, None
     if kind is AgentEventKind.COMPLETED:
         return AgentStatus.DONE, None
     if kind is AgentEventKind.CANCELLED:
         return AgentStatus.CANCELLED, None
     if kind is AgentEventKind.FAILED:
         return AgentStatus.ERROR, None
+    if kind is AgentEventKind.STOPPED:
+        return AgentStatus.STOPPED, None
     return AgentStatus.IDLE, None

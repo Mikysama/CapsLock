@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .credentials import resolve_credential
 from .layout import ProjectLayout
 from .policy import PolicyError, WorkspacePolicy
 
@@ -104,6 +105,17 @@ class McpRegistry:
             for key, value in env.items()
         ):
             raise ValueError(f"MCP server {name} has invalid local env")
+        resolved_env = {}
+        for key, value in env.items():
+            if value.startswith(("env:", "keyring:")):
+                resolved = resolve_credential(value)
+                if not resolved:
+                    raise ValueError(
+                        f"MCP server {name} credential for {key} is missing"
+                    )
+                resolved_env[key] = resolved
+            else:
+                resolved_env[key] = value
         return McpServer(
             name,
             command,
@@ -111,7 +123,7 @@ class McpRegistry:
             cwd,
             str(raw.get("description", "")),
             tuple(allowed),
-            dict(env),
+            resolved_env,
             bool(raw.get("enabled", True)),
             "local" if local else "project",
         )

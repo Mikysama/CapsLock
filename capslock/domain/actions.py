@@ -27,6 +27,11 @@ class ActionStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
+class ApprovalDecision(StrEnum):
+    APPROVE = "approve"
+    REJECT = "reject"
+
+
 class ActionResultKind(StrEnum):
     APPLIED = "applied"
     UNDONE = "undone"
@@ -131,3 +136,6 @@ class ActionRecord:
     rollback: str | None = None
     error_code: str | None = None
     error_message: str | None = None
+    import_id: str | None = None
+    historical_only: bool = False
+    requires_reapproval: bool = False

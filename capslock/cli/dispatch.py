@@ -73,6 +73,9 @@ async def _status(context: CliContext) -> None:
     )
     cost = await agent.repositories.workflow.session_cost(agent.session_id)
     count = await agent.repositories.sessions.message_count(agent.session_id)
+    latest_budget = await agent.repositories.governance.latest_for_session(
+        agent.session_id
+    )
     render_status(
         context.console,
         StatusView(
@@ -85,6 +88,7 @@ async def _status(context: CliContext) -> None:
             *cost,
             count,
             agent.max_context_messages,
+            latest_budget.as_dict() if latest_budget else None,
         ),
     )
 
@@ -118,4 +122,11 @@ async def _queue(context: CliContext, parts: list[str]) -> None:
             "[text.secondary]Retry is queued by the active TUI worker.[/]"
         )
         return
-    raise ValueError("usage: /queue [cancel <id>|move <id> <position>|retry <run-id>]")
+    if len(parts) == 3 and parts[1] == "start":
+        context.console.print(
+            "[text.secondary]Queued work is started by the active TUI worker.[/]"
+        )
+        return
+    raise ValueError(
+        "usage: /queue [start <id>|cancel <id>|move <id> <position>|retry <run-id>]"
+    )

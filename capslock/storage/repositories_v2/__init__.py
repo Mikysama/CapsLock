@@ -15,6 +15,7 @@ from .misc import (
 )
 from .sessions import SessionRepository
 from .models import ModelRepository
+from .governance import GovernanceRepository
 from .workflow import WorkflowRepository
 
 
@@ -29,6 +30,7 @@ class WorkspaceRepositories:
     settings: SettingsRepository
     snapshots: SnapshotRepository
     models: ModelRepository
+    governance: GovernanceRepository
 
     @classmethod
     async def open(
@@ -49,6 +51,7 @@ class WorkspaceRepositories:
             SettingsRepository(database),
             SnapshotRepository(database),
             ModelRepository(database),
+            GovernanceRepository(database),
         )
 
     async def close(self) -> None:
@@ -59,6 +62,7 @@ __all__ = [
     "ActionRepository",
     "SessionRepository",
     "ModelRepository",
+    "GovernanceRepository",
     "SettingsRepository",
     "SnapshotRepository",
     "SourceRepository",

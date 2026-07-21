@@ -17,6 +17,7 @@ from prompt_toolkit.shortcuts import CompleteStyle
 from prompt_toolkit.shortcuts import choice
 from prompt_toolkit.utils import get_cwidth
 
+from ..domain import ActionRecord, ApprovalDecision
 from ..permissions import PermissionMode
 from ..status import SPINNER_FRAMES
 from ..theme import build_prompt_style
@@ -170,6 +171,66 @@ def select_session(
         header,
         options=options,
         default=sessions[0].id,
+        style=PROMPT_STYLE,
+        symbol="❯",
+    )
+
+
+def select_permission_mode(current: PermissionMode) -> PermissionMode:
+    labels = {
+        PermissionMode.APPROVE_FOR_ME: (
+            "Approve high-risk actions",
+            "Files, commands, and MCP wait for approval; Web remains audited.",
+        ),
+        PermissionMode.ASK_FOR_APPROVAL: (
+            "Approve every action",
+            "Every proposal waits for an explicit decision.",
+        ),
+        PermissionMode.FULL_ACCESS: (
+            "Full access",
+            "Safe actions run automatically; Skill file changes still wait.",
+        ),
+    }
+    options = [
+        (
+            mode,
+            FormattedText(
+                [
+                    ("class:command-name", title),
+                    ("class:footer", f"  {description}"),
+                ]
+            ),
+        )
+        for mode, (title, description) in labels.items()
+    ]
+    return choice(
+        FormattedText(
+            [
+                ("class:command-name", "Select permission mode\n"),
+                ("class:footer", "↑/↓ choose · Enter apply"),
+            ]
+        ),
+        options=options,
+        default=current,
+        style=PROMPT_STYLE,
+        symbol="❯",
+    )
+
+
+def select_action_decision(_action: ActionRecord) -> ApprovalDecision:
+    header = FormattedText(
+        [
+            ("class:command-name", "Allow CapsLock to execute this action?\n"),
+            ("class:footer", "↑/↓ choose · Enter confirm"),
+        ]
+    )
+    return choice(
+        header,
+        options=[
+            (ApprovalDecision.REJECT, "No, do not execute"),
+            (ApprovalDecision.APPROVE, "Yes, execute"),
+        ],
+        default=ApprovalDecision.REJECT,
         style=PROMPT_STYLE,
         symbol="❯",
     )

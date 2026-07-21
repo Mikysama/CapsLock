@@ -14,9 +14,12 @@ from rich.console import Console
 from .. import __version__
 from ..application.app import WorkspaceApplication
 from ..config import Settings
+from ..credentials import CredentialError
 from ..environment import load_project_environment
 from ..layout import LayoutConflict, ProjectLayout
+from ..lifecycle import LifecycleError
 from ..runtime import AgentRuntimeError
+from ..domain import RunLimits
 from ..session_management import SessionManager
 from ..storage.async_database import IncompatibleDatabaseError
 from ..storage.memory_v2 import MemoryRepositories
@@ -34,7 +37,14 @@ from .diagnostics import (
     select_session,
 )
 from .exec import run_exec
+from .lifecycle import backup_command, export_lifecycle, import_lifecycle
 from .status import dynamic_status_supported
+from .setup import (
+    config_migrate,
+    config_validate,
+    credentials_command,
+    initialize,
+)
 from .tui import run_tui
 
 
@@ -54,6 +64,11 @@ def build_parser() -> argparse.ArgumentParser:
     execute.add_argument("--json", action="store_true")
     execute.add_argument("--no-spinner", action="store_true", default=argparse.SUPPRESS)
     execute.add_argument("--quiet", action="store_true", default=argparse.SUPPRESS)
+    execute.add_argument("--max-tool-rounds", type=_positive_int)
+    execute.add_argument("--max-tool-calls", type=_positive_int)
+    execute.add_argument("--max-duration-seconds", type=_positive_float)
+    execute.add_argument("--max-tokens", type=_positive_int)
+    execute.add_argument("--max-budget-usd", type=_positive_float)
     resume = subparsers.add_parser("resume", help="Resume a saved TUI session")
     resume.add_argument("session_id", nargs="?")
     resume.add_argument("--limit", type=int, default=20)
@@ -80,7 +95,65 @@ def build_parser() -> argparse.ArgumentParser:
     delete = commands.add_parser("delete")
     delete.add_argument("session_id", nargs="?")
     delete.add_argument("--yes", action="store_true")
-    subparsers.add_parser("doctor", help="Check v2 configuration and state")
+    initialize_parser = subparsers.add_parser("init", help="Initialize a workspace")
+    initialize_parser.add_argument("--non-interactive", action="store_true")
+    initialize_parser.add_argument("--provider")
+    initialize_parser.add_argument("--base-url")
+    initialize_parser.add_argument("--model")
+    initialize_parser.add_argument("--credential")
+    initialize_parser.add_argument("--tavily-credential")
+    initialize_parser.add_argument("--permission-mode")
+    initialize_parser.add_argument("--disable-memory", action="store_true")
+    initialize_parser.add_argument("--update", action="store_true")
+    initialize_parser.add_argument("--check-provider", action="store_true")
+    config_parser = subparsers.add_parser(
+        "config", help="Validate or migrate configuration"
+    )
+    config_commands = config_parser.add_subparsers(dest="config_command")
+    validate = config_commands.add_parser("validate")
+    validate.add_argument("--json", action="store_true")
+    validate.add_argument("--strict", action="store_true")
+    migrate = config_commands.add_parser("migrate")
+    migrate_mode = migrate.add_mutually_exclusive_group()
+    migrate_mode.add_argument("--dry-run", action="store_true")
+    migrate_mode.add_argument("--apply", action="store_true")
+    credentials = subparsers.add_parser("credentials", help="Manage OS credentials")
+    credential_commands = credentials.add_subparsers(dest="credentials_command")
+    credential_commands.add_parser("status")
+    credential_set = credential_commands.add_parser("set")
+    credential_set.add_argument("name")
+    credential_set.add_argument("--stdin", action="store_true")
+    credential_delete = credential_commands.add_parser("delete")
+    credential_delete.add_argument("name")
+    credential_delete.add_argument("--yes", action="store_true")
+    backup = subparsers.add_parser("backup", help="Create or restore local backups")
+    backup_commands = backup.add_subparsers(dest="backup_command")
+    backup_create = backup_commands.add_parser("create")
+    backup_create.add_argument("destination", nargs="?", type=Path)
+    backup_commands.add_parser("list")
+    backup_verify = backup_commands.add_parser("verify")
+    backup_verify.add_argument("archive", type=Path)
+    backup_restore = backup_commands.add_parser("restore")
+    backup_restore.add_argument("archive", type=Path)
+    backup_restore.add_argument("--yes", action="store_true")
+    portable_export = subparsers.add_parser(
+        "export", help="Create a portable data export"
+    )
+    portable_export.add_argument("destination", type=Path)
+    portable_export.add_argument("--include-global-memory", action="store_true")
+    portable_import = subparsers.add_parser(
+        "import", help="Merge a portable data export"
+    )
+    portable_import.add_argument("archive", type=Path)
+    portable_import.add_argument("--yes", action="store_true")
+    doctor_parser = subparsers.add_parser(
+        "doctor", help="Check configuration and state"
+    )
+    doctor_parser.add_argument("--json", action="store_true")
+    doctor_parser.add_argument("--strict", action="store_true")
+    doctor_parser.add_argument("--network", action="store_true")
+    doctor_parser.add_argument("--fix", action="store_true")
+    doctor_parser.add_argument("--yes", action="store_true")
     return parser
 
 
@@ -153,9 +226,43 @@ async def async_main(
     try:
         layout = ProjectLayout.discover(workspace)
         load_project_environment(workspace)
-        settings = Settings.load(workspace, layout=layout)
+        if args.command == "init":
+            return await initialize(output, workspace, args)
+        if args.command == "config":
+            if args.config_command in {None, "validate"}:
+                return await config_validate(
+                    output,
+                    layout.config,
+                    json_output=getattr(args, "json", False),
+                    strict=getattr(args, "strict", False),
+                )
+            return await config_migrate(output, layout.config, apply=bool(args.apply))
+        if args.command == "credentials":
+            return await credentials_command(output, layout.config, args)
         if args.command == "doctor":
-            return await doctor(output, workspace, settings, layout=layout)
+            return await doctor(output, workspace, layout=layout, args=args)
+        if args.command == "backup":
+            return await backup_command(output, layout, args)
+        if args.command == "export":
+            return await export_lifecycle(
+                output,
+                layout,
+                args.destination,
+                include_global_memory=args.include_global_memory,
+            )
+        if args.command == "import":
+            journal = layout.root / "state" / "lifecycle-journal.json"
+            if journal.exists():
+                raise LifecycleError(
+                    f"an incomplete lifecycle operation requires `capslock doctor --fix`: {journal}"
+                )
+            return await import_lifecycle(output, layout, args.archive, yes=args.yes)
+        journal = layout.root / "state" / "lifecycle-journal.json"
+        if journal.exists():
+            raise LifecycleError(
+                f"an incomplete lifecycle operation requires `capslock doctor --fix`: {journal}"
+            )
+        settings = Settings.load(workspace, layout=layout)
         if args.command in {"session", "sessions"}:
             return await _sessions(output, args, workspace, layout, settings)
         session_id = getattr(args, "session_id", None)
@@ -196,6 +303,7 @@ async def async_main(
                     json_events=args.json,
                     spinner=not args.no_spinner,
                     quiet=args.quiet,
+                    limits=_exec_limits(application.agent.default_limits, args),
                 )
             return await run_tui(
                 context,
@@ -211,7 +319,7 @@ async def async_main(
     except (LayoutConflict, IncompatibleDatabaseError) as exc:
         errors.print(f"[error]Incompatible state:[/] {exc}")
         return 2
-    except (AgentRuntimeError, ValueError) as exc:
+    except (AgentRuntimeError, CredentialError, LifecycleError, ValueError) as exc:
         errors.print(f"[error]Error:[/] {exc}")
         return 2
     except Exception as exc:
@@ -270,6 +378,38 @@ async def _sessions(
         if memory_repositories is not None:
             await memory_repositories.close()
         await repositories.close()
+
+
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be positive")
+    return parsed
+
+
+def _positive_float(value: str) -> float:
+    parsed = float(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be positive")
+    return parsed
+
+
+def _tighter(configured, requested):
+    if requested is None:
+        return configured
+    if configured is None:
+        return requested
+    return min(configured, requested)
+
+
+def _exec_limits(defaults: RunLimits, args) -> RunLimits:
+    return RunLimits(
+        max_tool_rounds=_tighter(defaults.max_tool_rounds, args.max_tool_rounds),
+        max_tool_calls=args.max_tool_calls,
+        max_duration_seconds=args.max_duration_seconds,
+        max_tokens=_tighter(defaults.max_tokens, args.max_tokens),
+        max_budget_usd=_tighter(defaults.max_budget_usd, args.max_budget_usd),
+    )
 
 
 if __name__ == "__main__":

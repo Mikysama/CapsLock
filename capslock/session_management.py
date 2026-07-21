@@ -17,7 +17,7 @@ from .storage.memory_v2 import MemoryRepositories, workspace_key
 from .storage.repositories_v2 import WorkspaceRepositories
 
 SESSION_EXPORT_FORMAT = "capslock-session-export"
-SESSION_EXPORT_VERSION = 2
+SESSION_EXPORT_VERSION = 3
 
 
 class SessionManager:
@@ -121,4 +121,10 @@ def _markdown(document: dict[str, Any]) -> str:
     ]
     for item in document.get("messages", []):
         lines.extend((f"### {str(item['role']).title()}", "", str(item["content"]), ""))
+    stopped = [item for item in document.get("runs", []) if item.get("stop_reason")]
+    if stopped:
+        lines.extend(("## Incomplete runs", ""))
+        for item in stopped:
+            lines.append(f"- `{str(item['id'])[:12]}` stopped: `{item['stop_reason']}`")
+        lines.append("")
     return "\n".join(lines).rstrip() + "\n"
