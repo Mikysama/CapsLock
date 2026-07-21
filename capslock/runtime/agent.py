@@ -85,8 +85,7 @@ class WorkspaceAgent:
         tools: ToolRegistry | None = None,
         memory: Any = None,
         permission_mode: PermissionMode = PermissionMode.APPROVE_FOR_ME,
-        max_turns: int = 32,
-        max_tool_rounds: int | None = None,
+        max_tool_rounds: int = 32,
         max_context_messages: int = 24,
         input_cost_per_million: float = 0,
         output_cost_per_million: float = 0,
@@ -110,8 +109,7 @@ class WorkspaceAgent:
         self.interaction = interaction or RunInteraction(
             permission_mode=permission_mode
         )
-        self.max_tool_rounds = max_tool_rounds or max_turns
-        self.max_turns = self.max_tool_rounds
+        self.max_tool_rounds = max_tool_rounds
         self.max_context_messages = max_context_messages
         self.input_cost = input_cost_per_million
         self.output_cost = output_cost_per_million
@@ -128,7 +126,7 @@ class WorkspaceAgent:
             model=model_name,
             tools=self.tools,
             journal=repositories.workflow,
-            max_turns=self.max_tool_rounds,
+            max_tool_rounds=self.max_tool_rounds,
             context_factory=self._run_context,
         )
         self.run_orchestrator = RunOrchestrator(

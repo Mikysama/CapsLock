@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import asyncio
-import warnings
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -233,27 +232,15 @@ class ToolLoop:
         chat_model: ChatModel,
         model: str,
         tools: ToolRegistry,
-        repositories=None,
-        journal: RunJournal | None = None,
-        max_turns: int,
+        journal: RunJournal,
+        max_tool_rounds: int,
         context_factory: Callable[[str], RunContext],
     ) -> None:
         self.chat_model = chat_model
         self.model = model
         self.tools = tools
-        if journal is None:
-            if repositories is None:
-                raise TypeError("ToolLoop requires journal=")
-            warnings.warn(
-                "ToolLoop(repositories=...) is deprecated; pass journal=; "
-                "removed in 2.0.0",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            journal = repositories.workflow
         self.journal = journal
-        self.repositories = repositories
-        self.max_turns = max_turns
+        self.max_tool_rounds = max_tool_rounds
         self.context_factory = context_factory
         self.model_steps = ModelStepExecutor(journal=journal, model=model, tools=tools)
         self.tool_calls = ToolCallExecutor(
@@ -364,7 +351,7 @@ class ToolLoop:
                     output_tokens,
                     await governor.current() if governor else None,
                 )
-            if governor is None and turn == self.max_turns:
+            if governor is None and turn == self.max_tool_rounds:
                 await self.journal.finish_step(
                     model_step.id,
                     status=RunStepStatus.FAILED,

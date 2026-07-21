@@ -6,7 +6,6 @@ import asyncio
 import json
 import math
 import time
-import warnings
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -128,8 +127,7 @@ class ModelRouter:
         profiles: dict[str, ModelProfileSettings],
         routing: RoutingSettings,
         clients: dict[str, ChatModel],
-        audit: ModelAuditPort | None = None,
-        repositories: Any = None,
+        audit: ModelAuditPort,
         budget: BudgetSettings = BudgetSettings(),
         retries: int = 2,
     ) -> None:
@@ -137,18 +135,7 @@ class ModelRouter:
         self.profiles = profiles
         self.routing = routing
         self.clients = clients
-        if audit is None:
-            if repositories is None:
-                raise TypeError("ModelRouter requires audit=")
-            warnings.warn(
-                "ModelRouter(repositories=...) is deprecated; pass audit=; "
-                "removed in 2.0.0",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            audit = repositories.models
         self.audit = audit
-        self.repositories = repositories
         self.budget = budget
         self.retries = max(0, retries)
         self.attempts = RouteAttemptDriver(self)
@@ -188,42 +175,6 @@ class ModelRouter:
 
     def open_session(self, context: ModelRunContext) -> ModelRunSession:
         return _RouterModelRunSession(self, context)
-
-    @contextmanager
-    def bind_run(
-        self,
-        run_id: str,
-        *,
-        limits: RunLimits | None = None,
-        budget_base: tuple[int, float] = (0, 0.0),
-        hard: bool = False,
-    ):
-        warnings.warn(
-            "ModelRouter.bind_run() is deprecated; use open_session(); "
-            "removed in 2.0.0",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        with self._bind_context(
-            ModelRunContext(
-                run_id, limits=limits, budget_base=budget_base, hard_budget=hard
-            )
-        ):
-            yield
-
-    @contextmanager
-    def use_role(self, role: ModelRole):
-        warnings.warn(
-            "ModelRouter.use_role() is deprecated; use ModelRunSession.for_role(); "
-            "removed in 2.0.0",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        token = self._role.set(role)
-        try:
-            yield
-        finally:
-            self._role.reset(token)
 
     async def complete(
         self,
@@ -353,15 +304,6 @@ class ModelRouter:
                 return
             previous = profile.name
         await self.attempts.exhausted(plan, previous, last_error)
-
-    async def summary(self, run_id: str) -> list[dict[str, Any]]:
-        warnings.warn(
-            "ModelRouter.summary(run_id) is deprecated; use ModelRunSession.summary(); "
-            "removed in 2.0.0",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return await self.audit.summary(run_id)
 
     def _required_run(self) -> str:
         run_id = self._run_id.get()

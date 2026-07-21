@@ -4,6 +4,18 @@
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-07-21
+
+### Changed
+
+- 完成稳定兼容里程碑：删除 1.10.1 的 Python 与 `max_turns` 兼容入口，统一使用窄端口、`ModelRunSession` 和 `max_tool_rounds`。
+- 保持 workspace schema v4、memory schema v3、portable archive v2、JSONL v2、权限模型和 canonical 布局兼容。
+- 将最低 Python 版本提升到 3.12，并在 Linux/macOS 上执行升级、回滚和 v2 端到端发布评测。
+
+### Removed
+
+- `SessionStore`、`MemoryStore`、同步 Agent/ToolLoop、Classic UI、旧 `chat`/`ask`/`migrate-layout` 及旧 export import 兼容入口。
+
 ## [1.10.1] - 2026-07-21
 
 ### Changed

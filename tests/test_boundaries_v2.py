@@ -11,7 +11,10 @@ from capslock.config import Settings
 from capslock.external import is_suspicious, validate_public_url
 from capslock.layout import LayoutConflict, ProjectLayout, UserLayout
 from capslock.permissions import PermissionMode
+from capslock.runtime import ModelRouter, WorkspaceAgent
+from capslock.runtime.tool_loop import ToolLoop
 from capslock.skills import SkillValidationError, load_skill_package
+from capslock.tooling import RunContext
 from capslock.tooling.async_catalog import workspace_tools
 
 
@@ -52,6 +55,16 @@ def test_v1_facades_and_sync_clients_are_absent() -> None:
         "def ask(",
     ):
         assert forbidden not in text
+
+
+def test_v1101_deprecated_python_interfaces_are_removed() -> None:
+    assert "repositories" not in inspect.signature(RunContext).parameters
+    assert "repositories" not in inspect.signature(ToolLoop).parameters
+    assert "max_turns" not in inspect.signature(ToolLoop).parameters
+    assert "repositories" not in inspect.signature(ModelRouter).parameters
+    assert "max_turns" not in inspect.signature(WorkspaceAgent).parameters
+    for name in ("bind_run", "use_role", "summary"):
+        assert not hasattr(ModelRouter, name)
 
 
 def test_runtime_and_tooling_depend_only_on_neutral_ports() -> None:
@@ -110,11 +123,11 @@ def test_settings_use_explicit_groups(
     monkeypatch.setenv("CAPSLOCK_MEMORY_DATABASE", str(tmp_path / "memory.sqlite3"))
     monkeypatch.setenv("CAPSLOCK_API_KEY", "secret")
     monkeypatch.setenv("CAPSLOCK_MODEL", "test-model")
-    monkeypatch.setenv("CAPSLOCK_MAX_TURNS", "9")
+    monkeypatch.setenv("CAPSLOCK_MAX_TOOL_ROUNDS", "9")
     layout = ProjectLayout.discover(tmp_path)
     settings = Settings.load(tmp_path, layout=layout)
     assert settings.model_config.model == "test-model"
-    assert settings.runtime.max_turns == 9
+    assert settings.runtime.max_tool_rounds == 9
     assert settings.command.command_timeout_seconds > 0
     assert settings.web.web_max_redirects >= 0
     assert settings.mcp.mcp_timeout_seconds > 0
@@ -139,7 +152,7 @@ def test_toml_settings_are_read_from_their_explicit_groups(
         """[model]
 model = "configured-model"
 [runtime]
-max_turns = 7
+max_tool_rounds = 7
 permission_mode = "full_access"
 [command]
 command_timeout_seconds = 12
@@ -154,12 +167,21 @@ enabled = false
     )
     settings = Settings.load(tmp_path)
     assert settings.model_config.model == "configured-model"
-    assert settings.runtime.max_turns == 7
+    assert settings.runtime.max_tool_rounds == 7
     assert settings.permission_mode == "full_access"
     assert settings.command.command_timeout_seconds == 12
     assert settings.web.web_max_redirects == 1
     assert settings.mcp.mcp_output_bytes == 2048
     assert settings.memory.project_write_enabled is False
+
+
+def test_removed_max_turns_environment_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CAPSLOCK_API_KEY", "secret")
+    monkeypatch.setenv("CAPSLOCK_MAX_TURNS", "9")
+    with pytest.raises(ValueError, match="CAPSLOCK_MAX_TURNS.*MAX_TOOL_ROUNDS"):
+        Settings.load(tmp_path)
 
 
 @pytest.mark.parametrize(

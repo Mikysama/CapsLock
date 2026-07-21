@@ -178,6 +178,34 @@ def test_layout_rejects_managed_symlinks(tmp_path: Path) -> None:
         ProjectLayout.discover(tmp_path, user=user)
 
 
+def test_v110_state_reopens_in_v2_without_schema_migration(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        workspace_path = tmp_path / "workspace.sqlite3"
+        memory_path = tmp_path / "memory.sqlite3"
+        workspace = await WorkspaceDatabase.open(workspace_path)
+        memory = await MemoryDatabase.open(memory_path)
+        try:
+            workspace_version = (await workspace.fetch_one("PRAGMA user_version"))[0]
+            memory_version = (await memory.fetch_one("PRAGMA user_version"))[0]
+            assert workspace_version == WORKSPACE_SCHEMA_VERSION == 4
+            assert memory_version == MEMORY_SCHEMA_VERSION == 3
+        finally:
+            await workspace.close()
+            await memory.close()
+
+        assert not list(tmp_path.glob("backups/*"))
+        workspace = await WorkspaceDatabase.open(workspace_path)
+        memory = await MemoryDatabase.open(memory_path)
+        try:
+            assert (await workspace.fetch_one("PRAGMA user_version"))[0] == 4
+            assert (await memory.fetch_one("PRAGMA user_version"))[0] == 3
+        finally:
+            await workspace.close()
+            await memory.close()
+
+    asyncio.run(scenario())
+
+
 def test_session_export_v2_includes_all_snapshot_tables(tmp_path: Path) -> None:
     async def scenario() -> None:
         repositories = await WorkspaceRepositories.open(

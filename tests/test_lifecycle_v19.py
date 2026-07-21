@@ -73,6 +73,20 @@ def test_config_v0_migrates_atomically_and_init_is_noninteractive(
     assert generated["providers"]["primary"]["credential"] == "env:CAPSLOCK_API_KEY"
     assert "test-secret" not in (fresh / ".capslock" / "config.toml").read_text()
 
+    doctor_output = io.StringIO()
+    result = asyncio.run(
+        async_main(
+            ["--workspace", str(fresh), "doctor", "--json"],
+            console=Console(file=doctor_output, force_terminal=False),
+        )
+    )
+    assert result == 0
+    diagnostics = json.loads(doctor_output.getvalue())["diagnostics"]
+    assert any(
+        item["code"] == "config" and item["message"] == "version 2 valid"
+        for item in diagnostics
+    )
+
 
 def test_environment_and_keyring_credentials_are_secret_safe(monkeypatch) -> None:
     values: dict[tuple[str, str], str] = {}

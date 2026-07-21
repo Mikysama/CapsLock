@@ -2,6 +2,12 @@
 
 本参考描述 v2 的模型工具、TUI 命令、审批边界与持久化契约。
 
+## 稳定契约
+
+CapsLock 2.0.0 支持 Linux/macOS 与 Python 3.12。CLI 命令和退出码、`config_version = 2`、workspace schema v4、memory schema v3、portable archive v2、JSONL schema v2、Skill manifest 和 `ToolResult` 的 `ok/data/error` 模型输入协议在 2.0 系列内保持向后兼容。
+
+1.10.1 的 `repositories=`、`ModelRouter.bind_run()/use_role()/summary(run_id)` 与 `max_turns` 入口已删除。新弃用至少提前一个 minor 版本公告；删除的入口不提供静默兼容。完整映射见 [v2 开发过程与迁移](development/v2/v2.0.md)。
+
 ## 权限模式
 
 | 模式 | 行为 |
@@ -177,4 +183,4 @@ portable import 使用 archive ID 幂等记录。相同 ID 与内容跳过，同
 - `/status` 和 JSONL 终止事件保留 run/session token、费用及逐模型摘要。预算预检失败时，TUI 可仅批准下一次模型调用，`exec` 返回 `model_budget_exceeded`。
 - `/memory embeddings enable external <model-profile>` 会先展示 `memory.content`、未来 `recall.query`、当前记录数和 UTF-8 字节数；确认记录失效或撤销后不会联网。
 
-canonical 路径与手工迁移步骤见 [v2 architecture and migration](development/v2.md)。
+canonical 路径与手工迁移步骤见 [v2 开发过程与迁移](development/v2/v2.0.md)。

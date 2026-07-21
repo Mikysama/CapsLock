@@ -6,7 +6,6 @@ import os
 import re
 import shutil
 import tempfile
-import warnings
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -24,7 +23,6 @@ from .pipeline import (
 
 
 DEFAULT_MAX_TOOL_ROUNDS = 32
-DEFAULT_MAX_TURNS = DEFAULT_MAX_TOOL_ROUNDS
 CONFIG_VERSION = 2
 
 
@@ -80,11 +78,6 @@ class BudgetSettings:
 class RuntimeSettings:
     max_tool_rounds: int
     max_context_messages: int
-
-    @property
-    def max_turns(self) -> int:
-        """Compatibility alias retained through 2.0.0."""
-        return self.max_tool_rounds
 
 
 @dataclass(frozen=True)
@@ -274,7 +267,6 @@ _GROUP_FIELDS = {
     },
     "runtime": {
         "max_tool_rounds",
-        "max_turns",
         "max_context_messages",
         "permission_mode",
     },
@@ -370,18 +362,19 @@ def validate_config_document(document: dict[str, object]) -> tuple[ConfigIssue, 
             )
             continue
         for field in sorted(set(raw) - allowed):
+            if group_name == "runtime" and field == "max_turns":
+                issues.append(
+                    ConfigIssue(
+                        "error",
+                        "max_turns_removed",
+                        "runtime.max_turns",
+                        "removed in 2.0.0; use runtime.max_tool_rounds",
+                    )
+                )
+                continue
             issues.append(
                 ConfigIssue(
                     "error", "unknown_field", f"{group_name}.{field}", "unknown field"
-                )
-            )
-        if group_name == "runtime" and "max_turns" in raw:
-            issues.append(
-                ConfigIssue(
-                    "warning",
-                    "max_turns_deprecated",
-                    "runtime.max_turns",
-                    "use runtime.max_tool_rounds; max_turns is removed in 2.0.0",
                 )
             )
         for secret_field in (
@@ -475,6 +468,11 @@ def migrate_config(path: Path, *, apply: bool) -> tuple[bool, str | None]:
         return False, None
     if version not in {0, 1}:
         raise ValueError(f"unsupported configuration version {version}")
+    runtime = document.get("runtime")
+    if isinstance(runtime, dict) and "max_turns" in runtime:
+        raise ValueError(
+            "runtime.max_turns was removed in 2.0.0; use runtime.max_tool_rounds"
+        )
     plaintext = [
         item
         for item in validate_config_document(document)
@@ -488,11 +486,6 @@ def migrate_config(path: Path, *, apply: bool) -> tuple[bool, str | None]:
         raise RuntimeError("tomlkit is required for configuration migration") from exc
     parsed = tomlkit.parse(path.read_text(encoding="utf-8"))
     parsed["config_version"] = CONFIG_VERSION
-    runtime = parsed.get("runtime")
-    if runtime is not None and "max_turns" in runtime:
-        if "max_tool_rounds" not in runtime:
-            runtime["max_tool_rounds"] = runtime["max_turns"]
-        del runtime["max_turns"]
     providers = parsed.get("providers")
     if providers is not None:
         for provider in providers.values():
@@ -722,27 +715,20 @@ def _budget(raw: dict[str, object]) -> BudgetSettings:
 
 
 def _max_tool_rounds(runtime: dict[str, object]) -> int:
-    for name in ("CAPSLOCK_MAX_TOOL_ROUNDS", "CAPSLOCK_MAX_TURNS"):
-        if name in os.environ:
-            if name == "CAPSLOCK_MAX_TURNS":
-                warnings.warn(
-                    "CAPSLOCK_MAX_TURNS is deprecated; use CAPSLOCK_MAX_TOOL_ROUNDS",
-                    UserWarning,
-                    stacklevel=2,
-                )
-            value = int(os.environ[name])
-            if value <= 0:
-                raise ValueError(f"{name} must be positive")
-            return value
-    value = runtime.get(
-        "max_tool_rounds", runtime.get("max_turns", DEFAULT_MAX_TOOL_ROUNDS)
-    )
-    if "max_tool_rounds" not in runtime and "max_turns" in runtime:
-        warnings.warn(
-            "runtime.max_turns is deprecated; use runtime.max_tool_rounds",
-            UserWarning,
-            stacklevel=2,
+    if "CAPSLOCK_MAX_TURNS" in os.environ:
+        raise ValueError(
+            "CAPSLOCK_MAX_TURNS was removed in 2.0.0; use CAPSLOCK_MAX_TOOL_ROUNDS"
         )
+    if "max_turns" in runtime:
+        raise ValueError(
+            "runtime.max_turns was removed in 2.0.0; use runtime.max_tool_rounds"
+        )
+    if "CAPSLOCK_MAX_TOOL_ROUNDS" in os.environ:
+        value = int(os.environ["CAPSLOCK_MAX_TOOL_ROUNDS"])
+        if value <= 0:
+            raise ValueError("CAPSLOCK_MAX_TOOL_ROUNDS must be positive")
+        return value
+    value = runtime.get("max_tool_rounds", DEFAULT_MAX_TOOL_ROUNDS)
     parsed = int(value)
     if parsed <= 0:
         raise ValueError("runtime.max_tool_rounds must be positive")
@@ -775,9 +761,7 @@ def _validate_semantics(document: dict[str, object]) -> None:
     )
     runtime = document.get("runtime", {})
     if isinstance(runtime, dict):
-        rounds = runtime.get(
-            "max_tool_rounds", runtime.get("max_turns", DEFAULT_MAX_TOOL_ROUNDS)
-        )
+        rounds = runtime.get("max_tool_rounds", DEFAULT_MAX_TOOL_ROUNDS)
         if int(rounds) <= 0:
             raise ValueError("runtime.max_tool_rounds must be positive")
         if int(runtime.get("max_context_messages", 24)) <= 0:

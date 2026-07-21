@@ -142,10 +142,11 @@ def test_router_retries_and_falls_back_with_same_data_policy(tmp_path: Path) -> 
                 profiles={"a": profile("a", "one"), "b": profile("b", "two")},
                 routing=RoutingSettings(("a", "b"), ("a",), (), ()),
                 clients={"one": first, "two": second},
-                repositories=repositories,
+                audit=repositories.models,
             )
-            with router.bind_run(prepared.run.id):
-                response = await router.complete(model="ignored", messages=[], tools=[])
+            response = await router.open_session(
+                ModelRunContext(prepared.run.id)
+            ).complete(model="ignored", messages=[], tools=[])
             assert response.message.content == "ok"
             assert first.calls == 3 and second.calls == 1
             calls = await repositories.database.fetch_all(
@@ -220,11 +221,12 @@ def test_router_refuses_cross_policy_fallback_and_stops_before_budgeted_call(
                 profiles={"a": profile("a", "one"), "b": profile("b", "two")},
                 routing=RoutingSettings(("a", "b"), ("a",), (), ()),
                 clients={"one": first, "two": second},
-                repositories=repositories,
+                audit=repositories.models,
             )
-            with router.bind_run(prepared.run.id):
-                with pytest.raises(ModelDataPolicyMismatch):
-                    await router.complete(model="ignored", messages=[], tools=[])
+            with pytest.raises(ModelDataPolicyMismatch):
+                await router.open_session(ModelRunContext(prepared.run.id)).complete(
+                    model="ignored", messages=[], tools=[]
+                )
             assert second.calls == 0
 
             blocked = ScriptedClient(ModelResponse(ModelMessage("must not run")))
@@ -233,12 +235,13 @@ def test_router_refuses_cross_policy_fallback_and_stops_before_budgeted_call(
                 profiles={"a": profile("a", "one")},
                 routing=RoutingSettings(("a",), ("a",), (), ()),
                 clients={"one": blocked},
-                repositories=repositories,
+                audit=repositories.models,
                 budget=BudgetSettings(max_run_tokens=10),
             )
-            with budget_router.bind_run(prepared.run.id):
-                with pytest.raises(ModelBudgetExceeded):
-                    await budget_router.complete(model="ignored", messages=[], tools=[])
+            with pytest.raises(ModelBudgetExceeded):
+                await budget_router.open_session(
+                    ModelRunContext(prepared.run.id)
+                ).complete(model="ignored", messages=[], tools=[])
             assert blocked.calls == 0
             row = await repositories.database.fetch_one(
                 "SELECT decision FROM budget_decisions ORDER BY id DESC LIMIT 1"
@@ -251,14 +254,13 @@ def test_router_refuses_cross_policy_fallback_and_stops_before_budgeted_call(
                 profiles={"a": profile("a", "one")},
                 routing=RoutingSettings(("a",), ("a",), (), ()),
                 clients={"one": unmetered},
-                repositories=repositories,
+                audit=repositories.models,
                 budget=BudgetSettings(max_run_tokens=1000),
             )
-            with metered_router.bind_run(prepared.run.id):
-                with pytest.raises(ModelRoutingError, match="did not return usage"):
-                    await metered_router.complete(
-                        model="ignored", messages=[], tools=[]
-                    )
+            with pytest.raises(ModelRoutingError, match="did not return usage"):
+                await metered_router.open_session(
+                    ModelRunContext(prepared.run.id)
+                ).complete(model="ignored", messages=[], tools=[])
             assert unmetered.calls == 1
         finally:
             await repositories.close()
@@ -288,15 +290,15 @@ def test_stream_retry_only_happens_before_first_visible_delta(tmp_path: Path) ->
                 profiles={"a": profile("a", "one")},
                 routing=RoutingSettings(("a",), ("a",), (), ()),
                 clients={"one": retrying},
-                repositories=repositories,
+                audit=repositories.models,
             )
-            with router.bind_run(prepared.run.id):
-                deltas = [
-                    item
-                    async for item in router.stream_complete(
-                        model="ignored", messages=[], tools=[]
-                    )
-                ]
+            session = router.open_session(ModelRunContext(prepared.run.id))
+            deltas = [
+                item
+                async for item in session.stream_complete(
+                    model="ignored", messages=[], tools=[]
+                )
+            ]
             assert retrying.calls == 2
             assert "".join(item.content for item in deltas) == "ok"
 
@@ -310,14 +312,14 @@ def test_stream_retry_only_happens_before_first_visible_delta(tmp_path: Path) ->
                 profiles={"a": profile("a", "one")},
                 routing=RoutingSettings(("a",), ("a",), (), ()),
                 clients={"one": partial},
-                repositories=repositories,
+                audit=repositories.models,
             )
-            with router.bind_run(second_run.run.id):
-                with pytest.raises(ModelRoutingError, match="retry suppressed"):
-                    async for _ in router.stream_complete(
-                        model="ignored", messages=[], tools=[]
-                    ):
-                        pass
+            session = router.open_session(ModelRunContext(second_run.run.id))
+            with pytest.raises(ModelRoutingError, match="retry suppressed"):
+                async for _ in session.stream_complete(
+                    model="ignored", messages=[], tools=[]
+                ):
+                    pass
             assert partial.calls == 1
         finally:
             await repositories.close()

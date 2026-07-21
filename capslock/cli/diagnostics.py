@@ -197,7 +197,12 @@ async def doctor(
             )
             if not issues:
                 diagnostics.append(
-                    Diagnostic("ok", "config", "Project config", "version 1 valid")
+                    Diagnostic(
+                        "ok",
+                        "config",
+                        "Project config",
+                        f"version {document.get('config_version')} valid",
+                    )
                 )
             for reference in _credential_references(document):
                 status = credential_status(reference)

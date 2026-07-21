@@ -5,10 +5,12 @@ import io
 import json
 from pathlib import Path
 
+import pytest
+
 from capslock.application.workflow import WorkflowService
 from capslock.cli.context import CliContext
 from capslock.cli.exec import run_exec
-from capslock.config import CONFIG_VERSION, Settings, read_config_document
+from capslock.config import Settings
 from capslock.domain import AgentEvent, AgentEventKind, RunLimits, RunMode
 from capslock.runtime.model import ModelMessage, ModelResponse, ModelToolCall
 from capslock.storage.repositories_v2 import WorkspaceRepositories
@@ -18,21 +20,19 @@ from tests.test_runtime_v2 import make_agent
 from rich.console import Console
 
 
-def test_v1_config_renames_max_turns_with_backup(tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.parametrize("version", (1, 2))
+def test_removed_max_turns_config_is_rejected(
+    tmp_path: Path, monkeypatch, version: int
+) -> None:
     monkeypatch.setenv("CAPSLOCK_API_KEY", "test-secret")
     config = tmp_path / ".capslock" / "config.toml"
     config.parent.mkdir()
     config.write_text(
-        'config_version = 1\n[model]\nmodel = "test-model"\n[runtime]\nmax_turns = 9\n',
+        f'config_version = {version}\n[model]\nmodel = "test-model"\n[runtime]\nmax_turns = 9\n',
         encoding="utf-8",
     )
-    settings = Settings.load(tmp_path)
-    assert settings.runtime.max_tool_rounds == 9
-    document = read_config_document(config)
-    assert document["config_version"] == CONFIG_VERSION == 2
-    assert document["runtime"]["max_tool_rounds"] == 9
-    assert "max_turns" not in document["runtime"]
-    assert list(config.parent.joinpath("state/backups").glob("config.v1.*"))
+    with pytest.raises(ValueError, match="max_turns.*max_tool_rounds"):
+        Settings.load(tmp_path)
 
 
 def test_fresh_schema_has_governance_tables(tmp_path: Path) -> None:

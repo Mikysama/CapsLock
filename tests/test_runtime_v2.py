@@ -46,7 +46,8 @@ def context_factory(repositories: WorkspaceRepositories, session_id: str):
         run_id=run_id,
         policy=WorkspacePolicy(repositories.sessions.workspace),
         event=lambda *args, **kwargs: None,
-        repositories=repositories,
+        tasks=repositories.tasks,
+        sources=repositories.sources,
         actions=None,
     )
 
@@ -80,7 +81,7 @@ def make_agent(
         events=EventSink(),
         tools=tools or ToolRegistry([]),
         permission_mode=PermissionMode.APPROVE_FOR_ME,
-        max_turns=3,
+        max_tool_rounds=3,
     )
 
 
@@ -138,7 +139,7 @@ def test_interactive_approval_executes_action_inside_same_run(tmp_path: Path) ->
                 events=EventSink(),
                 tools=workspace_tools(),
                 permission_mode=PermissionMode.APPROVE_FOR_ME,
-                max_turns=3,
+                max_tool_rounds=3,
                 interaction=interaction,
             )
             decisions = []
@@ -192,8 +193,8 @@ def test_tool_loop_handles_invalid_arguments_and_continues(tmp_path: Path) -> No
                 chat_model=model,
                 model="test",
                 tools=ToolRegistry([Tool("echo", "echo", {"type": "object"}, execute)]),
-                repositories=repositories,
-                max_turns=2,
+                journal=repositories.workflow,
+                max_tool_rounds=2,
                 context_factory=context_factory(repositories, session.id),
             )
             emitted = []
@@ -288,8 +289,8 @@ def test_tool_loop_emits_reasoning_as_thinking_delta(tmp_path: Path) -> None:
                 ),
                 model="test",
                 tools=ToolRegistry([]),
-                repositories=repositories,
-                max_turns=1,
+                journal=repositories.workflow,
+                max_tool_rounds=1,
                 context_factory=context_factory(repositories, session.id),
             )
             emitted = []
@@ -336,8 +337,8 @@ def test_tool_loop_records_failed_model_steps(
                 chat_model=FakeChatModel(response),
                 model="test",
                 tools=ToolRegistry([]),
-                repositories=repositories,
-                max_turns=0,
+                journal=repositories.workflow,
+                max_tool_rounds=0,
                 context_factory=context_factory(repositories, session.id),
             )
 

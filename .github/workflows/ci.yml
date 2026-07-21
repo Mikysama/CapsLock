@@ -17,7 +17,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        python-version: ["3.11", "3.12"]
+        python-version: ["3.12"]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -34,11 +34,15 @@ jobs:
           .venv-ci/bin/python -m pip install -e '.[dev,local-embeddings]'
           .venv-ci/bin/python -c 'import fastembed'
       - name: Lint
-        run: python -m ruff check .
+        run: |
+          python -m ruff format --check .
+          python -m ruff check .
       - name: Test
         run: python -m pytest -q
       - name: Core agent evaluation
         run: python scripts/evaluate_agent.py --mode deterministic --output "$RUNNER_TEMP/capslock-eval.json"
+      - name: Memory quality evaluation
+        run: python scripts/evaluate_memory.py --minimum 0.90
       - name: Check installed dependencies
         run: .venv-ci/bin/python -m pip check
       - name: Audit dependencies

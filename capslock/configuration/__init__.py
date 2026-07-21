@@ -3,7 +3,6 @@
 from .service import (
     CONFIG_VERSION,
     DEFAULT_MAX_TOOL_ROUNDS,
-    DEFAULT_MAX_TURNS,
     BudgetSettings,
     CommandSettings,
     ConfigIssue,
@@ -26,7 +25,6 @@ from .service import (
 __all__ = [
     "CONFIG_VERSION",
     "DEFAULT_MAX_TOOL_ROUNDS",
-    "DEFAULT_MAX_TURNS",
     "BudgetSettings",
     "CommandSettings",
     "ConfigIssue",

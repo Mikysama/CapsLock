@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import time
-import warnings
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -54,21 +53,6 @@ class RunContext:
     memory: MemoryPort | None = None
     skills: SkillPort | None = None
     permission_mode: PermissionMode = PermissionMode.APPROVE_FOR_ME
-    repositories: Any = None
-
-    def __post_init__(self) -> None:
-        if self.repositories is None:
-            return
-        warnings.warn(
-            "RunContext(repositories=...) is deprecated; pass tasks= and sources=; "
-            "removed in 2.0.0",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        if self.tasks is None:
-            object.__setattr__(self, "tasks", self.repositories.tasks)
-        if self.sources is None:
-            object.__setattr__(self, "sources", self.repositories.sources)
 
 
 ToolExecutor = Callable[[RunContext, dict[str, Any]], Awaitable[ToolResult]]

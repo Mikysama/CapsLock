@@ -14,7 +14,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-FIXTURE = ROOT / "tests" / "fixtures" / "agent_eval_v1.json"
+FIXTURE = ROOT / "tests" / "fixtures" / "agent_eval_v2.json"
 BASELINE = ROOT / "tests" / "fixtures" / "agent_eval_baseline_v1.json"
 
 
@@ -31,8 +31,33 @@ def deterministic(output: Path | None) -> int:
             f"--junitxml={report_path}",
         ]
         started = time.monotonic()
-        completed = subprocess.run(command, cwd=ROOT, check=False)
+        completed = subprocess.run(
+            command, cwd=ROOT, check=False, capture_output=True, text=True
+        )
         duration = time.monotonic() - started
+        if not report_path.exists():
+            report = {
+                "schema_version": 2,
+                "mode": "deterministic",
+                "status": "failed",
+                "scenario_count": len(scenarios),
+                "passed": 0,
+                "quality": 0,
+                "duration_seconds": round(duration, 4),
+                "cost_usd": 0,
+                "categories": [item["category"] for item in scenarios],
+                "regressions": ["test_runner"],
+                "error": (
+                    "deterministic evaluation did not produce JUnit output; "
+                    f"pytest exited with {completed.returncode}: "
+                    f"{(completed.stderr or completed.stdout).strip()[-1000:]}"
+                ),
+            }
+            serialized = json.dumps(report, ensure_ascii=False, indent=2) + "\n"
+            if output:
+                output.write_text(serialized, encoding="utf-8")
+            print(serialized, end="")
+            return 1
         root = ET.parse(report_path).getroot()
         cases = list(root.iter("testcase"))
         failures = sum(
@@ -46,7 +71,7 @@ def deterministic(output: Path | None) -> int:
         else 0
     )
     report = {
-        "schema_version": 1,
+        "schema_version": 2,
         "mode": "deterministic",
         "scenario_count": len(scenarios),
         "passed": len(cases) - failures,
