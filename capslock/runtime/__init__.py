@@ -6,9 +6,13 @@ from .model import (
     ChatModel,
     ModelDelta,
     ModelMessage,
+    ModelRunContext,
+    ModelRunSession,
     ModelResponse,
     ModelToolCall,
     ModelUsage,
+    StreamingChatModel,
+    open_model_session,
 )
 from .routing import ModelRouter
 from .governance import RunGovernor
@@ -19,10 +23,14 @@ __all__ = [
     "ChatModel",
     "ModelDelta",
     "ModelMessage",
+    "ModelRunContext",
+    "ModelRunSession",
     "ModelResponse",
     "ModelToolCall",
     "ModelUsage",
+    "StreamingChatModel",
     "WorkspaceAgent",
     "ModelRouter",
     "RunGovernor",
+    "open_model_session",
 ]

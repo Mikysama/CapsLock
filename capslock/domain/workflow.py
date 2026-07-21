@@ -18,6 +18,95 @@ class WorkItemStatus(StrEnum):
     STOPPED = "stopped"
 
 
+WORK_ITEM_TRANSITIONS: dict[WorkItemStatus, frozenset[WorkItemStatus]] = {
+    WorkItemStatus.QUEUED: frozenset(
+        {WorkItemStatus.RUNNING, WorkItemStatus.CANCELLED}
+    ),
+    WorkItemStatus.RUNNING: frozenset(
+        {
+            WorkItemStatus.WAITING_APPROVAL,
+            WorkItemStatus.COMPLETED,
+            WorkItemStatus.FAILED,
+            WorkItemStatus.CANCELLED,
+            WorkItemStatus.INTERRUPTED,
+            WorkItemStatus.STOPPED,
+        }
+    ),
+    WorkItemStatus.WAITING_APPROVAL: frozenset(
+        {
+            WorkItemStatus.COMPLETED,
+            WorkItemStatus.FAILED,
+            WorkItemStatus.CANCELLED,
+        }
+    ),
+}
+
+FINALIZABLE_WORK_ITEM_STATUSES = frozenset(
+    {
+        WorkItemStatus.WAITING_APPROVAL,
+        WorkItemStatus.COMPLETED,
+        WorkItemStatus.FAILED,
+        WorkItemStatus.CANCELLED,
+        WorkItemStatus.INTERRUPTED,
+        WorkItemStatus.STOPPED,
+    }
+)
+
+
+def validate_work_item_transition(
+    current: WorkItemStatus, target: WorkItemStatus
+) -> None:
+    if target is current:
+        return
+    if target not in WORK_ITEM_TRANSITIONS.get(current, frozenset()):
+        raise ValueError(
+            f"invalid work item transition: {current.value} -> {target.value}"
+        )
+
+
+def validate_final_status(status: WorkItemStatus) -> None:
+    if status not in FINALIZABLE_WORK_ITEM_STATUSES:
+        raise ValueError(f"unsupported workflow final status: {status.value}")
+
+
+def interrupted_step_status(status: WorkItemStatus) -> "RunStepStatus | None":
+    if status is WorkItemStatus.CANCELLED:
+        return RunStepStatus.CANCELLED
+    if status in {
+        WorkItemStatus.FAILED,
+        WorkItemStatus.INTERRUPTED,
+        WorkItemStatus.STOPPED,
+    }:
+        return RunStepStatus.FAILED
+    return None
+
+
+@dataclass(frozen=True)
+class ApprovalOutcome:
+    status: WorkItemStatus
+    event_kind: "AgentEventKind"
+    error_code: str | None = None
+    error_message: str | None = None
+
+
+def approval_outcome(
+    failed_status: str | None,
+    error_code: str | None = None,
+    error_message: str | None = None,
+) -> ApprovalOutcome:
+    if failed_status is None:
+        return ApprovalOutcome(WorkItemStatus.COMPLETED, AgentEventKind.COMPLETED)
+    cancelled = failed_status == "cancelled"
+    status = WorkItemStatus.CANCELLED if cancelled else WorkItemStatus.FAILED
+    kind = AgentEventKind.CANCELLED if cancelled else AgentEventKind.FAILED
+    return ApprovalOutcome(
+        status,
+        kind,
+        error_code or status.value,
+        error_message or f"action {status.value}",
+    )
+
+
 class RunStepKind(StrEnum):
     MODEL = "model"
     TOOL = "tool"

@@ -11,16 +11,8 @@ from typing import AsyncIterator, Self
 
 import aiosqlite
 
-from .schema_v2 import (
-    MEMORY_APPLICATION_ID,
-    MEMORY_MIGRATIONS,
-    MEMORY_SCHEMA,
-    MEMORY_SCHEMA_VERSION,
-    WORKSPACE_APPLICATION_ID,
-    WORKSPACE_MIGRATIONS,
-    WORKSPACE_SCHEMA,
-    WORKSPACE_SCHEMA_VERSION,
-)
+from .migrations import DatabaseSpec, MigrationStep
+from .specs import MEMORY_DATABASE_SPEC, WORKSPACE_DATABASE_SPEC
 
 
 class IncompatibleDatabaseError(RuntimeError):
@@ -28,6 +20,7 @@ class IncompatibleDatabaseError(RuntimeError):
 
 
 class AsyncDatabase:
+    spec: DatabaseSpec
     application_id: int
     schema_version: int
     schema: str
@@ -103,56 +96,36 @@ class AsyncDatabase:
         current = version
         try:
             while current < self.schema_version:
-                script = self.migrations.get(current)
-                if script is None:
+                configured = self.migrations.get(current)
+                declared = self.spec.migrations.get(current)
+                if configured is None:
                     raise IncompatibleDatabaseError(
                         f"no {self.label} database migration from schema {current}"
                     )
-                if current == 2 and self.label == "workspace":
-                    columns = {
-                        str(row[1])
-                        for row in await (
-                            await self.connection.execute("PRAGMA table_info(actions)")
-                        ).fetchall()
-                    }
-                    for name, definition in (
-                        (
-                            "import_id",
-                            "TEXT REFERENCES lifecycle_imports(id) ON DELETE SET NULL",
-                        ),
-                        (
-                            "historical_only",
-                            "INTEGER NOT NULL DEFAULT 0 CHECK(historical_only IN (0,1))",
-                        ),
-                        (
-                            "requires_reapproval",
-                            "INTEGER NOT NULL DEFAULT 0 CHECK(requires_reapproval IN (0,1))",
-                        ),
-                    ):
-                        if name not in columns:
-                            await self.connection.execute(
-                                f"ALTER TABLE actions ADD COLUMN {name} {definition}"
-                            )
-                rebuild_foreign_keys = current == 3 and self.label == "workspace"
-                if rebuild_foreign_keys:
-                    await self.connection.execute("PRAGMA foreign_keys=OFF")
+                step = (
+                    configured
+                    if isinstance(configured, MigrationStep)
+                    else MigrationStep(
+                        configured,
+                        pre_hook=declared.pre_hook if declared else None,
+                        post_hook=declared.post_hook if declared else None,
+                        failure_hook=declared.failure_hook if declared else None,
+                    )
+                )
+                if step.pre_hook is not None:
+                    await step.pre_hook(self.connection)
                 try:
                     await self.connection.executescript(
                         "BEGIN IMMEDIATE;\n"
-                        + script
+                        + step.sql
                         + f"\nPRAGMA user_version={current + 1};\nCOMMIT;"
                     )
-                finally:
-                    if rebuild_foreign_keys:
-                        await self.connection.execute("PRAGMA foreign_keys=ON")
-                if rebuild_foreign_keys:
-                    violations = await (
-                        await self.connection.execute("PRAGMA foreign_key_check")
-                    ).fetchall()
-                    if violations:
-                        raise IncompatibleDatabaseError(
-                            "workspace schema migration produced invalid references"
-                        )
+                except BaseException:
+                    if step.failure_hook is not None:
+                        await step.failure_hook(self.connection)
+                    raise
+                if step.post_hook is not None:
+                    await step.post_hook(self.connection)
                 current += 1
         except BaseException as exc:
             await self.connection.rollback()
@@ -214,19 +187,21 @@ class AsyncDatabase:
 
 
 class WorkspaceDatabase(AsyncDatabase):
-    application_id = WORKSPACE_APPLICATION_ID
-    schema_version = WORKSPACE_SCHEMA_VERSION
-    schema = WORKSPACE_SCHEMA
-    label = "workspace"
-    migrations = WORKSPACE_MIGRATIONS
+    spec = WORKSPACE_DATABASE_SPEC
+    application_id = spec.application_id
+    schema_version = spec.schema_version
+    schema = spec.schema
+    label = spec.label
+    migrations = {version: step.sql for version, step in spec.migrations.items()}
 
 
 class MemoryDatabase(AsyncDatabase):
-    application_id = MEMORY_APPLICATION_ID
-    schema_version = MEMORY_SCHEMA_VERSION
-    schema = MEMORY_SCHEMA
-    label = "memory"
-    migrations = MEMORY_MIGRATIONS
+    spec = MEMORY_DATABASE_SPEC
+    application_id = spec.application_id
+    schema_version = spec.schema_version
+    schema = spec.schema
+    label = spec.label
+    migrations = {version: step.sql for version, step in spec.migrations.items()}
 
     async def _configure_validated(self) -> None:
         await super()._configure_validated()

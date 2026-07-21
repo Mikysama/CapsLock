@@ -54,7 +54,7 @@ class CandidateService:
         answer: str,
         write_enabled: bool,
     ) -> MemoryExtractionResult:
-        settings = await self.repositories.memories.settings(self.workspace)
+        settings = await self.repositories.settings.get(self.workspace)
         policy = settings["policy"]
         if not write_enabled or policy is MemoryPolicy.OFF:
             return MemoryExtractionResult()
@@ -138,7 +138,7 @@ class CandidateService:
             risks.append("global_scope")
         visible = [
             item
-            for item in await self.repositories.memories.search(
+            for item in await self.repositories.query.search(
                 safe, workspace=self.workspace, session_id=self.session_id, limit=5
             )
             if item.type is memory_type and item.scope is scope
@@ -207,10 +207,10 @@ class CandidateService:
             scope or candidate.scope,
         )
         if replace and candidate.related_memory_id:
-            current = await self.repositories.memories.require(
+            current = await self.repositories.lifecycle.require(
                 candidate.related_memory_id, include_inactive=True
             )
-            item = await self.repositories.memories.edit(
+            item = await self.repositories.lifecycle.edit(
                 current.id,
                 content=safe,
                 memory_type=target_type,
@@ -242,7 +242,7 @@ class CandidateService:
             and candidate.related_memory_id
             and not candidate.risk_flags
         ):
-            await self.repositories.memories.add_source(
+            await self.repositories.sources.add(
                 candidate.related_memory_id,
                 source_kind="conversation",
                 source_ref=candidate.source_run_id,
@@ -288,7 +288,7 @@ class CandidateService:
         workspace, session_id = _scope_keys(
             target_scope, self.workspace, self.session_id
         )
-        return await self.repositories.memories.create(
+        return await self.repositories.lifecycle.create(
             content=content or candidate.content or "",
             memory_type=memory_type or candidate.type,
             scope=target_scope,

@@ -52,7 +52,7 @@ class MemoryTransferService:
         path = transfer_path(self.workspace, requested_path, writing=True)
         if path.exists() and not overwrite:
             raise FileExistsError("export file already exists")
-        items = await self.repositories.memories.list_visible(
+        items = await self.repositories.query.list_visible(
             workspace=self.workspace_key,
             session_id=self.session_id,
             scope=scope,
@@ -69,7 +69,7 @@ class MemoryTransferService:
                     "confidence": item.confidence,
                     "expires_at": item.expires_at,
                     "origin": item.origin.value,
-                    "sources": await self.repositories.memories.sources(item.id),
+                    "sources": await self.repositories.sources.list(item.id),
                 }
             )
         candidates = []
@@ -104,7 +104,7 @@ class MemoryTransferService:
         if len(encoded) > MAX_TRANSFER_BYTES:
             raise ValueError("memory export exceeds the byte limit")
         await asyncio.to_thread(_atomic_write, path, encoded)
-        await self.repositories.memories.audit_export(
+        await self.repositories.audit.record_export(
             workspace=self.workspace_key,
             session_id=self.session_id,
             scope=scope,
@@ -148,7 +148,7 @@ class MemoryTransferService:
             safe, redactions = validated_text(record.get("content"))
             rules.extend(redactions)
             output.append(
-                await self.repositories.memories.create(
+                await self.repositories.lifecycle.create(
                     content=safe,
                     memory_type=MemoryType(record["type"]),
                     scope=scope,

@@ -69,7 +69,7 @@ class SessionManager:
             )
         purged = 0
         if self.memory_repositories is not None:
-            purged = await self.memory_repositories.memories.purge_session(
+            purged = await self.memory_repositories.lifecycle.purge_session(
                 workspace=workspace_key(self.workspace), session_id=session_id
             )
         await self.repositories.sessions.delete(session_id)

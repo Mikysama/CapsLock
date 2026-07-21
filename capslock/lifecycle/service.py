@@ -1,4 +1,4 @@
-"""Local backups and secret-safe portable lifecycle archives."""
+"""Lifecycle service orchestration and compatibility facade implementation."""
 
 from __future__ import annotations
 
@@ -7,103 +7,44 @@ import json
 import os
 import shutil
 import sqlite3
-import stat
 import tempfile
 import uuid
 import zipfile
 from contextlib import ExitStack, contextmanager
 from datetime import UTC, datetime
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any, Iterator
 
-from . import __version__
-from .layout import ProjectLayout
-from .security import redact
-from .storage.memory_v2 import workspace_key
+from .. import __version__
+from ..layout import ProjectLayout
+from ..storage.memory_v2 import workspace_key
+from .archive import (
+    MAX_ARCHIVE_BYTES,
+    extract_zip as _extract_zip,
+    read_json as _read_json,
+    validate_zip as _validate_zip,
+    write_json as _write_json,
+    write_zip as _write_zip,
+)
+from .errors import LifecycleError
+from .coordinator import ImportCoordinator
+from .sanitization import (
+    redact_portable as _redact_portable,
+    sanitize_config as _sanitize_config,
+    sanitize_mcp as _sanitize_mcp,
+)
+from .specs import (
+    MEMORY_TABLES,
+    REFERENCE_FIELDS,
+    WORKSPACE_TABLES,
+)
 
 
 BACKUP_FORMAT = "capslock-backup"
 EXPORT_FORMAT = "capslock-lifecycle-export"
 ARCHIVE_VERSION = 2
 SUPPORTED_ARCHIVE_VERSIONS = frozenset({1, ARCHIVE_VERSION})
-MAX_ARCHIVE_BYTES = 100 * 1024 * 1024
-MAX_ARCHIVE_FILES = 10_000
 MAX_ARCHIVE_RECORDS = 100_000
-
-WORKSPACE_TABLES = (
-    "sessions",
-    "work_items",
-    "runs",
-    "run_steps",
-    "run_events",
-    "messages",
-    "actions",
-    "tasks",
-    "sources",
-    "tool_calls",
-    "citations",
-    "workspace_settings",
-    "skill_settings",
-    "routing_decisions",
-    "model_calls",
-    "budget_decisions",
-    "run_governance",
-    "tool_call_attempts",
-)
-MEMORY_TABLES = (
-    "memories",
-    "memory_revisions",
-    "memory_workspace_settings",
-    "memory_extractions",
-    "memory_candidates",
-    "memory_sources",
-    "memory_recalls",
-    "memory_recall_items",
-    "memory_accesses",
-    "memory_audit",
-)
-WORKSPACE_PRIMARY = {
-    "sessions": "id",
-    "work_items": "id",
-    "runs": "id",
-    "run_steps": "id",
-    "run_events": "id",
-    "messages": "id",
-    "actions": "id",
-    "tasks": "id",
-    "sources": "id",
-    "tool_calls": "id",
-    "citations": "id",
-    "workspace_settings": "key",
-    "skill_settings": "name",
-    "routing_decisions": "id",
-    "model_calls": "id",
-    "budget_decisions": "id",
-    "run_governance": "run_id",
-    "tool_call_attempts": "id",
-}
-MEMORY_PRIMARY = {
-    "memories": "id",
-    "memory_revisions": ("memory_id", "revision"),
-    "memory_workspace_settings": "workspace_key",
-    "memory_extractions": "id",
-    "memory_candidates": "id",
-    "memory_sources": "id",
-    "memory_recalls": "run_id",
-    "memory_recall_items": ("run_id", "memory_id"),
-    "memory_accesses": (
-        "memory_id",
-        "revision",
-        "workspace_key",
-        "session_id",
-        "run_id",
-    ),
-    "memory_audit": "id",
-}
-
-
-class LifecycleError(RuntimeError):
-    pass
 
 
 def utc_now() -> str:
@@ -333,105 +274,13 @@ class LifecycleService:
         workspace_rows: dict[str, Any],
         memory_rows: dict[str, Any],
     ) -> dict[str, Any]:
-        if not self.layout.database.exists() or not self.memory_path.exists():
-            raise LifecycleError("initialize both databases before importing")
-        report: dict[str, Any] = {
-            "archive_id": archive_id,
-            "imported": 0,
-            "skipped": 0,
-            "remapped": 0,
-            "blocked": 0,
-            "mappings": {},
-        }
-        recovery = self.backup_create()
-        journal = self._journal("import", archive_id, str(recovery))
-        with (
-            self._locks(),
-            tempfile.TemporaryDirectory(prefix="capslock-import-rollback-") as raw,
-        ):
-            rollback = Path(raw)
-            _sqlite_backup(self.layout.database, rollback / "workspace.sqlite3")
-            _sqlite_backup(self.memory_path, rollback / "memory.sqlite3")
-            workspace_connection = sqlite3.connect(self.layout.database)
-            memory_connection = sqlite3.connect(self.memory_path)
-            workspace_connection.row_factory = sqlite3.Row
-            memory_connection.row_factory = sqlite3.Row
-            import_id = uuid.uuid5(uuid.NAMESPACE_URL, f"capslock:{archive_id}").hex
-            try:
-                existing = workspace_connection.execute(
-                    "SELECT status,report_json FROM lifecycle_imports WHERE archive_id=?",
-                    (archive_id,),
-                ).fetchone()
-                if existing and existing["status"] == "completed":
-                    journal.unlink(missing_ok=True)
-                    return json.loads(existing["report_json"])
-                for connection in (workspace_connection, memory_connection):
-                    connection.execute("PRAGMA foreign_keys=ON")
-                    connection.execute("BEGIN IMMEDIATE")
-                    connection.execute(
-                        """INSERT OR REPLACE INTO lifecycle_imports(
-                           id,archive_id,archive_sha256,source_version,status,report_json,created_at,completed_at)
-                           VALUES(?,?,?,?, 'running','{}',?,NULL)""",
-                        (
-                            import_id,
-                            archive_id,
-                            archive_hash,
-                            source_version,
-                            utc_now(),
-                        ),
-                    )
-                workspace_maps = _merge_tables(
-                    workspace_connection,
-                    workspace_rows,
-                    WORKSPACE_TABLES,
-                    WORKSPACE_PRIMARY,
-                    import_id,
-                    archive_id,
-                    report,
-                    domain="workspace",
-                )
-                _normalize_imported_workflow(workspace_connection, import_id)
-                _rebuild_session_search(
-                    workspace_connection,
-                    set(workspace_maps.get("sessions", {}).values()),
-                )
-                memory_maps = _merge_tables(
-                    memory_connection,
-                    memory_rows,
-                    MEMORY_TABLES,
-                    MEMORY_PRIMARY,
-                    import_id,
-                    archive_id,
-                    report,
-                    domain="memory",
-                    external_maps=workspace_maps,
-                    target_workspace_key=workspace_key(self.workspace),
-                )
-                _rebuild_memory_fts(
-                    memory_connection,
-                    set(memory_maps.get("memories", {}).values()),
-                )
-                report["mappings"] = {**workspace_maps, **memory_maps}
-                for connection in (workspace_connection, memory_connection):
-                    connection.execute(
-                        "UPDATE lifecycle_imports SET status='completed',report_json=?,completed_at=? WHERE id=?",
-                        (json.dumps(report, ensure_ascii=False), utc_now(), import_id),
-                    )
-                workspace_connection.commit()
-                memory_connection.commit()
-            except BaseException:
-                workspace_connection.rollback()
-                memory_connection.rollback()
-                workspace_connection.close()
-                memory_connection.close()
-                shutil.copy2(rollback / "workspace.sqlite3", self.layout.database)
-                shutil.copy2(rollback / "memory.sqlite3", self.memory_path)
-                raise
-            else:
-                workspace_connection.close()
-                memory_connection.close()
-                journal.unlink(missing_ok=True)
-        return report
+        return ImportCoordinator(self).merge(
+            archive_id,
+            archive_hash,
+            source_version,
+            workspace_rows,
+            memory_rows,
+        )
 
     def _memory_rows(self, include_global: bool) -> dict[str, list[dict[str, Any]]]:
         if not self.memory_path.exists():
@@ -786,21 +635,7 @@ def _rewrite_references(
     maps: dict[str, dict[str, str]],
     target_workspace_key: str | None,
 ) -> None:
-    references = {
-        "session_id": "sessions",
-        "run_id": "runs",
-        "work_item_id": "work_items",
-        "parent_work_item_id": "work_items",
-        "parent_run_id": "runs",
-        "resume_from_step_id": "run_steps",
-        "root_run_id": "runs",
-        "routing_decision_id": "routing_decisions",
-        "memory_id": "memories",
-        "related_memory_id": "memories",
-        "adopted_memory_id": "memories",
-        "extraction_id": "memory_extractions",
-        "source_run_id": "runs",
-    }
+    references = dict(REFERENCE_FIELDS)
     if table_name in {"memory_recalls", "memory_recall_items"}:
         references["run_id"] = (
             "memory_recalls" if table_name == "memory_recall_items" else "runs"
@@ -995,89 +830,6 @@ def _sqlite_backup(source: Path, target: Path) -> None:
     target.chmod(0o600)
 
 
-def _read_json(path: Path) -> dict[str, Any]:
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise LifecycleError(f"invalid JSON file: {path}") from exc
-    if not isinstance(value, dict):
-        raise LifecycleError(f"JSON document must be an object: {path}")
-    return value
-
-
-def _write_json(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(value, ensure_ascii=False, indent=2, default=str) + "\n",
-        encoding="utf-8",
-    )
-
-
-def _sanitize_mcp(document: dict[str, Any]) -> dict[str, Any]:
-    safe = json.loads(json.dumps(document))
-    for server in safe.get("servers", {}).values():
-        if isinstance(server, dict) and isinstance(server.get("env"), dict):
-            server["env"] = {}
-            server["enabled"] = False
-    return safe
-
-
-def _sanitize_config(source: Path, target: Path) -> bool:
-    try:
-        import tomlkit
-
-        document = tomlkit.parse(source.read_text(encoding="utf-8"))
-    except Exception:
-        target.write_text(
-            "# Invalid source configuration was omitted to avoid copying credentials.\n",
-            encoding="utf-8",
-        )
-        return True
-    removed = False
-
-    def clean(table: Any) -> None:
-        nonlocal removed
-        if not hasattr(table, "items"):
-            return
-        for key, value in list(table.items()):
-            normalized = str(key).casefold().replace("-", "_")
-            if normalized in {
-                "api_key",
-                "tavily_api_key",
-                "authorization",
-                "password",
-                "secret",
-            }:
-                del table[key]
-                removed = True
-            else:
-                clean(value)
-
-    clean(document)
-    target.write_text(tomlkit.dumps(document), encoding="utf-8")
-    return removed
-
-
-def _redact_portable(value: Any) -> Any:
-    if isinstance(value, dict):
-        output = {}
-        for key, item in value.items():
-            normalized = str(key).casefold().replace("-", "_")
-            secret_key = any(
-                marker in normalized
-                for marker in ("api_key", "authorization", "secret", "password")
-            ) or ("token" in normalized and not normalized.endswith("_tokens"))
-            output[str(key)] = (
-                "<redacted>"
-                if secret_key and isinstance(item, str)
-                else _redact_portable(item)
-            )
-        return output
-    if isinstance(value, list):
-        return [_redact_portable(item) for item in value]
-    return redact(value) if isinstance(value, str) else value
-
-
 def _copy_tree(source: Path, target: Path) -> None:
     if source.is_dir():
         symlink = next((path for path in source.rglob("*") if path.is_symlink()), None)
@@ -1100,51 +852,3 @@ def _atomic_replace(source: Path, target: Path) -> None:
     temporary = target.with_name(f".{target.name}.restore-{uuid.uuid4().hex}")
     shutil.copy2(source, temporary)
     os.replace(temporary, target)
-
-
-def _write_zip(stage: Path, target: Path) -> None:
-    target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        with zipfile.ZipFile(
-            temporary, "w", compression=zipfile.ZIP_DEFLATED
-        ) as bundle:
-            for path in sorted(stage.rglob("*")):
-                if path.is_file():
-                    bundle.write(path, path.relative_to(stage).as_posix())
-        os.replace(temporary, target)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
-def _validate_zip(bundle: zipfile.ZipFile) -> None:
-    items = bundle.infolist()
-    if len(items) > MAX_ARCHIVE_FILES:
-        raise LifecycleError("archive contains too many files")
-    if len({item.filename for item in items}) != len(items):
-        raise LifecycleError("archive contains duplicate member names")
-    total = 0
-    for item in items:
-        path = PurePosixPath(item.filename)
-        mode = item.external_attr >> 16
-        if (
-            path.is_absolute()
-            or ".." in path.parts
-            or stat.S_ISLNK(mode)
-            or stat.S_ISCHR(mode)
-            or stat.S_ISBLK(mode)
-        ):
-            raise LifecycleError(f"unsafe archive member: {item.filename}")
-        total += item.file_size
-        if total > MAX_ARCHIVE_BYTES:
-            raise LifecycleError("expanded archive exceeds the size limit")
-
-
-def _extract_zip(archive: Path, target: Path) -> None:
-    with zipfile.ZipFile(archive) as bundle:
-        _validate_zip(bundle)
-        for item in bundle.infolist():
-            destination = target / PurePosixPath(item.filename)
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            if not item.is_dir():
-                destination.write_bytes(bundle.read(item))

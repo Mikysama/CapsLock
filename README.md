@@ -2,7 +2,7 @@
 
 CapsLock 是一个本机工作区 Agent，用于读取代码、检索证据、检查 Git、提出受控文件修改、执行固定命令，以及按审批策略访问 Web 和本地 MCP。v2 内核完全异步，运行、动作、审批、记忆和审计分别通过强类型领域接口与 SQLite repository 管理。
 
-当前源码版本为 `1.10.0`，运行预算、循环检测和结构化停止见 [v1.10.0 发布说明](docs/releases/v1.10.0.md)。
+当前源码版本为 `1.10.1`，本次前置解耦重构及兼容范围见 [v1.10.1 发布说明](docs/releases/v1.10.1.md)。
 
 ## 安装
 
@@ -259,6 +259,8 @@ v2 只接受 canonical 布局：
 工作区库和记忆库使用不同的 SQLite `application_id`。v1.10.0 将 v1.9 workspace schema v3 自动备份并迁移到 v4；memory schema 保持 v3。旧 application ID、未知版本或其他已有表仍拒绝启动。v1.3.x–v1.7.x 不提供直接转换。详见 [v2 架构与迁移说明](docs/development/v2.md)。
 
 ## 架构
+
+v2 内核以 `capslock.bootstrap` 为组合根，以 `capslock.ports` 隔离 runtime/tooling 与具体应用、SQLite 实现。每次运行使用显式模型会话和共享审批交互状态；workflow 状态策略、生命周期导入协调、记忆 repository 与配置迁移均保持独立边界。详细说明和 2.0 弃用清单见 [v2 架构与迁移说明](docs/development/v2.md)。
 
 - `domain/`：session、workflow、action 和 memory 领域类型。
 - `storage/async_database.py`、`storage/schema_v2.py`：数据库所有权与两套 v2 schema。

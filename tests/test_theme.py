@@ -31,6 +31,9 @@ def test_theme_declares_transparent_layers_and_requested_tokens() -> None:
     assert THEME_TOKENS["borderFocus"] == "#8CB9DC"
     assert THEME_TOKENS["agent"] == "#8FB6D6"
     assert THEME_TOKENS["reasoning"] != THEME_TOKENS["answer"]
+    assert RICH_BOLD_STYLE_DEFINITIONS["user.label"] == THEME_TOKENS["accent"]
+    assert RICH_THEME.styles["user.label"].bold
+    assert RICH_THEME.styles["user.label"].color != RICH_THEME.styles["user"].color
     assert RICH_THEME.styles["reasoning"].dim
     assert RICH_THEME.styles["reasoning"].italic
     assert not RICH_THEME.styles["answer"].dim

@@ -6,9 +6,11 @@ import asyncio
 import json
 import math
 import time
+import warnings
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import Any
 
 from ..config import (
@@ -26,11 +28,94 @@ from ..domain import (
     ModelRoutingError,
     RunLimits,
 )
-from ..storage.repositories_v2 import WorkspaceRepositories
-from .model import ChatModel, ModelDelta, ModelResponse, ModelUsage
+from ..ports import ModelAuditPort
+from .model import (
+    ChatModel,
+    ModelDelta,
+    ModelResponse,
+    ModelRunContext,
+    ModelRunSession,
+    ModelUsage,
+    StreamingChatModel,
+)
 
 
 BudgetAuthorizer = Callable[[BudgetRequest], Awaitable[bool]]
+
+
+@dataclass
+class RoutePlan:
+    run_id: str
+    role: ModelRole
+    candidates: list[ModelProfileSettings]
+    exclusions: list[dict[str, str]]
+    baseline_policy: str
+
+
+class RouteAttemptDriver:
+    """Shared candidate selection and exhausted-route handling."""
+
+    def __init__(self, router: "ModelRouter") -> None:
+        self.router = router
+
+    async def plan(
+        self,
+        messages: list[dict[str, object]],
+        tools: list[dict[str, object]],
+    ) -> RoutePlan:
+        run_id = self.router._required_run()
+        role = self.router._role.get()
+        candidates, exclusions = self.router._candidates(role, messages, tools)
+        if not candidates:
+            await self.router._record_failed_route(run_id, role, exclusions)
+            self.router._raise_no_route(exclusions)
+        baseline = self.router.profiles[getattr(self.router.routing, role.value)[0]]
+        policy = self.router.providers[baseline.provider].data_policy
+        return RoutePlan(run_id, role, candidates, exclusions, policy)
+
+    async def select(
+        self,
+        plan: RoutePlan,
+        profile: ModelProfileSettings,
+        previous: str | None,
+    ) -> tuple[int, ChatModel] | None:
+        provider = self.router.providers[profile.provider]
+        if provider.data_policy != plan.baseline_policy:
+            plan.exclusions.append(
+                {"profile": profile.name, "reason": "data_policy_mismatch"}
+            )
+            return None
+        decision_id = await self.router.audit.record_decision(
+            plan.run_id,
+            role=plan.role.value,
+            candidates=self.router._candidate_trace(plan.candidates, plan.exclusions),
+            selected=profile.name,
+            reasons={"ordered": True, "fallback_from": previous},
+        )
+        client = self.router.clients.get(profile.provider)
+        return None if client is None else (decision_id, client)
+
+    async def exhausted(
+        self, plan: RoutePlan, previous: str | None, last_error: Exception | None
+    ) -> None:
+        if any(
+            item.get("reason") == "data_policy_mismatch" for item in plan.exclusions
+        ):
+            await self.router.audit.record_decision(
+                plan.run_id,
+                role=plan.role.value,
+                candidates=self.router._candidate_trace(
+                    plan.candidates, plan.exclusions
+                ),
+                selected=None,
+                reasons={"error": "data_policy_mismatch", "fallback_from": previous},
+            )
+            raise ModelDataPolicyMismatch(
+                "configured fallback would change the provider data policy"
+            )
+        raise ModelRoutingError(
+            str(last_error or "all configured models are unavailable")
+        )
 
 
 class ModelRouter:
@@ -43,7 +128,8 @@ class ModelRouter:
         profiles: dict[str, ModelProfileSettings],
         routing: RoutingSettings,
         clients: dict[str, ChatModel],
-        repositories: WorkspaceRepositories,
+        audit: ModelAuditPort | None = None,
+        repositories: Any = None,
         budget: BudgetSettings = BudgetSettings(),
         retries: int = 2,
     ) -> None:
@@ -51,9 +137,21 @@ class ModelRouter:
         self.profiles = profiles
         self.routing = routing
         self.clients = clients
+        if audit is None:
+            if repositories is None:
+                raise TypeError("ModelRouter requires audit=")
+            warnings.warn(
+                "ModelRouter(repositories=...) is deprecated; pass audit=; "
+                "removed in 2.0.0",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            audit = repositories.models
+        self.audit = audit
         self.repositories = repositories
         self.budget = budget
         self.retries = max(0, retries)
+        self.attempts = RouteAttemptDriver(self)
         self._run_id: ContextVar[str | None] = ContextVar("model_run_id", default=None)
         self._role: ContextVar[ModelRole] = ContextVar(
             "model_role", default=ModelRole.REASONING
@@ -73,6 +171,25 @@ class ModelRouter:
         self._budget_authorizer = authorizer
 
     @contextmanager
+    def _bind_context(self, context: ModelRunContext):
+        token = self._run_id.set(context.run_id)
+        role_token = self._role.set(context.role)
+        limit_token = self._run_limits.set(context.limits)
+        base_token = self._run_budget_base.set(context.budget_base)
+        hard_token = self._hard_budget.set(context.hard_budget)
+        try:
+            yield
+        finally:
+            self._hard_budget.reset(hard_token)
+            self._run_budget_base.reset(base_token)
+            self._run_limits.reset(limit_token)
+            self._role.reset(role_token)
+            self._run_id.reset(token)
+
+    def open_session(self, context: ModelRunContext) -> ModelRunSession:
+        return _RouterModelRunSession(self, context)
+
+    @contextmanager
     def bind_run(
         self,
         run_id: str,
@@ -81,20 +198,27 @@ class ModelRouter:
         budget_base: tuple[int, float] = (0, 0.0),
         hard: bool = False,
     ):
-        token = self._run_id.set(run_id)
-        limit_token = self._run_limits.set(limits)
-        base_token = self._run_budget_base.set(budget_base)
-        hard_token = self._hard_budget.set(hard)
-        try:
+        warnings.warn(
+            "ModelRouter.bind_run() is deprecated; use open_session(); "
+            "removed in 2.0.0",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        with self._bind_context(
+            ModelRunContext(
+                run_id, limits=limits, budget_base=budget_base, hard_budget=hard
+            )
+        ):
             yield
-        finally:
-            self._hard_budget.reset(hard_token)
-            self._run_budget_base.reset(base_token)
-            self._run_limits.reset(limit_token)
-            self._run_id.reset(token)
 
     @contextmanager
     def use_role(self, role: ModelRole):
+        warnings.warn(
+            "ModelRouter.use_role() is deprecated; use ModelRunSession.for_role(); "
+            "removed in 2.0.0",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         token = self._role.set(role)
         try:
             yield
@@ -109,37 +233,19 @@ class ModelRouter:
         tools: list[dict[str, object]],
     ) -> ModelResponse:
         del model
-        run_id = self._required_run()
-        role = self._role.get()
-        candidates, exclusions = self._candidates(role, messages, tools)
-        if not candidates:
-            await self._record_failed_route(run_id, role, exclusions)
-            self._raise_no_route(exclusions)
-        baseline_profile = self.profiles[getattr(self.routing, role.value)[0]]
-        baseline_policy = self.providers[baseline_profile.provider].data_policy
+        plan = await self.attempts.plan(messages, tools)
+        run_id, role = plan.run_id, plan.role
         previous: str | None = None
         last_error: Exception | None = None
-        for profile in candidates:
-            provider = self.providers[profile.provider]
-            if provider.data_policy != baseline_policy:
-                exclusions.append(
-                    {"profile": profile.name, "reason": "data_policy_mismatch"}
-                )
-                continue
-            decision_id = await self.repositories.models.record_decision(
-                run_id,
-                role=role.value,
-                candidates=self._candidate_trace(candidates, exclusions),
-                selected=profile.name,
-                reasons={"ordered": True, "fallback_from": previous},
-            )
-            client = self.clients.get(profile.provider)
-            if client is None:
+        for profile in plan.candidates:
+            selection = await self.attempts.select(plan, profile, previous)
+            if selection is None:
                 last_error = ModelRoutingError(
                     f"provider client is unavailable: {profile.provider}"
                 )
                 previous = profile.name
                 continue
+            decision_id, client = selection
             for attempt in range(1, self.retries + 2):
                 await self._budget_gate(run_id, profile, messages, tools)
                 call_id, started = await self._start_call(
@@ -152,7 +258,7 @@ class ModelRouter:
                 except Exception as exc:
                     last_error = exc
                     code, retryable = _classify_error(exc)
-                    await self.repositories.models.finish_call(
+                    await self.audit.finish_call(
                         call_id,
                         duration_ms=_elapsed(started),
                         error_code=code.value,
@@ -171,20 +277,8 @@ class ModelRouter:
                 await self._finish_success(call_id, started, profile, response.usage)
                 return response
             previous = profile.name
-        if any(item.get("reason") == "data_policy_mismatch" for item in exclusions):
-            await self.repositories.models.record_decision(
-                run_id,
-                role=role.value,
-                candidates=self._candidate_trace(candidates, exclusions),
-                selected=None,
-                reasons={"error": "data_policy_mismatch", "fallback_from": previous},
-            )
-            raise ModelDataPolicyMismatch(
-                "configured fallback would change the provider data policy"
-            )
-        raise ModelRoutingError(
-            str(last_error or "all configured models are unavailable")
-        )
+        await self.attempts.exhausted(plan, previous, last_error)
+        raise AssertionError("unreachable")
 
     async def stream_complete(
         self,
@@ -194,33 +288,18 @@ class ModelRouter:
         tools: list[dict[str, object]],
     ) -> AsyncIterator[ModelDelta]:
         del model
-        run_id = self._required_run()
-        role = self._role.get()
-        candidates, exclusions = self._candidates(role, messages, tools)
-        if not candidates:
-            await self._record_failed_route(run_id, role, exclusions)
-            self._raise_no_route(exclusions)
-        baseline_profile = self.profiles[getattr(self.routing, role.value)[0]]
-        baseline_policy = self.providers[baseline_profile.provider].data_policy
+        plan = await self.attempts.plan(messages, tools)
+        run_id, role = plan.run_id, plan.role
         previous: str | None = None
         last_error: Exception | None = None
-        for profile in candidates:
-            provider = self.providers[profile.provider]
-            if provider.data_policy != baseline_policy:
-                exclusions.append(
-                    {"profile": profile.name, "reason": "data_policy_mismatch"}
-                )
-                continue
-            decision_id = await self.repositories.models.record_decision(
-                run_id,
-                role=role.value,
-                candidates=self._candidate_trace(candidates, exclusions),
-                selected=profile.name,
-                reasons={"ordered": True, "fallback_from": previous},
-            )
-            client = self.clients.get(profile.provider)
-            stream = getattr(client, "stream_complete", None) if client else None
-            if not callable(stream):
+        for profile in plan.candidates:
+            selection = await self.attempts.select(plan, profile, previous)
+            if selection is None:
+                client = None
+                decision_id = 0
+            else:
+                decision_id, client = selection
+            if not isinstance(client, StreamingChatModel):
                 last_error = ModelRoutingError(
                     f"provider does not support streaming: {profile.provider}"
                 )
@@ -233,7 +312,7 @@ class ModelRouter:
                 )
                 emitted, usage = False, ModelUsage()
                 try:
-                    async for delta in stream(
+                    async for delta in client.stream_complete(
                         model=profile.model, messages=messages, tools=tools
                     ):
                         emitted = emitted or bool(
@@ -247,7 +326,7 @@ class ModelRouter:
                 except Exception as exc:
                     last_error = exc
                     code, retryable = _classify_error(exc)
-                    await self.repositories.models.finish_call(
+                    await self.audit.finish_call(
                         call_id,
                         duration_ms=_elapsed(started),
                         input_tokens=usage.input_tokens,
@@ -273,23 +352,16 @@ class ModelRouter:
                 await self._finish_success(call_id, started, profile, usage)
                 return
             previous = profile.name
-        if any(item.get("reason") == "data_policy_mismatch" for item in exclusions):
-            await self.repositories.models.record_decision(
-                run_id,
-                role=role.value,
-                candidates=self._candidate_trace(candidates, exclusions),
-                selected=None,
-                reasons={"error": "data_policy_mismatch", "fallback_from": previous},
-            )
-            raise ModelDataPolicyMismatch(
-                "configured fallback would change the provider data policy"
-            )
-        raise ModelRoutingError(
-            str(last_error or "all configured models are unavailable")
-        )
+        await self.attempts.exhausted(plan, previous, last_error)
 
     async def summary(self, run_id: str) -> list[dict[str, Any]]:
-        return await self.repositories.models.summary(run_id)
+        warnings.warn(
+            "ModelRouter.summary(run_id) is deprecated; use ModelRunSession.summary(); "
+            "removed in 2.0.0",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return await self.audit.summary(run_id)
 
     def _required_run(self) -> str:
         run_id = self._run_id.get()
@@ -337,7 +409,7 @@ class ModelRouter:
         messages: list[dict[str, object]],
         tools: list[dict[str, object]],
     ) -> None:
-        input_used, output_used, run_cost = await self.repositories.models.usage(run_id)
+        input_used, output_used, run_cost = await self.audit.usage(run_id)
         current_tokens = input_used + output_used
         base_tokens, base_cost = self._run_budget_base.get()
         current_tokens += base_tokens
@@ -371,7 +443,7 @@ class ModelRouter:
         if cost_limit:
             checks.append(("run", "cost_usd", run_cost, reserved_cost, cost_limit))
         if self.budget.max_session_usd:
-            session_cost = await self.repositories.models.session_cost(run_id)
+            session_cost = await self.audit.session_cost(run_id)
             checks.append(
                 (
                     "session",
@@ -398,7 +470,7 @@ class ModelRouter:
                 and self._budget_authorizer
                 and await self._budget_authorizer(request)
             )
-            await self.repositories.models.record_budget(
+            await self.audit.record_budget(
                 run_id,
                 scope=scope,
                 limit_type=limit_type,
@@ -424,7 +496,7 @@ class ModelRouter:
         previous: str | None,
     ) -> tuple[str, float]:
         provider = self.providers[profile.provider]
-        call_id = await self.repositories.models.start_call(
+        call_id = await self.audit.start_call(
             run_id,
             decision_id=decision_id,
             role=role.value,
@@ -445,7 +517,7 @@ class ModelRouter:
         usage: ModelUsage,
     ) -> None:
         if self._usage_required() and not (usage.input_tokens or usage.output_tokens):
-            await self.repositories.models.finish_call(
+            await self.audit.finish_call(
                 call_id,
                 duration_ms=_elapsed(started),
                 error_code=ModelErrorCode.UNAVAILABLE.value,
@@ -454,7 +526,7 @@ class ModelRouter:
             raise ModelRoutingError(
                 "provider did not return usage required by the configured budget"
             )
-        await self.repositories.models.finish_call(
+        await self.audit.finish_call(
             call_id,
             duration_ms=_elapsed(started),
             input_tokens=usage.input_tokens,
@@ -474,7 +546,7 @@ class ModelRouter:
     async def _record_failed_route(
         self, run_id: str, role: ModelRole, exclusions: list[dict[str, str]]
     ) -> None:
-        await self.repositories.models.record_decision(
+        await self.audit.record_decision(
             run_id,
             role=role.value,
             candidates=exclusions,
@@ -501,6 +573,55 @@ class ModelRouter:
         raise ModelRoutingError(
             "no eligible model profile: " + json.dumps(exclusions, ensure_ascii=False)
         )
+
+
+class _RouterModelRunSession(ModelRunSession):
+    metered = True
+
+    def __init__(self, router: ModelRouter, context: ModelRunContext) -> None:
+        self.router = router
+        self.model = router
+        self.context = context
+
+    async def complete(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, object]],
+        tools: list[dict[str, object]],
+    ) -> ModelResponse:
+        with self.router._bind_context(self.context):
+            return await self.router.complete(
+                model=model, messages=messages, tools=tools
+            )
+
+    async def stream_complete(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, object]],
+        tools: list[dict[str, object]],
+    ) -> AsyncIterator[ModelDelta]:
+        with self.router._bind_context(self.context):
+            async for delta in self.router.stream_complete(
+                model=model, messages=messages, tools=tools
+            ):
+                yield delta
+
+    def for_role(self, role: ModelRole) -> ModelRunSession:
+        return _RouterModelRunSession(
+            self.router,
+            ModelRunContext(
+                self.context.run_id,
+                role,
+                self.context.limits,
+                self.context.budget_base,
+                self.context.hard_budget,
+            ),
+        )
+
+    async def summary(self) -> list[dict[str, Any]]:
+        return await self.router.audit.summary(self.context.run_id)
 
 
 def _estimate_tokens(value: object) -> int:

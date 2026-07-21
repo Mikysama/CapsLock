@@ -77,6 +77,7 @@ RICH_BOLD_STYLE_DEFINITIONS: Mapping[str, str] = {
     "text.primary.bold": THEME_TOKENS["textPrimary"],
     "primary.bold": THEME_TOKENS["primary"],
     "primary.soft.bold": THEME_TOKENS["primarySoft"],
+    "user.label": THEME_TOKENS["accent"],
     "agent.bold": THEME_TOKENS["agent"],
     "command.bold": THEME_TOKENS["command"],
     "error.bold": THEME_TOKENS["error"],

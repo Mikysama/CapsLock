@@ -17,13 +17,13 @@ from ..domain import (
     StopReason,
 )
 from ..security import redact
-from ..storage.repositories_v2 import WorkspaceRepositories
+from ..ports import WorkspaceServicesPort
 
 
 class RunGovernor:
     def __init__(
         self,
-        repositories: WorkspaceRepositories,
+        repositories: WorkspaceServicesPort,
         run_id: str,
         snapshot: BudgetSnapshot,
         history: list[dict[str, Any]],
@@ -45,7 +45,7 @@ class RunGovernor:
     @classmethod
     async def create(
         cls,
-        repositories: WorkspaceRepositories,
+        repositories: WorkspaceServicesPort,
         run_id: str,
         *,
         parent_run_id: str | None,

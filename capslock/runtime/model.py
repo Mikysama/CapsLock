@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
+
+from ..domain import ModelRole, RunLimits
 
 
 @dataclass(frozen=True)
@@ -44,6 +46,15 @@ class ModelDelta:
     usage: ModelUsage | None = None
 
 
+@dataclass(frozen=True)
+class ModelRunContext:
+    run_id: str
+    role: ModelRole = ModelRole.REASONING
+    limits: RunLimits | None = None
+    budget_base: tuple[int, float] = (0, 0.0)
+    hard_budget: bool = False
+
+
 class ChatModel(Protocol):
     async def complete(
         self,
@@ -52,6 +63,74 @@ class ChatModel(Protocol):
         messages: list[dict[str, object]],
         tools: list[dict[str, object]],
     ) -> ModelResponse: ...
+
+
+@runtime_checkable
+class StreamingChatModel(Protocol):
+    async def stream_complete(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, object]],
+        tools: list[dict[str, object]],
+    ) -> AsyncIterator[ModelDelta]: ...
+
+
+@runtime_checkable
+class ModelSessionProvider(Protocol):
+    def open_session(self, context: ModelRunContext) -> "ModelRunSession": ...
+
+
+class ModelRunSession:
+    """Explicit per-run model surface used by the runtime."""
+
+    metered = False
+
+    def __init__(self, model: ChatModel, context: ModelRunContext) -> None:
+        self.model = model
+        self.context = context
+
+    async def complete(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, object]],
+        tools: list[dict[str, object]],
+    ) -> ModelResponse:
+        return await self.model.complete(model=model, messages=messages, tools=tools)
+
+    async def stream_complete(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, object]],
+        tools: list[dict[str, object]],
+    ) -> AsyncIterator[ModelDelta]:
+        async for delta in stream_model_response(
+            self.model, model=model, messages=messages, tools=tools
+        ):
+            yield delta
+
+    def for_role(self, role: ModelRole) -> "ModelRunSession":
+        return ModelRunSession(
+            self.model,
+            ModelRunContext(
+                self.context.run_id,
+                role,
+                self.context.limits,
+                self.context.budget_base,
+                self.context.hard_budget,
+            ),
+        )
+
+    async def summary(self) -> list[dict[str, Any]]:
+        return []
+
+
+def open_model_session(model: ChatModel, context: ModelRunContext) -> ModelRunSession:
+    if isinstance(model, ModelSessionProvider):
+        return model.open_session(context)
+    return ModelRunSession(model, context)
 
 
 class AsyncOpenAIChatModel:
@@ -163,9 +242,10 @@ async def stream_model_response(
     messages: list[dict[str, object]],
     tools: list[dict[str, object]],
 ) -> AsyncIterator[ModelDelta]:
-    stream = getattr(chat_model, "stream_complete", None)
-    if callable(stream):
-        async for delta in stream(model=model, messages=messages, tools=tools):
+    if isinstance(chat_model, StreamingChatModel):
+        async for delta in chat_model.stream_complete(
+            model=model, messages=messages, tools=tools
+        ):
             yield delta
         return
     response = await chat_model.complete(model=model, messages=messages, tools=tools)

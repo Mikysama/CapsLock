@@ -24,6 +24,7 @@ from capslock.domain import (
 from capslock.memory import MemoryService
 from capslock.memory.embeddings import ExternalEmbeddingConfig
 from capslock.runtime.model import ModelDelta, ModelMessage, ModelResponse, ModelUsage
+from capslock.runtime.model import ModelRunContext
 from capslock.runtime.routing import ModelRouter, _retry_delay
 from capslock.storage.memory_v2 import MemoryRepositories
 from capslock.storage.async_database import IncompatibleDatabaseError, WorkspaceDatabase
@@ -155,6 +156,41 @@ def test_router_retries_and_falls_back_with_same_data_policy(tmp_path: Path) -> 
             assert (await repositories.models.summary(prepared.run.id))[0][
                 "errors"
             ] >= 0
+        finally:
+            await repositories.close()
+
+    asyncio.run(scenario())
+
+
+def test_router_explicit_run_session_records_usage_without_ambient_binding(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        repositories = await WorkspaceRepositories.open(
+            tmp_path / "session.sqlite3", workspace=tmp_path
+        )
+        try:
+            _, prepared = await workspace_run(repositories)
+            provider_config = provider("provider", policy="local")
+            profile_config = profile("reasoning", "provider")
+            router = ModelRouter(
+                providers={"provider": provider_config},
+                profiles={"reasoning": profile_config},
+                routing=RoutingSettings(("reasoning",), ("reasoning",), (), ()),
+                clients={
+                    "provider": ScriptedClient(
+                        ModelResponse(ModelMessage("ok"), ModelUsage(2, 0))
+                    )
+                },
+                audit=repositories.models,
+            )
+            model_session = router.open_session(ModelRunContext(prepared.run.id))
+            response = await model_session.complete(
+                model="ignored", messages=[], tools=[]
+            )
+            assert response.message.content == "ok"
+            assert model_session.metered is True
+            assert (await model_session.summary())[0]["role"] == "reasoning"
         finally:
             await repositories.close()
 

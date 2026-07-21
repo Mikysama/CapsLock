@@ -11,12 +11,24 @@ from .core import workspace_key
 from .lifecycle import MemoryRepository
 from .semantic import EmbeddingRepository, RecallRepository
 from .external import EmbeddingAuditRepository
+from .facades import (
+    MemoryAuditRepository,
+    MemoryLifecycleRepository,
+    MemoryQueryRepository,
+    MemorySettingsRepository,
+    MemorySourceRepository,
+)
 
 
 @dataclass(frozen=True)
 class MemoryRepositories:
     database: MemoryDatabase
     memories: MemoryRepository
+    lifecycle: MemoryLifecycleRepository
+    query: MemoryQueryRepository
+    sources: MemorySourceRepository
+    settings: MemorySettingsRepository
+    audit: MemoryAuditRepository
     candidates: CandidateRepository
     embeddings: EmbeddingRepository
     recalls: RecallRepository
@@ -25,9 +37,15 @@ class MemoryRepositories:
     @classmethod
     async def open(cls, path: str | Path) -> "MemoryRepositories":
         database = await MemoryDatabase.open(path)
+        memories = MemoryRepository(database)
         return cls(
             database,
-            MemoryRepository(database),
+            memories,
+            MemoryLifecycleRepository(memories),
+            MemoryQueryRepository(memories),
+            MemorySourceRepository(memories),
+            MemorySettingsRepository(memories),
+            MemoryAuditRepository(memories),
             CandidateRepository(database),
             EmbeddingRepository(database),
             RecallRepository(database),
@@ -44,6 +62,11 @@ __all__ = [
     "EmbeddingAuditRepository",
     "MemoryRepositories",
     "MemoryRepository",
+    "MemoryLifecycleRepository",
+    "MemoryQueryRepository",
+    "MemorySourceRepository",
+    "MemorySettingsRepository",
+    "MemoryAuditRepository",
     "RecallRepository",
     "workspace_key",
 ]

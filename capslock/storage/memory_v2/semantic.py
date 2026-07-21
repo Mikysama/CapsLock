@@ -7,7 +7,7 @@ import json
 
 from ...domain import EmbeddingBackend, MemoryInfo, MemoryRecallHit
 from .core import Repository, timestamp
-from .lifecycle import MEMORY_COLUMNS, _memory, _visible_where
+from .records import MEMORY_COLUMNS, memory_from_row, visible_where
 
 
 class EmbeddingRepository(Repository):
@@ -39,7 +39,7 @@ class EmbeddingRepository(Repository):
     async def list(
         self, *, workspace: str, session_id: str, backend: EmbeddingBackend, model: str
     ) -> list[tuple[MemoryInfo, bytes, int]]:
-        where, values = _visible_where(workspace, session_id)
+        where, values = visible_where(workspace, session_id)
         rows = await self.all(
             f"""SELECT {MEMORY_COLUMNS},e.vector,e.dimensions FROM memories m
                 LEFT JOIN memory_revisions r ON r.memory_id=m.id AND r.revision=m.current_revision
@@ -49,7 +49,8 @@ class EmbeddingRepository(Repository):
             (backend.value, model, *values, timestamp()),
         )
         return [
-            (_memory(row), bytes(row["vector"]), int(row["dimensions"])) for row in rows
+            (memory_from_row(row), bytes(row["vector"]), int(row["dimensions"]))
+            for row in rows
         ]
 
     async def clear(self, *, workspace: str | None = None) -> int:
@@ -123,7 +124,7 @@ class RecallRepository(Repository):
         )
         return [
             MemoryRecallHit(
-                _memory(row),
+                memory_from_row(row),
                 float(row["score"]),
                 row["lexical_rank"],
                 row["semantic_rank"],

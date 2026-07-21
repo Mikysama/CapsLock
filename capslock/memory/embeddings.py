@@ -136,7 +136,7 @@ class EmbeddingService:
         self.external_profiles = external_profiles or {}
 
     async def provider(self) -> tuple[EmbeddingBackend, str, EmbeddingProvider] | None:
-        settings = await self.repositories.memories.settings(self.workspace)
+        settings = await self.repositories.settings.get(self.workspace)
         backend = settings["embedding_backend"]
         if backend is EmbeddingBackend.OFF:
             return None
@@ -250,7 +250,7 @@ class EmbeddingService:
     ) -> None:
         if not isinstance(provider, ExternalOpenAIEmbeddingProvider):
             return
-        settings = await self.repositories.memories.settings(self.workspace)
+        settings = await self.repositories.settings.get(self.workspace)
         consent_id = settings.get("embedding_consent_id")
         if not isinstance(consent_id, int):
             return

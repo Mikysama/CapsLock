@@ -12,9 +12,45 @@ from capslock.domain import (
     ActionType,
     AgentEventKind,
     WorkItemStatus,
+    approval_outcome,
+    interrupted_step_status,
+    validate_work_item_transition,
 )
 from capslock.storage.repositories_v2 import WorkspaceRepositories
 from tests.helpers import workspace_run
+
+
+@pytest.mark.parametrize(
+    ("current", "target"),
+    [
+        (WorkItemStatus.QUEUED, WorkItemStatus.RUNNING),
+        (WorkItemStatus.RUNNING, WorkItemStatus.WAITING_APPROVAL),
+        (WorkItemStatus.WAITING_APPROVAL, WorkItemStatus.COMPLETED),
+        (WorkItemStatus.COMPLETED, WorkItemStatus.COMPLETED),
+    ],
+)
+def test_work_item_transition_policy_accepts_supported_edges(
+    current: WorkItemStatus, target: WorkItemStatus
+) -> None:
+    validate_work_item_transition(current, target)
+
+
+def test_work_item_transition_policy_rejects_terminal_reentry() -> None:
+    with pytest.raises(ValueError, match="invalid work item transition"):
+        validate_work_item_transition(WorkItemStatus.COMPLETED, WorkItemStatus.RUNNING)
+
+
+def test_terminal_policy_maps_steps_and_approval_failures() -> None:
+    assert interrupted_step_status(WorkItemStatus.COMPLETED) is None
+    assert interrupted_step_status(WorkItemStatus.CANCELLED).value == "cancelled"
+    completed = approval_outcome(None)
+    assert completed.status is WorkItemStatus.COMPLETED
+    failed = approval_outcome("failed", "nonzero_exit", "command failed")
+    assert failed.status is WorkItemStatus.FAILED
+    assert (failed.error_code, failed.error_message) == (
+        "nonzero_exit",
+        "command failed",
+    )
 
 
 def test_enqueue_start_and_compare_and_set_guards(tmp_path: Path) -> None:

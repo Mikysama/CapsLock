@@ -224,7 +224,9 @@ async def task_list_update(
         isinstance(item, str) and item.strip() for item in items
     ):
         raise ValueError("items must be a list of non-empty task strings")
-    tasks = await context.repositories.tasks.replace(
+    if context.tasks is None:
+        raise ValueError("task storage is unavailable")
+    tasks = await context.tasks.replace(
         context.session_id, items, run_id=context.run_id
     )
     return ToolResult(
@@ -244,16 +246,18 @@ async def task_status_update(
     task_id, status = arguments.get("task_id"), arguments.get("status")
     if not isinstance(task_id, str) or not isinstance(status, str):
         raise ValueError("task_id and status must be strings")
-    item = await context.repositories.tasks.update_status(
-        task_id, context.session_id, status
-    )
+    if context.tasks is None:
+        raise ValueError("task storage is unavailable")
+    item = await context.tasks.update_status(task_id, context.session_id, status)
     return ToolResult(True, {"id": item.id, "text": item.text, "status": item.status})
 
 
 async def list_external_sources(
     context: RunContext, arguments: dict[str, Any]
 ) -> ToolResult:
-    items = await context.repositories.sources.list(context.session_id)
+    if context.sources is None:
+        raise ValueError("source storage is unavailable")
+    items = await context.sources.list(context.session_id)
     return ToolResult(
         True,
         [

@@ -54,6 +54,38 @@ def test_v1_facades_and_sync_clients_are_absent() -> None:
         assert forbidden not in text
 
 
+def test_runtime_and_tooling_depend_only_on_neutral_ports() -> None:
+    root = Path(__file__).parents[1] / "capslock"
+    for directory in (root / "runtime", root / "tooling"):
+        text = "\n".join(
+            path.read_text(encoding="utf-8") for path in directory.rglob("*.py")
+        )
+        assert "from ..application" not in text
+        assert "from ..storage" not in text
+    neutral = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in [root / "ports.py", *(root / "domain").rglob("*.py")]
+    )
+    for forbidden in (
+        "import sqlite3",
+        "import aiosqlite",
+        "import httpx",
+        "from openai",
+        "from rich",
+        "from prompt_toolkit",
+        "from .cli",
+    ):
+        assert forbidden not in neutral
+
+
+def test_bootstrap_has_no_agent_backfill_cycle() -> None:
+    source = (Path(__file__).parents[1] / "capslock" / "bootstrap.py").read_text(
+        encoding="utf-8"
+    )
+    assert "agent_ref" not in source
+    assert "RunInteraction" in source
+
+
 def test_all_registered_tools_have_async_executors() -> None:
     registry = workspace_tools()
     assert registry.names

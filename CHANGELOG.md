@@ -4,6 +4,15 @@
 
 ## [Unreleased]
 
+## [1.10.1] - 2026-07-21
+
+### Changed
+
+- 将应用装配收口到独立 bootstrap，并以中立 ports、共享运行交互状态和显式模型会话消除 runtime/tooling 对具体应用与存储实现的依赖。
+- 将 workflow 状态策略、Agent/ToolLoop 步骤、生命周期归档与导入协调、记忆 repository/embedding policy、配置管线和数据库迁移规格拆为独立边界；现有 CLI、配置、schema 与归档格式保持不变。
+- 为将在 2.0.0 删除的旧 Python 构造参数和模型路由上下文方法增加默认隐藏的 `DeprecationWarning`。
+- 将历史记录中的 `You` 标签改为独立的加粗强调色样式，与 prompt 正文区分。
+
 ## [1.10.0] - 2026-07-21
 
 ### Added

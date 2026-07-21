@@ -101,7 +101,7 @@ def render_history(
     for entry in transcript:
         role = str(entry["role"])
         console.print(
-            "\n[user.bold]You[/]" if role == "user" else "\n[agent.bold]CapsLock[/]"
+            "\n[user.label]You[/]" if role == "user" else "\n[agent.bold]CapsLock[/]"
         )
         console.print(str(entry.get("content", "")), markup=False, highlight=False)
         if entry.get("status") not in {None, "completed"}:

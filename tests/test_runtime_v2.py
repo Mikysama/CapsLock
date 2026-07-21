@@ -16,6 +16,7 @@ from capslock.domain import (
     RunStepStatus,
 )
 from capslock.observability import EventSink
+from capslock.interaction import RunInteraction
 from capslock.permissions import PermissionMode
 from capslock.policy import WorkspacePolicy
 from capslock.runtime import AsyncOpenAIChatModel, WorkspaceAgent
@@ -105,7 +106,7 @@ def test_interactive_approval_executes_action_inside_same_run(tmp_path: Path) ->
                 ),
                 answer("The approved file was created."),
             )
-            agent_ref = {}
+            interaction = RunInteraction(permission_mode=PermissionMode.APPROVE_FOR_ME)
 
             def actions(run_id: str) -> ActionCoordinator:
                 return ActionCoordinator(
@@ -120,8 +121,7 @@ def test_interactive_approval_executes_action_inside_same_run(tmp_path: Path) ->
                         ),
                     ],
                     event=lambda *args, **kwargs: None,
-                    permission_mode=agent_ref["agent"].permission_mode,
-                    approval_authorizer=agent_ref["agent"].action_authorizer,
+                    interaction=interaction,
                 )
 
             agent = WorkspaceAgent(
@@ -139,8 +139,8 @@ def test_interactive_approval_executes_action_inside_same_run(tmp_path: Path) ->
                 tools=workspace_tools(),
                 permission_mode=PermissionMode.APPROVE_FOR_ME,
                 max_turns=3,
+                interaction=interaction,
             )
-            agent_ref["agent"] = agent
             decisions = []
 
             async def approve(action):
@@ -600,7 +600,10 @@ def test_cancelling_stream_closes_run_action_and_running_step(tmp_path: Path) ->
                     pass
 
             task = asyncio.create_task(consume())
-            await asyncio.wait_for(started.wait(), timeout=2)
+            # Full-suite CI may have several aiosqlite workers draining when this
+            # scenario starts; the assertion is about cancellation cleanup, not
+            # sub-two-second startup latency.
+            await asyncio.wait_for(started.wait(), timeout=5)
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task

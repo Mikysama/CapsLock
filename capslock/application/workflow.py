@@ -13,7 +13,7 @@ from ..domain import (
     WorkItemInfo,
     WorkItemStatus,
 )
-from ..storage.repositories_v2 import WorkspaceRepositories
+from ..ports import WorkflowRepositoryPort
 
 
 @dataclass(frozen=True)
@@ -24,8 +24,11 @@ class PreparedRun:
 
 
 class WorkflowService:
-    def __init__(self, repositories: WorkspaceRepositories) -> None:
+    def __init__(self, repositories) -> None:
         self.repositories = repositories
+        self.repository: WorkflowRepositoryPort = getattr(
+            repositories, "workflow", repositories
+        )
 
     async def enqueue(
         self, session_id: str, question: str, *, parent_work_item_id: str | None = None
@@ -33,7 +36,7 @@ class WorkflowService:
         normalized = question.strip()
         if not normalized:
             raise ValueError("question must not be empty")
-        return await self.repositories.workflow.enqueue(
+        return await self.repository.enqueue(
             session_id, normalized, parent_work_item_id=parent_work_item_id
         )
 
@@ -48,10 +51,8 @@ class WorkflowService:
         checkpoint = None
         parent_work_item_id = None
         if resume_from_run_id is not None:
-            parent = await self.repositories.workflow.retryable_run(
-                session_id, resume_from_run_id
-            )
-            checkpoint = await self.repositories.workflow.last_stable_step(parent.id)
+            parent = await self.repository.retryable_run(session_id, resume_from_run_id)
+            checkpoint = await self.repository.last_stable_step(parent.id)
             assert checkpoint is not None
             parent_work_item_id = parent.work_item_id
         if work_item_id is None:
@@ -59,13 +60,13 @@ class WorkflowService:
                 session_id, question, parent_work_item_id=parent_work_item_id
             )
         else:
-            work_item = await self.repositories.workflow.require_work_item(work_item_id)
+            work_item = await self.repository.require_work_item(work_item_id)
             if (
                 work_item.session_id != session_id
                 or work_item.status is not WorkItemStatus.QUEUED
             ):
                 raise ValueError("work item is not queued in this session")
-        run = await self.repositories.workflow.start_run(
+        run = await self.repository.start_run(
             session_id,
             work_item.id,
             work_item.question,
@@ -89,7 +90,7 @@ class WorkflowService:
         cost_usd: float = 0,
         stop_reason: str | None = None,
     ) -> AgentEvent:
-        return await self.repositories.workflow.finalize(
+        return await self.repository.finalize(
             run_id,
             status=status,
             event_kind=event_kind,
@@ -104,4 +105,4 @@ class WorkflowService:
         )
 
     async def settle_approval(self, session_id: str, run_id: str) -> AgentEvent | None:
-        return await self.repositories.workflow.settle_approval(session_id, run_id)
+        return await self.repository.settle_approval(session_id, run_id)

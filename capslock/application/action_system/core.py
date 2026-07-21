@@ -14,6 +14,7 @@ from ...domain import (
     ActionType,
     ApprovalDecision,
 )
+from ...interaction import RunInteraction
 from ...permissions import ApprovalPolicy, PermissionMode
 from ...storage.repositories_v2 import WorkspaceRepositories
 
@@ -55,13 +56,16 @@ class ActionCoordinator:
         approval_authorizer: (
             Callable[[ActionRecord], Awaitable[ApprovalDecision]] | None
         ) = None,
+        interaction: RunInteraction | None = None,
     ) -> None:
         self.repositories = repositories
         self.session_id = session_id
         self.run_id = run_id
         self.event = event
-        self.permission_mode = permission_mode
-        self.approval_authorizer = approval_authorizer
+        self.interaction = interaction or RunInteraction(
+            permission_mode=permission_mode,
+            action_authorizer=approval_authorizer,
+        )
         self.approvals = ApprovalPolicy()
         self.handlers = {
             action_type: handler
@@ -81,9 +85,29 @@ class ActionCoordinator:
             run_id=run_id,
             handlers=list(dict.fromkeys(self.handlers.values())),
             event=self.event,
-            permission_mode=self.permission_mode,
-            approval_authorizer=self.approval_authorizer,
+            interaction=self.interaction,
         )
+
+    @property
+    def permission_mode(self) -> PermissionMode:
+        return self.interaction.permission_mode
+
+    @permission_mode.setter
+    def permission_mode(self, value: PermissionMode) -> None:
+        self.interaction.permission_mode = value
+
+    @property
+    def approval_authorizer(
+        self,
+    ) -> Callable[[ActionRecord], Awaitable[ApprovalDecision]] | None:
+        return self.interaction.action_authorizer
+
+    @approval_authorizer.setter
+    def approval_authorizer(
+        self,
+        value: Callable[[ActionRecord], Awaitable[ApprovalDecision]] | None,
+    ) -> None:
+        self.interaction.action_authorizer = value
 
     async def propose(self, action_type: ActionType, **payload: Any) -> ActionRecord:
         proposal = await self.handlers[action_type].propose(action_type, payload)

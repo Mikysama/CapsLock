@@ -81,6 +81,8 @@ SkillRegistry / progressive loading
 - v1.8.0 的多 provider 路由、上下文筛选、重试/同策略降级、预算、逐模型统计、外部 embedding 同意和固定评测。
 - v1.9.0 的配置 v0→v1、双库 schema v2→v3、初始化、归档校验、幂等合并、重新审批和 Doctor 修复。
 - v1.10.0 的配置 v1→v2、workspace schema v3→v4、软/硬预算、循环检测、lineage 恢复和结构化停止。
+- v1.10.1 的 ports/bootstrap 依赖边界、共享运行交互、workflow 纯状态策略、显式模型会话、Agent/ToolLoop 编排、生命周期包、记忆窄 repository、配置管线和声明式数据库迁移规格。
+- v1.10.1 保持 CLI、配置优先级、workspace schema v4、memory schema v3、archive v2、事件和权限行为兼容，并验证旧 Python 接口仅发出默认隐藏的 2.0 弃用警告。
 - `.capslock` 新旧布局冲突、dry-run、幂等迁移、目录合并、符号链接拒绝、shell-only 用户路径、state/local 读取隔离和 Skill 强制确认。
 
 运行：
@@ -94,7 +96,7 @@ python scripts/check_repository.py
 python -m build
 python -m twine check dist/*
 python scripts/evaluate_agent.py --mode deterministic
-python scripts/verify_release.py --tag v1.10.0
+python scripts/verify_release.py --tag v1.10.1
 capslock doctor
 python -m capslock --version
 ```

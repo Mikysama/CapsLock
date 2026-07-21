@@ -12,7 +12,7 @@ from openai import AsyncOpenAI
 from rich.console import Console
 
 from .. import __version__
-from ..application.app import WorkspaceApplication
+from ..bootstrap import WorkspaceApplication
 from ..config import Settings
 from ..credentials import CredentialError
 from ..environment import load_project_environment

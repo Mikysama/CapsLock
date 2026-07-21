@@ -31,7 +31,7 @@ class RecallService:
         self.source_validator = source_validator
 
     async def recall(self, query: str, *, run_id: str) -> list[MemoryRecallHit]:
-        settings = await self.repositories.memories.settings(self.workspace)
+        settings = await self.repositories.settings.get(self.workspace)
         if not settings["recall_enabled"]:
             await self.repositories.recalls.record(
                 workspace=self.workspace,
@@ -41,7 +41,7 @@ class RecallService:
                 hits=[],
             )
             return []
-        lexical = await self.repositories.memories.search_ranked(
+        lexical = await self.repositories.query.search_ranked(
             query, workspace=self.workspace, session_id=self.session_id, limit=20
         )
         lexical_ranks = {item.id: rank for item, rank in lexical}
@@ -59,7 +59,7 @@ class RecallService:
         )
         hits, current_time = [], datetime.now(UTC)
         for identifier in identifiers:
-            item = await self.repositories.memories.get(identifier)
+            item = await self.repositories.query.get(identifier)
             if item is None:
                 continue
             if (
@@ -69,10 +69,10 @@ class RecallService:
                 and item.source_ref
                 and not await self.source_validator(item.source_ref)
             ):
-                await self.repositories.memories.invalidate_source(
+                await self.repositories.sources.invalidate(
                     item.id, run_id=item.source_ref
                 )
-                item = await self.repositories.memories.get(item.id)
+                item = await self.repositories.query.get(item.id)
                 if item is None:
                     continue
             if item.origin is MemoryOrigin.AUTOMATIC and not item.source_valid:
@@ -140,7 +140,7 @@ class RecallService:
             query=query,
             hits=selected,
         )
-        await self.repositories.memories.record_access(
+        await self.repositories.sources.record_access(
             [hit.memory for hit in selected],
             workspace=self.workspace,
             session_id=self.session_id,

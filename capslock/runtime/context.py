@@ -6,13 +6,13 @@ import re
 from typing import Any
 
 from ..evidence import Evidence
-from ..storage.repositories_v2 import WorkspaceRepositories
+from ..ports import WorkspaceServicesPort
 
 
 class ContextBuilder:
     def __init__(
         self,
-        repositories: WorkspaceRepositories,
+        repositories: WorkspaceServicesPort,
         max_messages: int,
         instructions: str,
         memory: Any = None,
@@ -63,7 +63,7 @@ class ContextBuilder:
 
 
 class CitationResolver:
-    def __init__(self, repositories: WorkspaceRepositories) -> None:
+    def __init__(self, repositories: WorkspaceServicesPort) -> None:
         self.repositories = repositories
 
     async def resolve(

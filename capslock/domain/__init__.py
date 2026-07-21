@@ -49,6 +49,7 @@ from .governance import (
     StopReason,
 )
 from .workflow import (
+    ApprovalOutcome,
     AgentEvent,
     AgentEventKind,
     RunStepInfo,
@@ -58,6 +59,10 @@ from .workflow import (
     TERMINAL_EVENT_KINDS,
     WorkItemInfo,
     WorkItemStatus,
+    approval_outcome,
+    interrupted_step_status,
+    validate_final_status,
+    validate_work_item_transition,
 )
 
 __all__ = [
@@ -67,6 +72,7 @@ __all__ = [
     "ActionStatus",
     "ActionType",
     "ApprovalDecision",
+    "ApprovalOutcome",
     "AgentEvent",
     "AgentEventKind",
     "ChangeInfo",
@@ -106,6 +112,10 @@ __all__ = [
     "TaskInfo",
     "WorkItemInfo",
     "WorkItemStatus",
+    "approval_outcome",
+    "interrupted_step_status",
     "normalize_session_title",
     "pending_session_title",
+    "validate_final_status",
+    "validate_work_item_transition",
 ]

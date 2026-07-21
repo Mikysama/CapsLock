@@ -16,7 +16,11 @@ from ...domain import (
     SessionTitleSource,
     WorkItemInfo,
     WorkItemStatus,
+    approval_outcome,
+    interrupted_step_status,
     normalize_session_title,
+    validate_final_status,
+    validate_work_item_transition,
 )
 from .core import Repository, now
 
@@ -78,28 +82,7 @@ class WorkflowRepository(Repository):
         self, item_id: str, status: WorkItemStatus, *, error: str | None = None
     ) -> WorkItemInfo:
         current = await self.require_work_item(item_id)
-        allowed = {
-            WorkItemStatus.QUEUED: {WorkItemStatus.RUNNING, WorkItemStatus.CANCELLED},
-            WorkItemStatus.RUNNING: {
-                WorkItemStatus.WAITING_APPROVAL,
-                WorkItemStatus.COMPLETED,
-                WorkItemStatus.FAILED,
-                WorkItemStatus.CANCELLED,
-                WorkItemStatus.INTERRUPTED,
-                WorkItemStatus.STOPPED,
-            },
-            WorkItemStatus.WAITING_APPROVAL: {
-                WorkItemStatus.COMPLETED,
-                WorkItemStatus.FAILED,
-                WorkItemStatus.CANCELLED,
-            },
-        }
-        if status is not current.status and status not in allowed.get(
-            current.status, set()
-        ):
-            raise ValueError(
-                f"invalid work item transition: {current.status.value} -> {status.value}"
-            )
+        validate_work_item_transition(current.status, status)
         updated = await self.execute(
             "UPDATE work_items SET status=?,error=?,updated_at=? WHERE id=? AND status=?",
             (status.value, error, now(), item_id, current.status.value),
@@ -261,15 +244,7 @@ class WorkflowRepository(Repository):
         stop_reason: str | None = None,
     ) -> AgentEvent:
         run_status = status.value
-        if status not in {
-            WorkItemStatus.WAITING_APPROVAL,
-            WorkItemStatus.COMPLETED,
-            WorkItemStatus.FAILED,
-            WorkItemStatus.CANCELLED,
-            WorkItemStatus.INTERRUPTED,
-            WorkItemStatus.STOPPED,
-        }:
-            raise ValueError(f"unsupported workflow final status: {status.value}")
+        validate_final_status(status)
         async with self.database.transaction() as connection:
             row = await (
                 await connection.execute(
@@ -302,21 +277,12 @@ class WorkflowRepository(Repository):
             )
             if not work_item.rowcount:
                 raise ValueError("work item is not running")
-            step_status = (
-                RunStepStatus.CANCELLED.value
-                if status is WorkItemStatus.CANCELLED
-                else RunStepStatus.FAILED.value
-            )
-            if status in {
-                WorkItemStatus.CANCELLED,
-                WorkItemStatus.FAILED,
-                WorkItemStatus.INTERRUPTED,
-                WorkItemStatus.STOPPED,
-            }:
+            step_status = interrupted_step_status(status)
+            if step_status is not None:
                 await connection.execute(
                     """UPDATE run_steps SET status=?,finished_at=?,error=coalesce(error,?)
                        WHERE run_id=? AND status='running'""",
-                    (step_status, timestamp, error_message, run_id),
+                    (step_status.value, timestamp, error_message, run_id),
                 )
             if status in {
                 WorkItemStatus.CANCELLED,
@@ -492,22 +458,21 @@ class WorkflowRepository(Repository):
                 )
             ).fetchone()
             timestamp = now()
+            outcome = approval_outcome(
+                None if failed is None else str(failed["status"]),
+                None if failed is None else failed["error_code"],
+                None if failed is None else failed["error_message"],
+            )
+            status, kind = outcome.status, outcome.event_kind
             if failed is None:
-                status = WorkItemStatus.COMPLETED
-                kind = AgentEventKind.COMPLETED
                 payload: dict[str, Any] = {
                     "approval_settled": True,
                     "status": status.value,
                 }
                 error_code = error_message = None
             else:
-                cancelled = failed["status"] == "cancelled"
-                status = (
-                    WorkItemStatus.CANCELLED if cancelled else WorkItemStatus.FAILED
-                )
-                kind = AgentEventKind.CANCELLED if cancelled else AgentEventKind.FAILED
-                error_code = str(failed["error_code"] or status.value)
-                error_message = str(failed["error_message"] or f"action {status.value}")
+                error_code = outcome.error_code
+                error_message = outcome.error_message
                 payload = {
                     "approval_settled": True,
                     "status": status.value,
