@@ -16,6 +16,7 @@ from .misc import (
 from .sessions import SessionRepository
 from .models import ModelRepository
 from .governance import GovernanceRepository
+from .collaboration import CollaborationRepository
 from .workflow import WorkflowRepository
 
 
@@ -31,6 +32,7 @@ class WorkspaceRepositories:
     snapshots: SnapshotRepository
     models: ModelRepository
     governance: GovernanceRepository
+    collaboration: CollaborationRepository
 
     @classmethod
     async def open(
@@ -41,6 +43,8 @@ class WorkspaceRepositories:
             "INSERT OR IGNORE INTO database_metadata(key,value) VALUES('workspace',?)",
             (str(workspace.resolve()),),
         )
+        collaboration = CollaborationRepository(database)
+        await collaboration.interrupt_active()
         return cls(
             database,
             SessionRepository(database, workspace),
@@ -52,6 +56,7 @@ class WorkspaceRepositories:
             SnapshotRepository(database),
             ModelRepository(database),
             GovernanceRepository(database),
+            collaboration,
         )
 
     async def close(self) -> None:
@@ -63,6 +68,7 @@ __all__ = [
     "SessionRepository",
     "ModelRepository",
     "GovernanceRepository",
+    "CollaborationRepository",
     "SettingsRepository",
     "SnapshotRepository",
     "SourceRepository",

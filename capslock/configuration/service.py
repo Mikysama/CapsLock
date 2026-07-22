@@ -81,6 +81,15 @@ class RuntimeSettings:
 
 
 @dataclass(frozen=True)
+class AgentSettings:
+    enabled: bool = True
+    max_children: int = 4
+    max_concurrency: int = 2
+    max_depth: int = 1
+    max_child_tool_rounds: int = 16
+
+
+@dataclass(frozen=True)
 class CommandSettings:
     command_timeout_seconds: float
     command_output_bytes: int
@@ -116,6 +125,7 @@ class Settings:
     mcp: McpSettings
     permission_mode: str
     memory: MemorySettings = MemorySettings()
+    agents: AgentSettings = AgentSettings()
     providers: dict[str, ProviderSettings] | None = None
     models: dict[str, ModelProfileSettings] | None = None
     routing: RoutingSettings | None = None
@@ -194,6 +204,7 @@ class Settings:
                     value("runtime", "CAPSLOCK_MAX_CONTEXT_MESSAGES", 24)
                 ),
             ),
+            agents=_agents(group("agents")),
             command=CommandSettings(
                 command_timeout_seconds=float(
                     value("command", "CAPSLOCK_COMMAND_TIMEOUT_SECONDS", 120)
@@ -269,6 +280,13 @@ _GROUP_FIELDS = {
         "max_tool_rounds",
         "max_context_messages",
         "permission_mode",
+    },
+    "agents": {
+        "enabled",
+        "max_children",
+        "max_concurrency",
+        "max_depth",
+        "max_child_tool_rounds",
     },
     "command": {"command_timeout_seconds", "command_output_bytes"},
     "web": {
@@ -714,6 +732,25 @@ def _budget(raw: dict[str, object]) -> BudgetSettings:
     )
 
 
+def _agents(raw: dict[str, object]) -> AgentSettings:
+    values = AgentSettings(
+        enabled=_boolean(raw.get("enabled", True)),
+        max_children=int(raw.get("max_children", 4)),
+        max_concurrency=int(raw.get("max_concurrency", 2)),
+        max_depth=int(raw.get("max_depth", 1)),
+        max_child_tool_rounds=int(raw.get("max_child_tool_rounds", 16)),
+    )
+    if values.max_children < 1 or values.max_children > 32:
+        raise ValueError("agents.max_children must be between 1 and 32")
+    if values.max_concurrency < 1 or values.max_concurrency > values.max_children:
+        raise ValueError("agents.max_concurrency must be between 1 and max_children")
+    if values.max_depth != 1:
+        raise ValueError("agents.max_depth must be 1")
+    if values.max_child_tool_rounds < 1:
+        raise ValueError("agents.max_child_tool_rounds must be positive")
+    return values
+
+
 def _max_tool_rounds(runtime: dict[str, object]) -> int:
     if "CAPSLOCK_MAX_TURNS" in os.environ:
         raise ValueError(
@@ -759,6 +796,9 @@ def _validate_semantics(document: dict[str, object]) -> None:
     _budget(
         document.get("budget", {}) if isinstance(document.get("budget"), dict) else {}
     )
+    agents = document.get("agents", {})
+    if isinstance(agents, dict):
+        _agents(agents)
     runtime = document.get("runtime", {})
     if isinstance(runtime, dict):
         rounds = runtime.get("max_tool_rounds", DEFAULT_MAX_TOOL_ROUNDS)

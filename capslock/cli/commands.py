@@ -19,6 +19,7 @@ COMMANDS = (
     CommandSpec("/queue", "List, move, cancel, or retry foreground work"),
     CommandSpec("/memory", "Manage local memory"),
     CommandSpec("/skills", "Manage local Skills"),
+    CommandSpec("/agents", "Inspect, cancel, or clean local child Agents"),
     CommandSpec("/sources", "List external sources"),
     CommandSpec("/mcp", "Inspect MCP servers"),
     CommandSpec("/diff", "Show Git diff"),

@@ -24,6 +24,8 @@ class ToolResult:
     memories: tuple[object, ...] = ()
     audit_data: object | None = None
     audit_arguments: dict[str, object] | None = None
+    event_data: dict[str, object] | None = None
+    external_usage: dict[str, int | float] | None = None
 
     def for_model(self) -> str:
         return json.dumps(
@@ -53,6 +55,8 @@ class RunContext:
     memory: MemoryPort | None = None
     skills: SkillPort | None = None
     permission_mode: PermissionMode = PermissionMode.APPROVE_FOR_ME
+    collaboration: Any = None
+    governor: Any = None
 
 
 ToolExecutor = Callable[[RunContext, dict[str, Any]], Awaitable[ToolResult]]
@@ -94,6 +98,11 @@ class ToolRegistry:
     @property
     def names(self) -> set[str]:
         return set(self._tools)
+
+    def filtered(self, names: set[str]) -> "ToolRegistry":
+        return ToolRegistry(
+            [tool for name, tool in self._tools.items() if name in names]
+        )
 
     async def invoke(
         self, name: str, context: RunContext, arguments: dict[str, Any]

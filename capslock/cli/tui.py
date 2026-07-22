@@ -324,11 +324,28 @@ class _RunRenderer:
         name = str(event.data.get("name", self.active_tool or "unknown"))
         ok = bool(event.data.get("ok"))
         duration = int(event.data.get("duration_ms", 0))
+        collaboration = event.data.get("collaboration")
+        if isinstance(collaboration, dict):
+            tasks = collaboration.get("tasks", [])
+            if isinstance(tasks, list):
+                states = ", ".join(
+                    str(item.get("state", "unknown"))
+                    for item in tasks
+                    if isinstance(item, dict)
+                )
+                if states:
+                    duration_text = f"{duration}ms · {states}"
+                else:
+                    duration_text = f"{duration}ms"
+            else:
+                duration_text = f"{duration}ms"
+        else:
+            duration_text = f"{duration}ms"
         await self.writer.print(
             result_status(
                 f"Tool {name} {'completed' if ok else 'failed'}",
                 "success" if ok else "failed",
-                detail=f"{duration}ms",
+                detail=duration_text,
             )
         )
         self.active_tool = None

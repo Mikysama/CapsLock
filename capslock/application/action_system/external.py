@@ -201,6 +201,8 @@ class McpActionHandler:
             if self.plugin_registry is None:
                 raise ValueError("plugin support is unavailable")
             entry = await asyncio.to_thread(self.plugin_registry.get, plugin_name)
+            if not entry.manifest.permissions.issubset(entry.granted_permissions):
+                raise PolicyError("plugin workspace permission grant is incomplete")
             tool, arguments = payload.get("tool"), payload.get("arguments")
             if not isinstance(tool, str) or not isinstance(arguments, dict):
                 raise ValueError("tool and arguments must be provided")
@@ -245,6 +247,8 @@ class McpActionHandler:
             if not isinstance(plugin_name, str) or self.plugin_registry is None:
                 raise ValueError("plugin support is unavailable")
             entry = await asyncio.to_thread(self.plugin_registry.get, plugin_name)
+            if not entry.manifest.permissions.issubset(entry.granted_permissions):
+                raise PolicyError("plugin workspace permission grant is incomplete")
             if action.request.get("digest") != entry.manifest.digest:
                 raise PolicyError(
                     "plugin package or workspace grant changed after approval"

@@ -82,6 +82,26 @@ class RunGovernor:
         self.observed_output_tokens += max(0, output_tokens)
         return await self.current()
 
+    async def record_external_usage(
+        self,
+        *,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        cost_usd: float = 0,
+        tool_rounds: int = 0,
+        tool_calls: int = 0,
+    ) -> BudgetSnapshot:
+        self.observed_input_tokens += max(0, input_tokens)
+        self.observed_output_tokens += max(0, output_tokens)
+        self.base_cost_usd += max(0.0, cost_usd)
+        self.snapshot = replace(
+            await self.current(),
+            tool_rounds=self.snapshot.tool_rounds + max(0, tool_rounds),
+            tool_calls=self.snapshot.tool_calls + max(0, tool_calls),
+        )
+        await self._save()
+        return self.snapshot
+
     async def before_model(self) -> None:
         await self._check_common()
         if self.snapshot.tool_rounds >= self.snapshot.limits.max_tool_rounds:

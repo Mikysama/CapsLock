@@ -42,7 +42,7 @@ def test_fresh_schema_has_governance_tables(tmp_path: Path) -> None:
         )
         try:
             version = await repositories.database.fetch_one("PRAGMA user_version")
-            assert version[0] == 4
+            assert version[0] == 5
             for table in ("run_governance", "tool_call_attempts"):
                 assert await repositories.database.fetch_one(
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",

@@ -7,7 +7,7 @@ concrete SQLite, CLI, SDK, or application-layer implementations.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from typing import Any, Protocol
+from typing import Any, AsyncIterator, Protocol
 
 from .domain import (
     ActionRecord,
@@ -171,6 +171,20 @@ class GovernancePort(Protocol):
     async def finish_attempt(self, attempt_id: int, **values: Any) -> None: ...
 
 
+class CollaborationPort(Protocol):
+    async def delegate(self, contracts: Any) -> list[Any]: ...
+
+    def stream_status(self, task_ids: Any) -> AsyncIterator[dict[str, Any]]: ...
+
+    async def wait(self, task_id: str) -> Any: ...
+
+    async def validated_output(self, task_id: str) -> Any: ...
+
+    async def cancel(self, task_id: str) -> None: ...
+
+    async def cleanup(self, task_id: str) -> None: ...
+
+
 class TaskPort(Protocol):
     async def replace(
         self, session_id: str, items: list[str], *, run_id: str | None = None
@@ -255,12 +269,14 @@ class WorkspaceServicesPort(Protocol):
     sources: SourcePort
     models: ModelAuditPort
     governance: GovernancePort
+    collaboration: Any
 
 
 __all__ = [
     "ActionAuthorizer",
     "ActionFactory",
     "ActionPort",
+    "CollaborationPort",
     "GovernancePort",
     "MemoryPort",
     "ModelAuditPort",

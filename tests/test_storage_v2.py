@@ -187,7 +187,7 @@ def test_v110_state_reopens_in_v2_without_schema_migration(tmp_path: Path) -> No
         try:
             workspace_version = (await workspace.fetch_one("PRAGMA user_version"))[0]
             memory_version = (await memory.fetch_one("PRAGMA user_version"))[0]
-            assert workspace_version == WORKSPACE_SCHEMA_VERSION == 4
+            assert workspace_version == WORKSPACE_SCHEMA_VERSION == 5
             assert memory_version == MEMORY_SCHEMA_VERSION == 3
         finally:
             await workspace.close()
@@ -197,7 +197,7 @@ def test_v110_state_reopens_in_v2_without_schema_migration(tmp_path: Path) -> No
         workspace = await WorkspaceDatabase.open(workspace_path)
         memory = await MemoryDatabase.open(memory_path)
         try:
-            assert (await workspace.fetch_one("PRAGMA user_version"))[0] == 4
+            assert (await workspace.fetch_one("PRAGMA user_version"))[0] == 5
             assert (await memory.fetch_one("PRAGMA user_version"))[0] == 3
         finally:
             await workspace.close()

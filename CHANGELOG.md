@@ -4,6 +4,24 @@
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-07-22
+
+### Added
+
+- 新增 `delegate_agents` 本机协作工具、显式子任务契约、有界并发调度和单层委派限制。
+- 新增隔离子工作区、默认只读能力、路径 allowlist、结构化输出验证和产物 SHA-256 校验。
+- 新增 `/agents` 检查、取消和清理命令，以及任务、能力、消息和验证结果审计。
+
+### Security
+
+- 子 Agent 不继承父 Agent 的当前权限、记忆、插件工具或运行数据库；高风险工具只有在任务契约显式授予后才进入子工具目录。
+- 快照排除 `.git`、`.capslock` 和环境凭据文件并拒绝符号链接；父 Agent 只接收通过验证的摘要与产物元数据。
+
+### Changed
+
+- workspace schema 升至 v5；v4 在自动备份后迁移，导入中的活跃子任务统一转为 `interrupted`。
+- memory schema v3、portable archive v2、JSONL v2、config v2、Skill 和插件协议保持兼容。
+
 ## [2.1.0] - 2026-07-21
 
 ### Added

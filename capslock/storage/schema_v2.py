@@ -2,7 +2,7 @@
 
 WORKSPACE_APPLICATION_ID = 0x434C4B32  # CLK2
 MEMORY_APPLICATION_ID = 0x434C4D32  # CLM2
-WORKSPACE_SCHEMA_VERSION = 4
+WORKSPACE_SCHEMA_VERSION = 5
 MEMORY_SCHEMA_VERSION = 3
 
 WORKSPACE_SCHEMA = """
@@ -261,6 +261,57 @@ CREATE VIRTUAL TABLE session_search USING fts5(
   created_at UNINDEXED,
   tokenize='unicode61'
 );
+
+CREATE TABLE agent_tasks (
+  id TEXT PRIMARY KEY,
+  parent_run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  objective TEXT NOT NULL,
+  contract_json TEXT NOT NULL CHECK(json_valid(contract_json)),
+  state TEXT NOT NULL CHECK(state IN ('created','running','waiting_approval','completed','failed','cancelled','interrupted')),
+  child_run_id TEXT,
+  child_workspace TEXT,
+  error TEXT,
+  created_at TEXT NOT NULL,
+  started_at TEXT,
+  finished_at TEXT
+) STRICT;
+CREATE INDEX idx_agent_tasks_parent ON agent_tasks(parent_run_id,created_at);
+CREATE TABLE agent_workspaces (
+  task_id TEXT PRIMARY KEY REFERENCES agent_tasks(id) ON DELETE CASCADE,
+  path TEXT NOT NULL,
+  source_path TEXT NOT NULL,
+  retained INTEGER NOT NULL DEFAULT 0 CHECK(retained IN (0,1)),
+  created_at TEXT NOT NULL,
+  cleaned_at TEXT
+) STRICT;
+CREATE TABLE agent_capabilities (
+  task_id TEXT NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
+  ordinal INTEGER NOT NULL CHECK(ordinal>=0),
+  capability_json TEXT NOT NULL CHECK(json_valid(capability_json)),
+  PRIMARY KEY(task_id,ordinal)
+) STRICT;
+CREATE TABLE agent_messages (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
+  parent_run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  sender TEXT NOT NULL,
+  recipient TEXT NOT NULL,
+  sequence INTEGER NOT NULL CHECK(sequence>=1),
+  message_kind TEXT NOT NULL,
+  payload_json TEXT NOT NULL CHECK(json_valid(payload_json)),
+  payload_sha256 TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(task_id,sequence)
+) STRICT;
+CREATE INDEX idx_agent_messages_task ON agent_messages(task_id,sequence);
+CREATE TABLE agent_outputs (
+  task_id TEXT PRIMARY KEY REFERENCES agent_tasks(id) ON DELETE CASCADE,
+  state TEXT NOT NULL CHECK(state IN ('completed','failed','cancelled','interrupted')),
+  output_json TEXT NOT NULL CHECK(json_valid(output_json)),
+  verified INTEGER NOT NULL CHECK(verified IN (0,1)),
+  output_sha256 TEXT NOT NULL,
+  created_at TEXT NOT NULL
+) STRICT;
 """
 
 MEMORY_SCHEMA = """
@@ -628,6 +679,58 @@ SELECT id,id,'interactive','{"max_tool_rounds":32,"max_tool_calls":null,"max_dur
        (SELECT count(*) FROM run_steps s WHERE s.run_id=runs.id AND s.kind='model' AND s.status='completed' AND instr(coalesce(s.checkpoint_json,''),'tool_calls')>0),
        (SELECT count(*) FROM tool_calls t WHERE t.run_id=runs.id),coalesce(duration_ms,0),input_tokens,output_tokens,cost_usd,started_at
 FROM runs;
+""",
+    4: """
+CREATE TABLE IF NOT EXISTS agent_tasks (
+  id TEXT PRIMARY KEY,
+  parent_run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  objective TEXT NOT NULL,
+  contract_json TEXT NOT NULL CHECK(json_valid(contract_json)),
+  state TEXT NOT NULL CHECK(state IN ('created','running','waiting_approval','completed','failed','cancelled','interrupted')),
+  child_run_id TEXT,
+  child_workspace TEXT,
+  error TEXT,
+  created_at TEXT NOT NULL,
+  started_at TEXT,
+  finished_at TEXT
+) STRICT;
+CREATE INDEX IF NOT EXISTS idx_agent_tasks_parent ON agent_tasks(parent_run_id,created_at);
+CREATE TABLE IF NOT EXISTS agent_workspaces (
+  task_id TEXT PRIMARY KEY REFERENCES agent_tasks(id) ON DELETE CASCADE,
+  path TEXT NOT NULL,
+  source_path TEXT NOT NULL,
+  retained INTEGER NOT NULL DEFAULT 0 CHECK(retained IN (0,1)),
+  created_at TEXT NOT NULL,
+  cleaned_at TEXT
+) STRICT;
+CREATE TABLE IF NOT EXISTS agent_capabilities (
+  task_id TEXT NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
+  ordinal INTEGER NOT NULL CHECK(ordinal>=0),
+  capability_json TEXT NOT NULL CHECK(json_valid(capability_json)),
+  PRIMARY KEY(task_id,ordinal)
+) STRICT;
+CREATE TABLE IF NOT EXISTS agent_messages (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
+  parent_run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  sender TEXT NOT NULL,
+  recipient TEXT NOT NULL,
+  sequence INTEGER NOT NULL CHECK(sequence>=1),
+  message_kind TEXT NOT NULL,
+  payload_json TEXT NOT NULL CHECK(json_valid(payload_json)),
+  payload_sha256 TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(task_id,sequence)
+) STRICT;
+CREATE INDEX IF NOT EXISTS idx_agent_messages_task ON agent_messages(task_id,sequence);
+CREATE TABLE IF NOT EXISTS agent_outputs (
+  task_id TEXT PRIMARY KEY REFERENCES agent_tasks(id) ON DELETE CASCADE,
+  state TEXT NOT NULL CHECK(state IN ('completed','failed','cancelled','interrupted')),
+  output_json TEXT NOT NULL CHECK(json_valid(output_json)),
+  verified INTEGER NOT NULL CHECK(verified IN (0,1)),
+  output_sha256 TEXT NOT NULL,
+  created_at TEXT NOT NULL
+) STRICT;
 """,
 }
 

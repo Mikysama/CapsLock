@@ -4,7 +4,7 @@
 
 ## 稳定契约
 
-CapsLock 2.1.0 支持 Linux/macOS 与 Python 3.12。CLI 命令和退出码、`config_version = 2`、workspace schema v4、memory schema v3、portable archive v2、JSONL schema v2、Skill manifest、插件协议 v1 和 `ToolResult` 的 `ok/data/error` 模型输入协议在 2.x 系列内保持向后兼容。
+CapsLock 2.2.0 支持 Linux/macOS 与 Python 3.12。CLI 命令和退出码、`config_version = 2`、workspace schema v5、memory schema v3、portable archive v2、JSONL schema v2、Skill manifest、插件协议 v1 和 `ToolResult` 的 `ok/data/error` 模型输入协议在 2.x 系列内保持向后兼容。
 
 1.10.1 的 `repositories=`、`ModelRouter.bind_run()/use_role()/summary(run_id)` 与 `max_turns` 入口已删除。新弃用至少提前一个 minor 版本公告；删除的入口不提供静默兼容。完整映射见 [v2 开发过程与迁移](development/v2/v2.0.md)。
 
@@ -43,6 +43,7 @@ CapsLock 2.1.0 支持 Linux/macOS 与 Python 3.12。CLI 命令和退出码、`co
 | `propose_mcp_connect` | 创建 MCP server 连接与工具发现动作。 | 仅本地 stdio。 |
 | `propose_mcp_call` | 创建 allowlist 内 MCP 工具调用动作。 | 第三方副作用不可自动撤销。 |
 | `plugin_<plugin>_<tool>` | 调用已安装且获当前工作区授权的本地插件工具。 | 使用高风险 `mcp_call` 审批通道；结果始终不可信。 |
+| `delegate_agents` | 批量运行最多四个显式子任务并返回验证结果。 | 仅父 Agent 可见；默认并发 2、最大深度 1。 |
 
 模型只提交提案；统一 `ActionCoordinator` 决定是否等待批准或自动执行。TUI 为 Coordinator 安装阻塞式审批器：越过权限边界时只询问是否执行，不显示动作载荷，用户只能拒绝或执行；最终动作状态返回同一个模型工具调用，run 随后继续。非交互 `exec` 不安装审批器，仍保留 pending action、`waiting_approval` 终止事件和退出码 `3`。动作记录只使用 `request_json` 与 `result_json`，新增动作类型不需要 subtype 表。
 
@@ -74,6 +75,7 @@ pending -> approved -> running -> completed
 | `/queue` | 查看队列；`start <id>` 显式启动导入队列，另有 `move`、`cancel` 和 `retry`。 |
 | `/memory ...` | 管理记忆、候选、召回、导入导出和 embeddings。 |
 | `/skills ...` | 列出、查看、校验、启用或禁用 Skill。 |
+| `/agents [inspect|cancel|cleanup <id>]` | 查看、取消或清理本机会话的子 Agent。 |
 | `/sources` | 查看当前会话 Web 来源。 |
 | `/mcp [list|status <server>|tools <server>]` | 检查 MCP 配置。 |
 | `/diff` | 显示当前 Git diff。 |
@@ -155,6 +157,14 @@ ToolLoop 每个模型或工具阶段写 `run_steps`。只有 completed 且带 ch
 
 `WorkspaceAgent.ask_stream()` 是唯一 Agent 执行 API。每次流只产生一个终止事件；调用方取消流时，内部执行 task 也会被取消并等待资源清理。
 
+## 多 Agent 契约
+
+`AgentTaskContract` 固定记录父 run、目标、输入数据、允许路径、能力、模型 profile、限制和验证要求。能力缺省为空，子运行仍仅装配工作区只读工具；写入、命令、Web 与 MCP 工具按显式 grant 加入，插件和二次委派不自动加入。
+
+调度器按契约顺序返回结果，兄弟任务失败不会互相取消，父运行取消会传播到全部未完成子任务。子快照排除 `.git`、`.capslock`、环境文件和符号链接，并使用自己的 workspace/memory 数据库。`AgentOutputVerifier` 校验输出对象、allowlist 路径、必需检查、文件大小和 SHA-256；未通过的输出只返回失败诊断。
+
+workspace schema v5 使用 `agent_tasks`、`agent_workspaces`、`agent_capabilities`、`agent_messages` 和 `agent_outputs` 保存契约、状态、脱敏消息摘要和验证结果。portable archive v2 不包含临时工作区；导入时活跃任务转为 `interrupted`。
+
 ## 记忆契约
 
 记忆 identity 与内容 revision 分离：
@@ -176,7 +186,7 @@ ToolLoop 每个模型或工具阶段写 `run_steps`。只有 completed 且带 ch
 
 工作区数据库使用 application ID `0x434C4B32`，记忆数据库使用 `0x434C4D32`。两者开启 foreign keys、WAL 和 5 秒 busy timeout；记忆库额外开启 secure delete 并设置文件权限 `0600`。
 
-应用先读取 application ID 和 schema version，确认兼容后才切换 WAL。v1.10.0 的 workspace schema v4 增加 run 治理快照、工具调用指纹和结构化停止原因；memory schema 保持 v3。正式升级保证 v1.9 schema v3 在备份后迁移到 v4；旧 application ID 和未知版本仍只报错。
+应用先读取 application ID 和 schema version，确认兼容后才切换 WAL。v2.2.0 将 workspace schema v4 在自动备份后迁移到 v5，增加协作任务、工作区、能力、消息和输出记录；memory schema 保持 v3。旧 application ID 和未知版本仍只报错。
 
 portable import 使用 archive ID 幂等记录。相同 ID 与内容跳过，同 ID 不同内容确定性重映射并重写引用。running run 转为 interrupted，approved/running action 转为 pending；导入的历史副作用不能在目标工作区执行 undo。
 

@@ -32,6 +32,10 @@ WORKSPACE_IMPORT_SPECS = tuple(
         ("budget_decisions", "id"),
         ("run_governance", "run_id"),
         ("tool_call_attempts", "id"),
+        ("agent_tasks", "id"),
+        ("agent_capabilities", ("task_id", "ordinal")),
+        ("agent_messages", "id"),
+        ("agent_outputs", "task_id"),
     )
 )
 
@@ -73,4 +77,5 @@ REFERENCE_FIELDS = {
     "adopted_memory_id": "memories",
     "extraction_id": "memory_extractions",
     "source_run_id": "runs",
+    "task_id": "agent_tasks",
 }

@@ -154,6 +154,11 @@ model = "configured-model"
 [runtime]
 max_tool_rounds = 7
 permission_mode = "full_access"
+[agents]
+max_children = 3
+max_concurrency = 2
+max_depth = 1
+max_child_tool_rounds = 10
 [command]
 command_timeout_seconds = 12
 [web]
@@ -169,6 +174,9 @@ enabled = false
     assert settings.model_config.model == "configured-model"
     assert settings.runtime.max_tool_rounds == 7
     assert settings.permission_mode == "full_access"
+    assert settings.agents.max_children == 3
+    assert settings.agents.max_concurrency == 2
+    assert settings.agents.max_child_tool_rounds == 10
     assert settings.command.command_timeout_seconds == 12
     assert settings.web.web_max_redirects == 1
     assert settings.mcp.mcp_output_bytes == 2048

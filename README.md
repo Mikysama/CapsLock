@@ -2,7 +2,7 @@
 
 CapsLock 是一个本机工作区 Agent，用于读取代码、检索证据、检查 Git、提出受控文件修改、执行固定命令，以及按审批策略访问 Web 和本地 MCP。v2 内核完全异步，运行、动作、审批、记忆和审计分别通过强类型领域接口与 SQLite repository 管理。
 
-当前源码版本为 `2.1.0`。v2.1.0 增加本地工具插件 SDK 与受控分发；架构、协议和安全边界见 [v2 开发者文档](docs/development/v2/README.md)。
+当前源码版本为 `2.2.0`。v2.2.0 增加本机多 Agent 协作、隔离子工作区、显式能力契约和验证后汇总；架构、协议和安全边界见 [v2 开发者文档](docs/development/v2/README.md)。
 
 正式支持矩阵：Linux/macOS，Python 3.12。发布 CI 会在两个操作系统组合中执行测试、构建、依赖审计和安装冒烟。
 
@@ -71,7 +71,7 @@ printf '%s\n' "总结最近的改动" | capslock exec --json
 TUI 保留以下命令：
 
 ```text
-/help /status /permissions /approvals /queue /memory /skills
+/help /status /permissions /approvals /queue /memory /skills /agents
 /sources /mcp /diff /undo /rename /exit /quit
 ```
 
@@ -141,6 +141,21 @@ capslock plugin uninstall my-plugin --yes
 ```
 
 插件安装到 `${CAPSLOCK_HOME:-~/.capslock}/plugins/`，工作区授权保存在 `.capslock/local/plugins.json`。模型可见工具名使用 `plugin_<plugin_name>_<tool_name>`，每次调用继续经过现有外部动作审批、超时、取消和审计链。开发接口与协议见 [v2.1 插件开发文档](docs/development/v2/v2.1.md)。
+
+## 多 Agent 协作
+
+父 Agent 可通过 `delegate_agents` 一次委派最多四个本机子任务，默认最多并行两个。子 Agent 只有一层，使用排除 `.git`、`.capslock`、环境凭据和符号链接的私有快照；子数据库、session 和记忆上下文不会与父运行共享。
+
+子任务默认只有只读类工具，文件访问仍必须命中任务契约的路径 allowlist，空 allowlist 不授予文件访问。文件写入、固定命令、Web 和 MCP 必须在任务契约中逐项声明；子工具目录不包含 `delegate_agents`，也不自动包含工作区插件。自由文本、证据和产物均是不可信数据，只有通过路径、schema、实际检查状态和 SHA-256 校验的输出才返回父 Agent。
+
+```text
+/agents
+/agents inspect <task-id>
+/agents cancel <task-id>
+/agents cleanup <task-id>
+```
+
+`/status` 同时显示子任务总数、并发占用、聚合用量、等待审批数和失败/中断数。成功子任务会先以快照基线保护父工作区并复制已验证产物，再清理私有工作区；失败、取消和验证失败的目录保留到显式 cleanup。
 
 ## 记忆
 
@@ -238,6 +253,13 @@ max_session_usd = 10.0
 max_tool_rounds = 32
 max_context_messages = 24
 permission_mode = "approve_for_me"
+
+[agents]
+enabled = true
+max_children = 4
+max_concurrency = 2
+max_depth = 1
+max_child_tool_rounds = 16
 
 [loop_detection]
 consecutive_repeats = 3

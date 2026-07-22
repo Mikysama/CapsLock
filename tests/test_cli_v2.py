@@ -130,6 +130,7 @@ def test_slash_command_catalog_has_no_v1_aliases() -> None:
         "/queue",
         "/memory",
         "/skills",
+        "/agents",
         "/sources",
         "/mcp",
         "/diff",

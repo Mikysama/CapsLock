@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import asyncio
+from dataclasses import replace
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -151,6 +152,7 @@ class ToolCallExecutor:
             {"name": call.name, "tool_call_id": call.id},
         )
         arguments, result_text, duration_ms, ok = {}, "", 0, False
+        event_data: dict[str, object] = {}
         attempt_id: int | None = None
         try:
             arguments = json.loads(call.arguments)
@@ -170,9 +172,8 @@ class ToolCallExecutor:
         else:
             if governor is not None:
                 attempt_id, _, _ = await governor.before_tool(call.name, arguments)
-            invocation = self.tools.invoke(
-                call.name, self.context_factory(run_id), arguments
-            )
+            context = replace(self.context_factory(run_id), governor=governor)
+            invocation = self.tools.invoke(call.name, context, arguments)
             timeout = governor.remaining_seconds() if governor else None
             try:
                 async with asyncio.timeout(timeout):
@@ -187,6 +188,9 @@ class ToolCallExecutor:
             for memory in result.memories:
                 memories[memory.id] = memory
             result_text, ok = result.for_model(), result.ok
+            event_data = result.event_data or {}
+            if governor is not None and result.external_usage:
+                await governor.record_external_usage(**result.external_usage)
             audit_arguments = (
                 arguments if result.audit_arguments is None else result.audit_arguments
             )
@@ -216,6 +220,7 @@ class ToolCallExecutor:
                 "tool_call_id": call.id,
                 "ok": ok,
                 "duration_ms": duration_ms,
+                **event_data,
             },
         )
         if governor is not None:

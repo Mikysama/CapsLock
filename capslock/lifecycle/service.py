@@ -189,6 +189,9 @@ class LifecycleService:
             stage = Path(raw)
             archive_id = uuid.uuid4().hex
             workspace_rows = _database_rows(self.layout.database, WORKSPACE_TABLES)
+            for task in workspace_rows.get("agent_tasks", []):
+                # Temporary child paths are host-local and must never enter archives.
+                task["child_workspace"] = None
             memory_rows = self._memory_rows(include_global_memory)
             document = _redact_portable(
                 {
@@ -684,6 +687,10 @@ def _normalize_imported_workflow(
     )
     connection.execute(
         f"UPDATE model_calls SET status='failed',finished_at=coalesce(finished_at,?),error_code='imported_interrupted',error_message='interrupted during export' WHERE status='running' AND {imported('model_calls')}",
+        (utc_now(), import_id),
+    )
+    connection.execute(
+        f"UPDATE agent_tasks SET state='interrupted',finished_at=coalesce(finished_at,?),error='interrupted during export',child_workspace=NULL WHERE state IN ('created','running','waiting_approval') AND {imported('agent_tasks')}",
         (utc_now(), import_id),
     )
     connection.execute(
