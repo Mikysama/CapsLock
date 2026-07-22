@@ -24,6 +24,7 @@ from ..storage.schema_v2 import (
     WORKSPACE_SCHEMA_VERSION,
 )
 from ..skills import SkillRegistry
+from ..plugins import PluginRegistry, PluginValidationError
 from ..session_management import SessionManager
 from ..storage.repositories_v2 import WorkspaceRepositories
 from .prompt import select_session as choose_session
@@ -284,6 +285,21 @@ async def doctor(
             ),
         )
     )
+    try:
+        plugin_registry = PluginRegistry(layout)
+        plugin_errors = plugin_registry.validate()
+        diagnostics.append(
+            Diagnostic(
+                "error" if plugin_errors else "ok",
+                "plugins",
+                "Plugins",
+                "; ".join(plugin_errors)
+                if plugin_errors
+                else f"{len(plugin_registry.entries())} packages valid",
+            )
+        )
+    except PluginValidationError as exc:
+        diagnostics.append(Diagnostic("error", "plugins", "Plugins", str(exc)))
     if args.fix:
         await _apply_fixes(console, diagnostics, layout, yes=args.yes)
         clone = type("DoctorArgs", (), {**vars(args), "fix": False})()

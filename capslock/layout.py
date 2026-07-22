@@ -44,6 +44,18 @@ class UserLayout:
         return self.home / "skills"
 
     @property
+    def plugins(self) -> Path:
+        return self.home / "plugins"
+
+    @property
+    def plugin_registry(self) -> Path:
+        return self.home / "state" / "plugins.json"
+
+    @property
+    def plugin_audit(self) -> Path:
+        return self.home / "state" / "plugin-audit.jsonl"
+
+    @property
     def canonical_memory(self) -> Path:
         return self.home / "state" / "memory.sqlite3"
 
@@ -110,6 +122,10 @@ class ProjectLayout:
     @property
     def skills(self) -> Path:
         return self._managed(self.root / "skills", "project Skills")
+
+    @property
+    def local_plugins(self) -> Path:
+        return self._managed(self.root / "local" / "plugins.json", "local plugins")
 
     @property
     def database(self) -> Path:

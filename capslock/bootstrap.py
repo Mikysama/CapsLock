@@ -21,10 +21,13 @@ from .memory.embeddings import ExternalEmbeddingConfig
 from .observability import EventSink
 from .permissions import PermissionMode
 from .policy import WorkspacePolicy
+from .plugins import PluginProcessClient, PluginRegistry
 from .runtime import AsyncOpenAIChatModel, ModelRouter, WorkspaceAgent
 from .skills import SkillRegistry, SkillService
 from .storage.memory_v2 import MemoryRepositories
 from .storage.repositories_v2 import WorkspaceRepositories
+from .tooling.async_catalog import workspace_tools
+from .tooling.plugins import plugin_tools
 
 
 class WorkspaceApplication:
@@ -87,6 +90,12 @@ class WorkspaceApplication:
                 layout=layout,
             )
             skill_service = SkillService(skill_registry, events.emit)
+            plugin_registry = PluginRegistry(layout)
+            plugin_client = PluginProcessClient(
+                timeout_seconds=settings.mcp.mcp_timeout_seconds,
+                output_limit_bytes=settings.mcp.mcp_output_bytes,
+            )
+            tools = workspace_tools().combined(plugin_tools(plugin_registry))
             workflow = WorkflowService(repositories)
             policy = WorkspacePolicy(root)
             raw_clients = client if isinstance(client, dict) else {"default": client}
@@ -153,6 +162,8 @@ class WorkspaceApplication:
                         timeout_seconds=settings.mcp.mcp_timeout_seconds,
                         output_limit_bytes=settings.mcp.mcp_output_bytes,
                         layout=layout,
+                        plugin_registry=plugin_registry,
+                        plugin_client=plugin_client,
                     ),
                 ]
                 return ActionCoordinator(
@@ -175,6 +186,7 @@ class WorkspaceApplication:
                 action_factory=actions,
                 skill_registry=skill_registry,
                 skill_service=skill_service,
+                tools=tools,
                 events=events,
                 memory=memory,
                 permission_mode=permission_mode,

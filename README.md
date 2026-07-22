@@ -2,7 +2,7 @@
 
 CapsLock 是一个本机工作区 Agent，用于读取代码、检索证据、检查 Git、提出受控文件修改、执行固定命令，以及按审批策略访问 Web 和本地 MCP。v2 内核完全异步，运行、动作、审批、记忆和审计分别通过强类型领域接口与 SQLite repository 管理。
 
-当前源码版本为 `2.0.0`。v2.0.0 是稳定兼容里程碑；架构、开发过程和升级步骤见 [v2 开发者文档](docs/development/v2/README.md)。
+当前源码版本为 `2.1.0`。v2.1.0 增加本地工具插件 SDK 与受控分发；架构、协议和安全边界见 [v2 开发者文档](docs/development/v2/README.md)。
 
 正式支持矩阵：Linux/macOS，Python 3.12。发布 CI 会在两个操作系统组合中执行测试、构建、依赖审计和安装冒烟。
 
@@ -124,6 +124,23 @@ TUI 将模型提供方返回的 reasoning 与最终回答分开显示：`◇ Mod
 - 命令只允许固定模板，使用异步子进程；超时或取消先终止进程组，2 秒后强制结束。
 - Web 只访问公开 HTTP/HTTPS 地址，拒绝私网、重定向越界和非文本响应；来源始终是不可信数据。
 - MCP 只使用显式配置的本地 stdio server 和工具 allowlist。
+- 本地工具插件必须显式安装和逐工作区启用；安装、升级、权限变化和卸载均展示内容摘要与权限并记录审计。插件通过独立 stdio 子进程运行，但仍视为受信本地代码，不是恶意代码沙箱。
+
+## 本地工具插件
+
+插件包是包含 `capslock-plugin.toml` 和包内入口程序的本地目录。v2.1 只支持工具插件，不支持在线源、自动依赖安装、市场、UI、模型 Provider、Hook 或后台任务。
+
+```text
+capslock plugin install ./my-plugin --yes
+capslock plugin enable my-plugin --yes
+capslock plugin list
+capslock plugin show my-plugin
+capslock plugin verify my-plugin
+capslock plugin disable my-plugin --yes
+capslock plugin uninstall my-plugin --yes
+```
+
+插件安装到 `${CAPSLOCK_HOME:-~/.capslock}/plugins/`，工作区授权保存在 `.capslock/local/plugins.json`。模型可见工具名使用 `plugin_<plugin_name>_<tool_name>`，每次调用继续经过现有外部动作审批、超时、取消和审计链。开发接口与协议见 [v2.1 插件开发文档](docs/development/v2/v2.1.md)。
 
 ## 记忆
 
@@ -272,6 +289,7 @@ v2 内核以 `capslock.bootstrap` 为组合根，以 `capslock.ports` 隔离 run
 - `runtime/`：异步模型协议、context、ToolLoop、event stream 与 Agent。
 - `memory/`：生命周期、召回、候选、embedding、传输与校验服务。
 - `tooling/`：统一 async tool registry 与 adapters。
+- `plugins/`、`plugin_sdk/`：本地插件 manifest、注册、生命周期、stdio client 与公开 SDK。
 - `cli/`、`cli/views/`：TUI/JSONL 控制器和 typed view 渲染。
 
 公开运行时入口只有 `WorkspaceAgent.ask_stream()`；没有同步 `ask()`、`ToolLoop.run()` 包装、`last_answer` 或上层直接 SQL。

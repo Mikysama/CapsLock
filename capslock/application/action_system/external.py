@@ -20,6 +20,7 @@ from ...external import (
 from ...layout import ProjectLayout
 from ...mcp import McpRegistry
 from ...policy import PolicyError, WorkspacePolicy
+from ...plugins import PluginProcessClient, PluginRegistry
 from ...storage.repositories_v2 import WorkspaceRepositories
 from .core import ActionExecution, ActionProposal
 
@@ -175,15 +176,48 @@ class McpActionHandler:
         timeout_seconds: float,
         output_limit_bytes: int,
         layout: ProjectLayout,
+        plugin_registry: PluginRegistry | None = None,
+        plugin_client: PluginProcessClient | None = None,
     ) -> None:
         self.policy = policy
         self.timeout_seconds = timeout_seconds
         self.output_limit_bytes = output_limit_bytes
         self.registry = McpRegistry(policy, layout=layout)
+        self.plugin_registry = plugin_registry
+        self.plugin_client = plugin_client or PluginProcessClient(
+            timeout_seconds=timeout_seconds,
+            output_limit_bytes=output_limit_bytes,
+        )
 
     async def propose(
         self, action_type: ActionType, payload: dict[str, Any]
     ) -> ActionProposal:
+        plugin_name = payload.get("plugin")
+        if plugin_name is not None:
+            if action_type is not ActionType.MCP_CALL or not isinstance(
+                plugin_name, str
+            ):
+                raise ValueError("plugin calls must use a plugin name")
+            if self.plugin_registry is None:
+                raise ValueError("plugin support is unavailable")
+            entry = await asyncio.to_thread(self.plugin_registry.get, plugin_name)
+            tool, arguments = payload.get("tool"), payload.get("arguments")
+            if not isinstance(tool, str) or not isinstance(arguments, dict):
+                raise ValueError("tool and arguments must be provided")
+            if tool not in {item.name for item in entry.manifest.tools}:
+                raise PolicyError(f"plugin tool is not declared: {plugin_name}.{tool}")
+            return ActionProposal(
+                f"Call plugin {plugin_name}.{tool}",
+                {
+                    "plugin": plugin_name,
+                    "tool": tool,
+                    "arguments": arguments,
+                    "digest": entry.manifest.digest,
+                    "permissions": sorted(
+                        item.value for item in entry.manifest.permissions
+                    ),
+                },
+            )
         server_name = payload.get("server")
         if not isinstance(server_name, str):
             raise ValueError("server must be a string")
@@ -206,6 +240,38 @@ class McpActionHandler:
         )
 
     async def execute(self, action: ActionRecord) -> ActionExecution:
+        plugin_name = action.request.get("plugin")
+        if plugin_name is not None:
+            if not isinstance(plugin_name, str) or self.plugin_registry is None:
+                raise ValueError("plugin support is unavailable")
+            entry = await asyncio.to_thread(self.plugin_registry.get, plugin_name)
+            if action.request.get("digest") != entry.manifest.digest:
+                raise PolicyError(
+                    "plugin package or workspace grant changed after approval"
+                )
+            response = await self.plugin_client.call(
+                entry.manifest,
+                str(action.request["tool"]),
+                action.request["arguments"],
+            )
+            result = {
+                "plugin": plugin_name,
+                "tool": action.request["tool"],
+                "result": response.get("data"),
+                "plugin_ok": response.get("ok"),
+                "plugin_error": response.get("error"),
+                "untrusted": True,
+            }
+            encoded = json.dumps(result, ensure_ascii=False, default=str)
+            if len(encoded.encode("utf-8")) > self.output_limit_bytes:
+                result = {
+                    "text": encoded.encode()[: self.output_limit_bytes].decode(
+                        "utf-8", "ignore"
+                    ),
+                    "truncated": True,
+                    "untrusted": True,
+                }
+            return ActionExecution(result, ActionResultKind.SUCCESS)
         try:
             from mcp import ClientSession, StdioServerParameters
             from mcp.client.stdio import stdio_client

@@ -109,6 +109,8 @@ def test_parser_exposes_only_v2_top_level_commands() -> None:
         "backup",
         "export",
         "import",
+        "plugin",
+        "plugins",
     }
     delete = parser.parse_args(["session", "delete"])
     assert delete.command == "session"

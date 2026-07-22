@@ -38,6 +38,7 @@ from .diagnostics import (
 )
 from .exec import run_exec
 from .lifecycle import backup_command, export_lifecycle, import_lifecycle
+from .plugins import plugin_command
 from .status import dynamic_status_supported
 from .setup import (
     config_migrate,
@@ -146,6 +147,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     portable_import.add_argument("archive", type=Path)
     portable_import.add_argument("--yes", action="store_true")
+    plugins = subparsers.add_parser(
+        "plugin", aliases=["plugins"], help="Manage local tool plugins"
+    )
+    plugin_commands = plugins.add_subparsers(dest="plugin_command")
+    plugin_commands.add_parser("list")
+    plugin_show = plugin_commands.add_parser("show")
+    plugin_show.add_argument("name")
+    plugin_verify = plugin_commands.add_parser("verify")
+    plugin_verify.add_argument("name")
+    for command in ("install", "upgrade"):
+        plugin_install = plugin_commands.add_parser(command)
+        plugin_install.add_argument("path", type=Path)
+        plugin_install.add_argument("--yes", action="store_true")
+    for command in ("enable", "disable", "uninstall"):
+        plugin_change = plugin_commands.add_parser(command)
+        plugin_change.add_argument("name")
+        plugin_change.add_argument("--yes", action="store_true")
     doctor_parser = subparsers.add_parser(
         "doctor", help="Check configuration and state"
     )
@@ -239,6 +257,8 @@ async def async_main(
             return await config_migrate(output, layout.config, apply=bool(args.apply))
         if args.command == "credentials":
             return await credentials_command(output, layout.config, args)
+        if args.command in {"plugin", "plugins"}:
+            return await plugin_command(output, layout, args)
         if args.command == "doctor":
             return await doctor(output, workspace, layout=layout, args=args)
         if args.command == "backup":

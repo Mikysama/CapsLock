@@ -4,6 +4,24 @@
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-07-21
+
+### Added
+
+- 新增版本化本地工具插件 manifest、`capslock.plugin_sdk` stdio 协议和独立进程运行边界。
+- 新增 `capslock plugin install|upgrade|list|show|verify|enable|disable|uninstall`，以及用户级安装注册表、工作区授权和追加审计日志。
+- 已启用插件工具通过现有高风险外部动作审批链调用，并在安装摘要或工作区授权变化后拒绝执行。
+
+### Security
+
+- 插件包拒绝符号链接、特殊文件、路径逃逸和超限内容；安装使用内容 SHA-256、暂存校验和原子发布。
+- 插件进程只继承最小环境并受超时、输出上限和进程终止约束。插件仍属于用户主动安装的受信本地代码，不构成恶意代码沙箱。
+
+### Changed
+
+- 保持 workspace schema v4、memory schema v3、portable archive v2、JSONL v2 和 config v2 不变。
+- 将 `aiosqlite` 约束收紧为 `<0.22`；0.22.1 在发布验证环境中会阻塞连接初始化，完整测试使用 0.20.0 通过。
+
 ## [2.0.0] - 2026-07-21
 
 ### Changed

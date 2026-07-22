@@ -78,7 +78,14 @@ class Tool:
 
 class ToolRegistry:
     def __init__(self, tools: list[Tool]) -> None:
-        self._tools = {tool.name: tool for tool in tools}
+        self._tools: dict[str, Tool] = {}
+        for tool in tools:
+            if tool.name in self._tools:
+                raise ValueError(f"duplicate tool name: {tool.name}")
+            self._tools[tool.name] = tool
+
+    def combined(self, tools: list[Tool]) -> "ToolRegistry":
+        return ToolRegistry([*self._tools.values(), *tools])
 
     @property
     def schemas(self) -> list[dict[str, object]]:

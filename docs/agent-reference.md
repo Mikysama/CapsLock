@@ -4,7 +4,7 @@
 
 ## 稳定契约
 
-CapsLock 2.0.0 支持 Linux/macOS 与 Python 3.12。CLI 命令和退出码、`config_version = 2`、workspace schema v4、memory schema v3、portable archive v2、JSONL schema v2、Skill manifest 和 `ToolResult` 的 `ok/data/error` 模型输入协议在 2.0 系列内保持向后兼容。
+CapsLock 2.1.0 支持 Linux/macOS 与 Python 3.12。CLI 命令和退出码、`config_version = 2`、workspace schema v4、memory schema v3、portable archive v2、JSONL schema v2、Skill manifest、插件协议 v1 和 `ToolResult` 的 `ok/data/error` 模型输入协议在 2.x 系列内保持向后兼容。
 
 1.10.1 的 `repositories=`、`ModelRouter.bind_run()/use_role()/summary(run_id)` 与 `max_turns` 入口已删除。新弃用至少提前一个 minor 版本公告；删除的入口不提供静默兼容。完整映射见 [v2 开发过程与迁移](development/v2/v2.0.md)。
 
@@ -13,7 +13,7 @@ CapsLock 2.0.0 支持 Linux/macOS 与 Python 3.12。CLI 命令和退出码、`co
 | 模式 | 行为 |
 | --- | --- |
 | `full_access` | 自动批准普通动作；Skill 文件写入仍逐次确认。安全校验、状态与审计始终启用。 |
-| `approve_for_me` | 默认模式。文件、命令和 MCP 等高风险动作需要确认。 |
+| `approve_for_me` | 默认模式。文件、命令、MCP 和插件等高风险动作需要确认。 |
 | `ask_for_approval` | 发送请求和后续动作都要求人工确认。 |
 
 使用 `/permissions` 打开三档权限选择框，或使用 `/permissions full|approve|ask` 直接切换。选择保存在工作区 settings repository。
@@ -42,6 +42,7 @@ CapsLock 2.0.0 支持 Linux/macOS 与 Python 3.12。CLI 命令和退出码、`co
 | `propose_web_fetch` | 创建公开 URL 抓取动作。 | SSRF、重定向、类型和大小限制。 |
 | `propose_mcp_connect` | 创建 MCP server 连接与工具发现动作。 | 仅本地 stdio。 |
 | `propose_mcp_call` | 创建 allowlist 内 MCP 工具调用动作。 | 第三方副作用不可自动撤销。 |
+| `plugin_<plugin>_<tool>` | 调用已安装且获当前工作区授权的本地插件工具。 | 使用高风险 `mcp_call` 审批通道；结果始终不可信。 |
 
 模型只提交提案；统一 `ActionCoordinator` 决定是否等待批准或自动执行。TUI 为 Coordinator 安装阻塞式审批器：越过权限边界时只询问是否执行，不显示动作载荷，用户只能拒绝或执行；最终动作状态返回同一个模型工具调用，run 随后继续。非交互 `exec` 不安装审批器，仍保留 pending action、`waiting_approval` 终止事件和退出码 `3`。动作记录只使用 `request_json` 与 `result_json`，新增动作类型不需要 subtype 表。
 
@@ -60,7 +61,7 @@ pending -> approved -> running -> completed
 
 交互审批在 Action 工具调用内完成，因此批准执行或拒绝后由同一个 run 继续推理，不产生中间终止事件。非交互或导入数据的待审批动作仍可通过 `/approvals` 结算；该兼容路径在同一个 SQLite 事务内更新 action、run、work item 和终止事件。重复结算已完成的 run 返回空结果，不会产生第二个终止事件。
 
-文件执行前重新检查提案哈希；命令取消先向进程组发送 TERM，2 秒后仍未退出则发送 KILL；Web 跟随重定向前重新执行公开地址校验；MCP 在执行时再次检查工具 allowlist。
+文件执行前重新检查提案哈希；命令取消先向进程组发送 TERM，2 秒后仍未退出则发送 KILL；Web 跟随重定向前重新执行公开地址校验；MCP 在执行时再次检查工具 allowlist；插件在执行时重新检查安装摘要和工作区授权。
 
 ## TUI 命令
 
@@ -110,6 +111,9 @@ capslock credentials status|set|delete
 capslock backup create|list|verify|restore
 capslock export <ARCHIVE> [--include-global-memory]
 capslock import <ARCHIVE> [--yes]
+capslock plugin|plugins install|upgrade <PATH> [--yes]
+capslock plugin|plugins list|show|verify <NAME>
+capslock plugin|plugins enable|disable|uninstall <NAME> [--yes]
 capslock doctor [--json] [--strict] [--network] [--fix] [--yes]
 ```
 
