@@ -21,6 +21,7 @@ from ..domain import (
 from ..evidence import Evidence
 from ..ports import RunJournal
 from ..tooling.async_core import RunContext, ToolRegistry
+from ..tooling.presentation import tool_presentation
 from .model import (
     ChatModel,
     ModelMessage,
@@ -147,9 +148,19 @@ class ToolCallExecutor:
         memories: dict[str, object],
     ) -> None:
         step = await self.journal.create_step(run_id, RunStepKind.TOOL)
+        try:
+            display_arguments = json.loads(call.arguments)
+            if not isinstance(display_arguments, dict):
+                display_arguments = {}
+        except json.JSONDecodeError:
+            display_arguments = {}
         await emit(
             AgentEventKind.TOOL_RUNNING,
-            {"name": call.name, "tool_call_id": call.id},
+            {
+                "name": call.name,
+                "tool_call_id": call.id,
+                "presentation": tool_presentation(call.name, display_arguments),
+            },
         )
         arguments, result_text, duration_ms, ok = {}, "", 0, False
         event_data: dict[str, object] = {}
@@ -221,6 +232,9 @@ class ToolCallExecutor:
                 "ok": ok,
                 "duration_ms": duration_ms,
                 **event_data,
+                "presentation": tool_presentation(
+                    call.name, arguments, outcome="success" if ok else "failed"
+                ),
             },
         )
         if governor is not None:

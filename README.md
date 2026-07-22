@@ -17,7 +17,7 @@ python -m pip install --upgrade pip
 python -m pip install -e '.[test]'
 ```
 
-运行时依赖包括 `aiosqlite`、`openai`、`httpx`、`rich`、`prompt-toolkit`、`mcp`、`PyYAML`、`tomlkit` 和 `keyring`。本地 FastEmbed 是可选能力：
+运行时依赖包括 `aiosqlite`、`openai`、`httpx`、`rich`、`prompt-toolkit`、`textual`、`mcp`、`PyYAML`、`tomlkit` 和 `keyring`。本地 FastEmbed 是可选能力：
 
 ```bash
 python -m pip install -e '.[local-embeddings]'
@@ -46,7 +46,14 @@ TTY 中直接启动 TUI：
 capslock
 capslock resume
 capslock resume <session-id-or-prefix>
+# 保留的第一版 Textual 全屏界面
+capslock --ui fullscreen
 ```
+
+默认 `inline` 界面使用 prompt-toolkit/Rich 在普通命令行主缓冲区中输出，
+不进入 alternate screen；终端原生 scrollback 可查看完整对话，退出时保留已
+渲染内容，背景始终沿用终端默认值。第一版 Textual 全屏界面通过
+`--ui fullscreen` 或 `CAPSLOCK_UI=fullscreen` 启用；命令行参数优先于环境变量。
 
 脚本和 CI 使用 `exec`。无 prompt 时从 stdin 读取：
 
@@ -59,7 +66,7 @@ printf '%s\n' "总结最近的改动" | capslock exec --json
 
 主要顶层命令：
 
-- `capslock [--no-spinner|--quiet]`：启动默认 TUI。
+- `capslock [--ui inline|fullscreen] [--no-spinner|--quiet]`：启动 TUI；默认 `inline`。
 - `capslock exec [PROMPT] [--json] [--no-spinner|--quiet] [--max-tool-rounds N] [--max-tool-calls N] [--max-duration-seconds N] [--max-tokens N] [--max-budget-usd N]`：按硬预算执行一次请求。
 - `capslock resume [SESSION]`：恢复 TUI 会话。
 - `capslock sessions ...`（也可写作 `capslock session ...`）：列出、搜索、重命名、归档、导出或删除会话。运行 `capslock session delete` 时可用方向键选择会话、回车确认选择，再输入 `y` 永久删除；输入 `n` 返回会话列表。
@@ -75,9 +82,20 @@ TUI 保留以下命令：
 /sources /mcp /diff /undo /rename /exit /quit
 ```
 
-队列、任务、上下文和费用汇总到 `/status`。动作越过当前权限边界时，TUI 会在同一个 run 内阻塞，只弹出“是否执行”的拒绝/执行选择框，不输出动作载荷；批准或拒绝的最终状态会返回模型继续推理，不再先结束为 `waiting_approval`。取消选择、EOF 和 Ctrl-C 均按拒绝处理。`/approvals` 仅处理非交互 `exec`、portable import 或旧数据留下的待审批动作。裸 `/permissions` 使用方向键选择权限模式，显式 `/permissions approve|ask|full` 仍可快捷切换。portable import 恢复的 queued work 只会在 `/queue start <id>` 后进入前台 worker，旧批准必须重新确认。旧的 `/cost`、`/context`、`/tasks`、`/changes`、`/commands`、`/web`、`/approve` 和 `/reject` 不再解析。`/exit` 与 `/quit` 均可退出 TUI。
+队列、任务、上下文和费用汇总到 `/status`。动作越过当前权限边界时，TUI 会在同一个 run 内阻塞，显示动作类型、风险、目标及最多 40 行/4 KiB 的脱敏命令或 diff 预览，然后给出默认拒绝的选择框；原始参数、完整文件内容和凭据不会进入预览。批准或拒绝的最终状态会返回模型继续推理，不再先结束为 `waiting_approval`。取消选择、EOF 和 Ctrl-C 均按拒绝处理。`/approvals` 仅处理非交互 `exec`、portable import 或旧数据留下的待审批动作。裸 `/permissions` 使用方向键选择权限模式，显式 `/permissions approve|ask|full` 仍可快捷切换。portable import 恢复的 queued work 只会在 `/queue start <id>` 后进入前台 worker，旧批准必须重新确认。旧的 `/cost`、`/context`、`/tasks`、`/changes`、`/commands`、`/web`、`/approve` 和 `/reject` 不再解析。`/exit` 与 `/quit` 均可退出 TUI。
 
-TUI 将模型提供方返回的 reasoning 与最终回答分开显示：`◇ Model reasoning` 使用低对比度、暗化斜体样式，`◆ CapsLock` 下的回答正文使用高对比度主文本样式，不再依赖 `Final answer` 标签区分。输入区底部固定预留一行 Agent 状态；模型思考、读取文件和工具执行期间，状态行循环显示动态字符以及 `Thinking...`、`Reading files: <tool>...` 或 `Running tool: <tool>...`，不会与帮助文字挤在同一行。阶段结束后状态行清空，scrollback 中写入静态结果。可通过 `--no-spinner`、`--quiet`、`CAPSLOCK_NO_SPINNER=1` 或 `CI=true` 禁用动态状态。启动 banner 使用 v1.7.1 的 `Welcome back`、CapsLock 字符画和 Tips 布局，窄终端自动改为纵向排列。
+inline TUI 将原 full-screen 设计系统映射到终端主缓冲区：用户、回答和系统消息保留语义化左边框，Queue、Activity、会话元数据、用量和 Composer 组成一个带完整边框的普通 inline prompt block。该输入块不锚定窗口底部，而是始终出现在最新上下文之后，并随新输出向下移动。reasoning 默认折叠成一行摘要，`Ctrl-O` 可切换当前及后续活动的详细显示；`◆ CapsLock` 下的回答使用透明背景的 Rich Markdown、代码高亮、表格和终端链接。连续读取/搜索工具合并为一条 `Explored` 摘要，编辑、命令和失败结果单独突出。状态信息按 `>=100`、`72–99`、`<72` 三档隐藏次要元数据；模型思考、读取文件和工具执行期间显示动态状态，回答开始流出后不再重复显示 Thinking。`Ctrl-J` 插入换行，`Enter` 提交，`Ctrl-C` 取消当前 run 或在空闲时退出。可通过 `--no-spinner`、`--quiet`、`CAPSLOCK_NO_SPINNER=1` 或 `CI=true` 禁用动态状态。启动 banner 保留 v1.7.1 的 `Welcome back`、CapsLock 字符画和 Tips 布局。
+
+保留的 fullscreen TUI 使用 Textual 的固定输入区和可滚动 transcript，并进入
+终端 alternate screen。最终回答按
+Markdown 渲染，reasoning 与连续只读/搜索工具在完成后折叠；`Ctrl-O` 展开详情，
+`Ctrl-R` 搜索输入历史，`Tab` 补全 `/` 命令或 `$` Skill，`Ctrl-J` 插入换行。
+活跃 run 中按 `Ctrl-C` 取消，空闲时按 `Ctrl-C` 退出。审批面板展示经过脱敏和
+截断的动作摘要、命令或 diff，并始终默认拒绝。终端小于 48×14 时只显示尺寸
+提示，不允许进行审批。
+
+inline 与 fullscreen 均不指定固定背景色；所有容器、消息、输入区和模态框沿用用户终端的
+默认背景色，只设置前景色和边框。
 
 `capslock resume` 使用方向键选择历史 session 并重放完整可见对话；也可显式传入完整 session ID 或唯一前缀。已完成消息以及中断/失败 run 的用户问题和已产生文本都会进入恢复视图与后续模型上下文。
 

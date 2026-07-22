@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import shlex
+import shutil
 from collections.abc import Callable
+from dataclasses import replace
 
 from prompt_toolkit.application import get_app_or_none, run_in_terminal
 from prompt_toolkit.patch_stdout import patch_stdout
@@ -26,13 +28,23 @@ from ..status import AgentStatus, status_for_event, status_message
 from .context import CliContext
 from .dispatch import dispatch_slash_command
 from .prompt import (
-    permission_rprompt,
-    prompt_footer,
     prompt_session,
+    prompt_prelude,
     prompt_tokens,
     select_action_decision,
 )
+from .presentation import ToolPresentation, present_tool
 from .views.common import error, startup
+from .views.conversation import (
+    approval_panel,
+    assistant_content,
+    assistant_label,
+    reasoning_summary,
+    system_message,
+    tool_group,
+    tool_result,
+    user_message,
+)
 from .views.workflow import render_history, result_status
 
 
@@ -49,22 +61,47 @@ async def run_tui(context: CliContext, *, status_enabled: bool = True) -> int:
     render_history(
         console, session, await agent.repositories.sessions.transcript(agent.session_id)
     )
-    inputs = prompt_session(
-        lambda: [
-            (entry.name, entry.package.description)
-            for entry in agent.skills.entries()
-            if entry.enabled and entry.error is None and entry.package is not None
-        ]
-    )
-    queue: asyncio.Queue[tuple[str, str, str | None] | None] = asyncio.Queue()
     state: dict[str, object] = {
         "task": None,
         "activity": None,
         "spinner_frame": 0,
         "status_enabled": status_enabled,
         "stopping": False,
-        "inputs": inputs,
+        "details_expanded": False,
+        "queued_items": {},
+        "usage": (0, 0, 0.0),
     }
+
+    def toggle_details() -> None:
+        state["details_expanded"] = not bool(state.get("details_expanded"))
+
+    def prelude() -> object:
+        queued = state.get("queued_items")
+        queued_items = tuple(queued.items()) if isinstance(queued, dict) else ()
+        usage = state.get("usage")
+        usage_value = usage if isinstance(usage, tuple) else (0, 0, 0.0)
+        return prompt_prelude(
+            queued_items=queued_items,
+            activity=str(state["activity"]) if state.get("activity") else None,
+            spinner_frame=int(state.get("spinner_frame", 0)),
+            details_expanded=bool(state.get("details_expanded", False)),
+            model=agent.model,
+            permission=agent.permission_mode.value,
+            workspace=str(agent.workspace),
+            usage=usage_value,
+        )
+
+    inputs = prompt_session(
+        lambda: [
+            (entry.name, entry.package.description)
+            for entry in agent.skills.entries()
+            if entry.enabled and entry.error is None and entry.package is not None
+        ],
+        toggle_details=toggle_details,
+        prelude_provider=prelude,
+    )
+    queue: asyncio.Queue[tuple[str, str, str | None] | None] = asyncio.Queue()
+    state["inputs"] = inputs
     router = context.agent.chat_model
 
     async def authorize_budget(request: BudgetRequest) -> bool:
@@ -108,13 +145,7 @@ async def run_tui(context: CliContext, *, status_enabled: bool = True) -> int:
                     question = (
                         await inputs.prompt_async(
                             prompt_tokens(agent.permission_mode),
-                            rprompt=permission_rprompt(agent.permission_mode),
-                            bottom_toolbar=lambda: prompt_footer(
-                                activity=str(state["activity"])
-                                if state.get("activity")
-                                else None,
-                                spinner_frame=int(state.get("spinner_frame", 0)),
-                            ),
+                            show_frame=True,
                         )
                     ).strip()
             except KeyboardInterrupt:
@@ -145,10 +176,14 @@ async def run_tui(context: CliContext, *, status_enabled: bool = True) -> int:
                 )
                 if answer.strip().casefold() not in {"y", "yes"}:
                     continue
+            console.print(user_message(question))
             item = await agent.enqueue(question)
+            queued_items = state.get("queued_items")
+            if isinstance(queued_items, dict):
+                queued_items[item.id] = item.question
             await queue.put((item.id, item.question, None))
             console.print(
-                f"[waiting]Queued:[/] {item.question} [text.muted]({item.id[:8]})[/]"
+                result_status("Queued", "waiting", detail=item.id[:8])
             )
     finally:
         if callable(set_authorizer):
@@ -186,6 +221,9 @@ async def _worker(
         if request is None:
             return
         item_id, question, resume_from = request
+        queued_items = state.get("queued_items")
+        if isinstance(queued_items, dict):
+            queued_items.pop(item_id, None)
         task = asyncio.create_task(
             _run_request(context, item_id, question, resume_from, state)
         )
@@ -232,9 +270,17 @@ async def _run_request(
 
 
 async def _authorize_action(
-    _context: CliContext, action: ActionRecord
+    context: CliContext, action: ActionRecord
 ) -> ApprovalDecision:
     def choose() -> ApprovalDecision:
+        size = shutil.get_terminal_size(fallback=(80, 24))
+        if size.columns < 48 or size.lines < 14:
+            context.console.print(
+                "[warning]Terminal too small for safe approval; "
+                "at least 48 columns × 14 rows are required.[/]"
+            )
+            return ApprovalDecision.REJECT
+        context.console.print(approval_panel(action))
         return select_action_decision(action)
 
     try:
@@ -248,9 +294,11 @@ class _RunRenderer:
         self.writer = writer
         self.state = state
         self.thinking = False
-        self.reasoning_started = False
+        self.reasoning_text = ""
+        self.reasoning_emitted = 0
         self.answer_started = False
-        self.active_tool: str | None = None
+        self.active_tools: dict[str, ToolPresentation] = {}
+        self.pending_tools: list[ToolPresentation] = []
         self.terminal = False
 
     async def handle(self, event: AgentEvent) -> None:
@@ -259,7 +307,7 @@ class _RunRenderer:
         elif event.kind is AgentEventKind.TEXT_DELTA:
             await self._answer(str(event.data.get("text", "")))
         elif event.kind is AgentEventKind.TOOL_RUNNING:
-            await self._tool_running(str(event.data.get("name", "unknown")))
+            await self._tool_running(event)
         elif event.kind is AgentEventKind.TOOL_COMPLETED:
             await self._tool_completed(event)
         elif event.kind in {
@@ -283,72 +331,104 @@ class _RunRenderer:
             self.thinking = True
             _set_activity(self.state, status_message(AgentStatus.THINKING))
         if text:
-            if not self.reasoning_started:
-                await self.writer.print("\n[reasoning]◇ Model reasoning[/]")
-                self.reasoning_started = True
-            await self.writer.write_text(text, style="reasoning")
+            self.reasoning_text += text
+            if bool(self.state.get("details_expanded")):
+                if self.reasoning_emitted == 0:
+                    await self.writer.print("\n[reasoning]◇ Reasoning[/]")
+                pending = self.reasoning_text[self.reasoning_emitted :]
+                self.reasoning_emitted = len(self.reasoning_text)
+                await self.writer.write_text(pending, style="reasoning")
 
     async def _finish_thinking(self, status: str = "success") -> None:
         if not self.thinking:
             return
-        await self.writer.flush()
+        expanded = bool(self.state.get("details_expanded"))
+        if self.reasoning_text:
+            if expanded and self.reasoning_emitted < len(self.reasoning_text):
+                if self.reasoning_emitted == 0:
+                    await self.writer.print("\n[reasoning]◇ Reasoning[/]")
+                await self.writer.write_text(
+                    self.reasoning_text[self.reasoning_emitted :], style="reasoning"
+                )
+                self.reasoning_emitted = len(self.reasoning_text)
+            await self.writer.flush()
+            outcome = {
+                "success": "complete",
+                "failed": "failed",
+                "cancelled": "cancelled",
+            }.get(status, status)
+            await self.writer.print(reasoning_summary(self.reasoning_text, status=outcome))
         _set_activity(self.state, None)
-        outcome = {
-            "success": "complete",
-            "failed": "failed",
-            "cancelled": "cancelled",
-        }.get(status, status)
-        label = "Reasoning" if self.reasoning_started else "Thinking"
-        await self.writer.print(result_status(f"{label} {outcome}", status))
         self.thinking = False
-        self.reasoning_started = False
+        self.reasoning_text = ""
+        self.reasoning_emitted = 0
 
     async def _answer(self, text: str) -> None:
         await self._finish_thinking()
+        await self._flush_tool_group()
         if not self.answer_started:
-            await self.writer.print("\n[agent.bold]◆ CapsLock[/]")
+            await self.writer.print()
+            await self.writer.print(assistant_label())
             self.answer_started = True
-        await self.writer.write_text(text, style="answer")
+        _set_activity(self.state, None)
+        await self.writer.write_markdown(text)
 
-    async def _tool_running(self, name: str) -> None:
+    async def _tool_running(self, event: AgentEvent) -> None:
         await self._finish_thinking()
         await self.writer.flush()
         self.answer_started = False
-        self.active_tool = name
-        status, detail = status_for_event(AgentEventKind.TOOL_RUNNING, {"name": name})
+        item = present_tool(event.data, sequence=event.sequence)
+        self.active_tools[item.identifier] = item
+        if not item.groupable:
+            await self._flush_tool_group()
+        status, detail = status_for_event(
+            AgentEventKind.TOOL_RUNNING, {"name": item.name}
+        )
         _set_activity(self.state, status_message(status, detail))
 
     async def _tool_completed(self, event: AgentEvent) -> None:
         await self.writer.flush()
-        _set_activity(self.state, status_message(AgentStatus.ANALYZING))
-        name = str(event.data.get("name", self.active_tool or "unknown"))
-        ok = bool(event.data.get("ok"))
-        duration = int(event.data.get("duration_ms", 0))
-        collaboration = event.data.get("collaboration")
-        if isinstance(collaboration, dict):
-            tasks = collaboration.get("tasks", [])
-            if isinstance(tasks, list):
-                states = ", ".join(
-                    str(item.get("state", "unknown"))
-                    for item in tasks
-                    if isinstance(item, dict)
-                )
-                if states:
-                    duration_text = f"{duration}ms · {states}"
-                else:
-                    duration_text = f"{duration}ms"
-            else:
-                duration_text = f"{duration}ms"
-        else:
-            duration_text = f"{duration}ms"
-        await self.writer.print(
-            result_status(
-                f"Tool {name} {'completed' if ok else 'failed'}",
-                "success" if ok else "failed",
-                detail=duration_text,
+        completed = present_tool(event.data, sequence=event.sequence)
+        running = self.active_tools.pop(completed.identifier, None)
+        if running is None and "tool_call_id" not in event.data:
+            running_id = next(
+                (
+                    identifier
+                    for identifier, candidate in reversed(self.active_tools.items())
+                    if candidate.name == completed.name
+                ),
+                None,
             )
+            if running_id is not None:
+                running = self.active_tools.pop(running_id)
+        if running is not None:
+            item = replace(
+                running,
+                title=completed.title or running.title,
+                detail=completed.detail or running.detail,
+                target=completed.target or running.target,
+                outcome=completed.outcome,
+                ok=completed.ok,
+                duration_ms=completed.duration_ms,
+            )
+        else:
+            item = completed
+        if item.groupable:
+            self.pending_tools.append(item)
+            if item.ok is False:
+                await self._flush_tool_group()
+        else:
+            await self._flush_tool_group()
+            await self.writer.print(tool_result(item))
+        _set_activity(self.state, status_message(AgentStatus.ANALYZING))
+
+    async def _flush_tool_group(self) -> None:
+        if not self.pending_tools:
+            return
+        items, self.pending_tools = self.pending_tools, []
+        await self.writer.print(
+            tool_group(items, expanded=bool(self.state.get("details_expanded")))
         )
-        self.active_tool = None
 
     async def _terminal(self, event: AgentEvent) -> None:
         thinking_status = (
@@ -359,18 +439,16 @@ class _RunRenderer:
             else "success"
         )
         await self._finish_thinking(thinking_status)
+        await self._flush_tool_group()
         await self.writer.flush()
         _set_activity(self.state, None)
         self.terminal = True
         if event.kind is AgentEventKind.COMPLETED:
             if not self.answer_started and event.data.get("answer"):
-                await self.writer.print("\n[agent.bold]◆ CapsLock[/]")
-                await self.writer.print(
-                    str(event.data["answer"]),
-                    style="answer",
-                    markup=False,
-                    highlight=False,
-                )
+                await self.writer.print()
+                await self.writer.print(assistant_label())
+                await self.writer.write_markdown(str(event.data["answer"]))
+                await self.writer.flush()
             usage = event.data.get("usage", {})
             models = event.data.get("models", [])
             selected_model = ""
@@ -383,48 +461,81 @@ class _RunRenderer:
                 f"{usage.get('input_tokens', 0)}/{usage.get('output_tokens', 0)} tokens · "
                 f"${float(usage.get('cost_usd', 0)):.6f}{selected_model}"
             )
+            self.state["usage"] = (
+                int(usage.get("input_tokens", 0)),
+                int(usage.get("output_tokens", 0)),
+                float(usage.get("cost_usd", 0)),
+            )
             await self.writer.print(
                 result_status("Completed", "success", detail=detail)
             )
         elif event.kind is AgentEventKind.WAITING_APPROVAL:
             count = int(event.data.get("count", len(event.data.get("action_ids", []))))
             await self.writer.print(
-                result_status(
-                    "Waiting for approval",
-                    "waiting",
-                    detail=f"{count} action(s) · /approvals",
+                system_message(
+                    result_status(
+                        "Waiting for approval",
+                        "waiting",
+                        detail=f"{count} action(s) · /approvals",
+                    ),
+                    status="waiting",
                 )
             )
         elif event.kind is AgentEventKind.CANCELLED:
             error = event.data.get("error", {})
             await self.writer.print(
-                result_status(
-                    "Cancelled", "cancelled", detail=str(error.get("message", ""))
+                system_message(
+                    result_status(
+                        "Cancelled",
+                        "cancelled",
+                        detail=str(error.get("message", "")),
+                    ),
+                    status="cancelled",
                 )
             )
         elif event.kind is AgentEventKind.STOPPED:
             reason = str(event.data.get("stop_reason", "stopped"))
-            await self.writer.print(result_status("Stopped", "stopped", detail=reason))
+            await self.writer.print(
+                system_message(
+                    result_status("Stopped", "stopped", detail=reason),
+                    status="stopped",
+                )
+            )
         else:
             error = event.data.get("error", {})
             await self.writer.print(
-                result_status("Failed", "failed", detail=str(error.get("message", "")))
+                system_message(
+                    result_status(
+                        "Failed", "failed", detail=str(error.get("message", ""))
+                    ),
+                    status="failed",
+                )
             )
 
     async def cancel(self) -> None:
         if self.terminal:
             return
         await self._finish_thinking("cancelled")
+        await self._flush_tool_group()
         await self.writer.flush()
         _set_activity(self.state, None)
-        await self.writer.print(result_status("Cancelled", "cancelled"))
+        await self.writer.print(
+            system_message(
+                result_status("Cancelled", "cancelled"), status="cancelled"
+            )
+        )
         self.terminal = True
 
     async def fail(self, message: str) -> None:
         await self._finish_thinking("failed")
+        await self._flush_tool_group()
         await self.writer.flush()
         _set_activity(self.state, None)
-        await self.writer.print(result_status("Failed", "failed", detail=message))
+        await self.writer.print(
+            system_message(
+                result_status("Failed", "failed", detail=message), status="failed"
+            )
+        )
         self.terminal = True
 
 
@@ -434,6 +545,7 @@ class _TerminalWriter:
     def __init__(self, console: Console) -> None:
         self.console = console
         self.buffer = ""
+        self.markdown_buffer = ""
         self.style: str | None = None
 
     async def call(
@@ -452,7 +564,7 @@ class _TerminalWriter:
         await self.call(self.console.print, *args, **kwargs)
 
     async def write_text(self, text: str, *, style: str | None = None) -> None:
-        if self.buffer and style != self.style:
+        if self.markdown_buffer or (self.buffer and style != self.style):
             await self.flush()
         self.style = style
         self.buffer += text
@@ -465,13 +577,46 @@ class _TerminalWriter:
                 highlight=False,
             )
 
+    async def write_markdown(self, text: str) -> None:
+        if self.buffer:
+            await self.flush()
+        self.markdown_buffer += text
+        boundary = _markdown_boundary(self.markdown_buffer)
+        if boundary:
+            complete, self.markdown_buffer = (
+                self.markdown_buffer[:boundary],
+                self.markdown_buffer[boundary:],
+            )
+            if complete.strip():
+                await self.print(assistant_content(complete.rstrip()))
+
     async def flush(self) -> None:
-        if not self.buffer:
+        if self.buffer:
+            text, self.buffer = self.buffer, ""
+            style, self.style = self.style, None
+            await self.print(text, style=style, markup=False, highlight=False)
+        else:
             self.style = None
-            return
-        text, self.buffer = self.buffer, ""
-        style, self.style = self.style, None
-        await self.print(text, style=style, markup=False, highlight=False)
+        if self.markdown_buffer:
+            text, self.markdown_buffer = self.markdown_buffer, ""
+            if text.strip():
+                await self.print(assistant_content(text))
+
+
+def _markdown_boundary(value: str) -> int:
+    """Return the last complete paragraph boundary outside fenced code."""
+
+    fenced = False
+    offset = 0
+    boundary = 0
+    for line in value.splitlines(keepends=True):
+        stripped = line.lstrip()
+        if stripped.startswith(("```", "~~~")):
+            fenced = not fenced
+        offset += len(line)
+        if not fenced and not line.strip():
+            boundary = offset
+    return boundary
 
 
 def _set_activity(state: dict[str, object], activity: str | None) -> None:

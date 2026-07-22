@@ -72,6 +72,9 @@ RICH_STYLE_DEFINITIONS: Mapping[str, str] = {
     "command": THEME_TOKENS["command"],
     "path": THEME_TOKENS["path"],
     "code": THEME_TOKENS["code"],
+    # Rich's default Markdown theme gives inline code a black background.
+    # Defining the semantic style here keeps only the foreground color.
+    "markdown.code": THEME_TOKENS["code"],
 }
 RICH_BOLD_STYLE_DEFINITIONS: Mapping[str, str] = {
     "text.primary.bold": THEME_TOKENS["textPrimary"],
@@ -141,20 +144,22 @@ def build_prompt_style(*, no_color: bool | None = None) -> PromptStyle:
         return " ".join(parts)
 
     def transparent_foreground(token: str, *attributes: str) -> str:
-        return f"bg:default {foreground(token, *attributes)}".rstrip()
+        return f"bg:default noreverse {foreground(token, *attributes)}".rstrip()
 
     return PromptStyle.from_dict(
         {
             "permission": foreground("waiting", "bold"),
             "prompt": foreground("primary", "bold"),
             "input-border": foreground("borderFocus"),
+            "frame.border": foreground("borderFocus"),
+            "frame.label": foreground("textPrimary", "bold"),
             "footer": foreground("textMuted"),
             "running": foreground("running", "bold"),
             "thinking": foreground("thinking", "bold"),
             "slash-command": foreground("command", "bold"),
             "user-input": foreground("user"),
             "command-name": foreground("command", "bold"),
-            "completion-menu": "bg:default",
+            "completion-menu": "bg:default noreverse",
             "completion-menu.completion": transparent_foreground("textPrimary"),
             "completion-menu.completion.current": transparent_foreground(
                 "primarySoft", "bold"
@@ -163,12 +168,12 @@ def build_prompt_style(*, no_color: bool | None = None) -> PromptStyle:
             "completion-menu.meta.completion.current": transparent_foreground(
                 "textPrimary", "bold"
             ),
-            "input-selection": "bg:default",
+            "input-selection": "bg:default noreverse underline",
             "option": transparent_foreground("textPrimary"),
             "selected-option": transparent_foreground("primarySoft", "bold"),
             "number": transparent_foreground("textMuted"),
             "bottom-toolbar": transparent_foreground("textMuted", "noreverse"),
-            "scrollbar.background": "bg:default",
+            "scrollbar.background": "bg:default noreverse",
             "scrollbar.button": transparent_foreground("textDisabled"),
         }
     )

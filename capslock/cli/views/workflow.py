@@ -10,6 +10,7 @@ from rich.text import Text
 
 from ...domain import SessionInfo, TaskInfo, WorkItemInfo
 from .common import status_text, table
+from .conversation import assistant_content, user_message
 
 
 @dataclass(frozen=True)
@@ -100,10 +101,12 @@ def render_history(
     )
     for entry in transcript:
         role = str(entry["role"])
-        console.print(
-            "\n[user.label]You[/]" if role == "user" else "\n[agent.bold]CapsLock[/]"
-        )
-        console.print(str(entry.get("content", "")), markup=False, highlight=False)
+        content = str(entry.get("content", ""))
+        if role == "user":
+            console.print(user_message(content))
+        else:
+            console.print("[agent.bold]◆ CapsLock[/]")
+            console.print(assistant_content(content))
         if entry.get("status") not in {None, "completed"}:
             console.print(
                 f"[warning]{entry.get('status')}:[/] {entry.get('error') or ''}"

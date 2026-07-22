@@ -21,6 +21,8 @@ from capslock.cli.dispatch import dispatch_slash_command
 from capslock.cli.exec import run_exec
 from capslock.cli.prompt import (
     prompt_footer,
+    prompt_prelude,
+    prompt_session,
     select_action_decision,
     select_permission_mode,
     select_session,
@@ -503,7 +505,8 @@ def test_inline_action_authorizer_runs_choice_outside_active_event_loop() -> Non
             )
     assert decision is ApprovalDecision.APPROVE
     assert "sensitive payload" not in output.getvalue()
-    assert "secret.py" not in output.getvalue()
+    assert "Permission required" in output.getvalue()
+    assert "secret.py" in output.getvalue()
 
 
 @pytest.mark.parametrize("error_type", [EOFError, KeyboardInterrupt])
@@ -662,12 +665,32 @@ def test_activity_footer_animates_thinking_and_running() -> None:
     assert "\n⠙ Thinking" in thinking_1
     assert "Thinking..." in thinking_0
     assert "Running read_file..." in running
-    assert "Thinking...\n? /help" in thinking_0
+    assert "Thinking...\n- · - · 0/0 tok · details off" in thinking_0
+    assert "? /help" not in thinking_0
+
+
+def test_inline_composer_ctrl_j_inserts_newline_and_enter_submits() -> None:
+    with create_pipe_input() as pipe:
+        with create_app_session(input=pipe, output=DummyOutput()):
+            inputs = prompt_session()
+            pipe.send_text("first\x0asecond\r")
+            result = asyncio.run(inputs.prompt_async())
+    assert result == "first\nsecond"
+
+
+def test_inline_composer_ctrl_c_exits_even_with_a_draft() -> None:
+    with create_pipe_input() as pipe:
+        with create_app_session(input=pipe, output=DummyOutput()):
+            inputs = prompt_session()
+            pipe.send_text("draft\x03")
+            with pytest.raises(KeyboardInterrupt):
+                asyncio.run(inputs.prompt_async())
 
 
 def test_tui_status_row_is_reserved_and_can_be_disabled() -> None:
     idle = "".join(item[1] for item in prompt_footer())
-    assert "\n \n? /help" in idle
+    assert "\n \n- · - · 0/0 tok · details off" in idle
+    assert "? /help" not in idle
     state: dict[str, object] = {
         "activity": None,
         "spinner_frame": 0,
@@ -675,6 +698,40 @@ def test_tui_status_row_is_reserved_and_can_be_disabled() -> None:
     }
     _set_activity(state, "Thinking...")
     assert state["activity"] is None
+
+
+@pytest.mark.parametrize(
+    ("width", "expected", "hidden"),
+    [
+        (120, "/workspace · model · approve_for_me", None),
+        (80, "model · approve_for_me", "/workspace"),
+        (60, "approve_for_me · 30 tok", "model"),
+    ],
+)
+def test_inline_footer_uses_fullscreen_responsive_breakpoints(
+    width: int, expected: str, hidden: str | None
+) -> None:
+    rendered = "".join(
+        item[1]
+        for item in prompt_footer(
+            width,
+            model="model",
+            permission="approve_for_me",
+            workspace="/workspace",
+            usage=(10, 20, 0.125),
+        )
+    )
+    header = "".join(
+        item[1]
+        for item in prompt_prelude(
+            width,
+            queued_items=(("queued-item", "inspect the repository"),),
+        )
+    )
+    assert "Queue queued-i inspect the repository" in header
+    assert expected in rendered
+    if hidden:
+        assert hidden not in rendered
 
 
 def test_static_result_markers_have_success_and_error_styles() -> None:
@@ -723,10 +780,9 @@ def test_tui_renderer_prints_reasoning_tool_status_and_final_answer() -> None:
             )
         )
         rendered = output.getvalue()
-        assert "◇ Model reasoning" in rendered
-        assert "inspect files" in rendered
-        assert "● Reasoning complete" in rendered
-        assert "● Tool read_file completed · 8ms" in rendered
+        assert "◇ Reasoning complete · 13 chars" in rendered
+        assert "inspect files" not in rendered
+        assert "● Explored 1 item(s) · read 1" in rendered
         assert "◆ CapsLock" in rendered
         assert "Final answer" not in rendered
         assert "result" in rendered and "final" in rendered
@@ -736,10 +792,11 @@ def test_tui_renderer_prints_reasoning_tool_status_and_final_answer() -> None:
     asyncio.run(scenario())
 
 
-def test_tui_renderer_uses_distinct_reasoning_and_answer_styles() -> None:
+def test_tui_renderer_expands_reasoning_and_streams_markdown_when_requested() -> None:
     class RecordingWriter:
         def __init__(self) -> None:
             self.text_styles: list[tuple[str, str | None]] = []
+            self.markdown: list[str] = []
 
         async def print(self, *args, **kwargs) -> None:
             return None
@@ -747,17 +804,25 @@ def test_tui_renderer_uses_distinct_reasoning_and_answer_styles() -> None:
         async def write_text(self, text: str, *, style: str | None = None) -> None:
             self.text_styles.append((text, style))
 
+        async def write_markdown(self, text: str) -> None:
+            self.markdown.append(text)
+
         async def flush(self) -> None:
             return None
 
     async def scenario() -> None:
         writer = RecordingWriter()
-        renderer = _RunRenderer(writer, {"activity": None, "spinner_frame": 0})
+        renderer = _RunRenderer(
+            writer,
+            {
+                "activity": None,
+                "spinner_frame": 0,
+                "details_expanded": True,
+            },
+        )
         await renderer.handle(event(AgentEventKind.THINKING, {"text": "inspect"}, 1))
         await renderer.handle(event(AgentEventKind.TEXT_DELTA, {"text": "answer"}, 2))
-        assert writer.text_styles == [
-            ("inspect", "reasoning"),
-            ("answer", "answer"),
-        ]
+        assert writer.text_styles == [("inspect", "reasoning")]
+        assert writer.markdown == ["answer"]
 
     asyncio.run(scenario())

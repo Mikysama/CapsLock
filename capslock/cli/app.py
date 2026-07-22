@@ -47,6 +47,7 @@ from .setup import (
     initialize,
 )
 from .tui import run_tui
+from .fullscreen_tui import run_fullscreen_tui, select_session_fullscreen
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -60,6 +61,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-spinner", action="store_true")
     parser.add_argument("--quiet", action="store_true")
     subparsers = parser.add_subparsers(dest="command")
+    parser.add_argument("--ui", choices=("inline", "fullscreen"))
     execute = subparsers.add_parser("exec", help="Run one non-interactive request")
     execute.add_argument("question", nargs="?")
     execute.add_argument("--json", action="store_true")
@@ -75,6 +77,11 @@ def build_parser() -> argparse.ArgumentParser:
     resume.add_argument("--limit", type=int, default=20)
     resume.add_argument("--no-spinner", action="store_true", default=argparse.SUPPRESS)
     resume.add_argument("--quiet", action="store_true", default=argparse.SUPPRESS)
+    resume.add_argument(
+        "--ui",
+        choices=("inline", "fullscreen"),
+        default=argparse.SUPPRESS,
+    )
     sessions = subparsers.add_parser(
         "sessions", aliases=["session"], help="Manage saved sessions"
     )
@@ -286,13 +293,39 @@ async def async_main(
         if args.command in {"session", "sessions"}:
             return await _sessions(output, args, workspace, layout, settings)
         session_id = getattr(args, "session_id", None)
+        ui_mode = _ui_mode(args) if args.command in {None, "resume"} else "inline"
+        interactive_terminal = (
+            sys.stdin.isatty()
+            and output.is_terminal
+            and os.environ.get("TERM", "").casefold() != "dumb"
+        )
+        if args.command in {None, "resume"} and not interactive_terminal:
+            output.print(
+                "[error]Interactive TUI requires a terminal; use `capslock exec`.[/]"
+            )
+            return 2
         if args.command == "resume":
             repositories = await WorkspaceRepositories.open(
                 layout.database, workspace=workspace
             )
             try:
                 if session_id is None:
-                    session_id = await select_session(output, repositories, args.limit)
+                    if ui_mode == "fullscreen":
+                        try:
+                            session_id = await select_session_fullscreen(
+                                await repositories.sessions.list(args.limit)
+                            )
+                        except Exception as exc:
+                            errors.print(
+                                "[error]Fullscreen TUI error:[/] "
+                                f"{exc}\nUse `capslock resume --ui inline` "
+                                "to run the terminal-native selector."
+                            )
+                            return 1
+                    else:
+                        session_id = await select_session(
+                            output, repositories, args.limit
+                        )
                     if session_id is None:
                         return 0
                 else:
@@ -302,15 +335,6 @@ async def async_main(
                     session_id = session.id
             finally:
                 await repositories.close()
-        if args.command is None and not (
-            sys.stdin.isatty()
-            and output.is_terminal
-            and os.environ.get("TERM", "").casefold() != "dumb"
-        ):
-            output.print(
-                "[error]Interactive TUI requires a terminal; use `capslock exec`.[/]"
-            )
-            return 2
         application = await create_application(
             workspace, settings, session_id, layout=layout
         )
@@ -325,14 +349,26 @@ async def async_main(
                     quiet=args.quiet,
                     limits=_exec_limits(application.agent.default_limits, args),
                 )
-            return await run_tui(
-                context,
-                status_enabled=not args.no_spinner
+            status_enabled = (
+                not args.no_spinner
                 and not args.quiet
                 and dynamic_status_supported(
                     output.file, output_is_tty=output.is_terminal
-                ),
+                )
             )
+            if ui_mode == "fullscreen":
+                try:
+                    return await run_fullscreen_tui(
+                        context, status_enabled=status_enabled
+                    )
+                except Exception as exc:
+                    errors.print(
+                        "[error]Fullscreen TUI error:[/] "
+                        f"{exc}\nUse `capslock --ui inline` to run the "
+                        "terminal-native UI."
+                    )
+                    return 1
+            return await run_tui(context, status_enabled=status_enabled)
     except KeyboardInterrupt:
         errors.print("\n[warning]Cancelled.[/]")
         return 130
@@ -412,6 +448,14 @@ def _positive_float(value: str) -> float:
     if parsed <= 0:
         raise argparse.ArgumentTypeError("must be positive")
     return parsed
+
+
+def _ui_mode(args: argparse.Namespace) -> str:
+    value = getattr(args, "ui", None) or os.environ.get("CAPSLOCK_UI") or "inline"
+    normalized = value.strip().casefold()
+    if normalized not in {"inline", "fullscreen"}:
+        raise ValueError("CAPSLOCK_UI must be 'inline' or 'fullscreen'")
+    return normalized
 
 
 def _tighter(configured, requested):

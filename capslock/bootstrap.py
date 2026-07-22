@@ -72,6 +72,7 @@ class WorkspaceApplication:
         self.repositories = repositories
         self.memory_repositories = memory_repositories
         self.agent = agent
+        self.close_client = close_client
 
     @classmethod
     async def open(

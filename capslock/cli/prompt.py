@@ -11,6 +11,9 @@ from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.document import Document
 from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.key_binding.key_bindings import merge_key_bindings
+from prompt_toolkit.layout.containers import HSplit, VSplit, Window
+from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.menus import CompletionsMenu, MultiColumnCompletionsMenu
 from prompt_toolkit.lexers import Lexer
 from prompt_toolkit.shortcuts import CompleteStyle
@@ -74,19 +77,63 @@ class SlashCommandLexer(Lexer):
 PROMPT_STYLE = build_prompt_style()
 
 
-def prompt_tokens(mode: PermissionMode, width: int | None = None) -> FormattedText:
+def prompt_tokens(
+    mode: PermissionMode,
+    width: int | None = None,
+) -> FormattedText:
+    return FormattedText([("class:prompt", "❯ ")])
+
+
+def prompt_prelude(
+    width: int | None = None,
+    *,
+    queued_items: tuple[tuple[str, str], ...] = (),
+    activity: str | None = None,
+    spinner_frame: int = 0,
+    details_expanded: bool = False,
+    model: str | None = None,
+    permission: str | None = None,
+    workspace: str | None = None,
+    usage: tuple[int, int, float] = (0, 0, 0.0),
+) -> FormattedText:
     terminal_width = width or shutil.get_terminal_size(fallback=(80, 24)).columns
+    queue_rows: list[tuple[str, str]] = []
+    if queued_items:
+        previews = "  ·  ".join(
+            f"{identifier[:8]} {text}" for identifier, text in queued_items[:3]
+        )
+        queue_rows = [
+            (
+                "class:permission",
+                _fit_cell(f"Queue  {previews}", max(20, terminal_width - 1)).rstrip(),
+            ),
+            ("", "\n"),
+        ]
+    status_row = _status_label(
+        terminal_width,
+        details_expanded=details_expanded,
+        model=model,
+        permission=permission,
+        workspace=workspace,
+        usage=usage,
+    )
+    activity_rows = _activity_fragments(activity, spinner_frame)
     return FormattedText(
         [
-            ("class:input-border", "─" * max(20, terminal_width - 1)),
-            ("", "\n"),
-            ("class:prompt", "❯ "),
+            *queue_rows,
+            *activity_rows,
+            ("class:footer", _fit_cell(status_row, terminal_width - 1).rstrip()),
         ]
     )
 
 
 def permission_rprompt(mode: PermissionMode) -> FormattedText:
-    return FormattedText([("class:permission", f"{mode.value} ")])
+    return FormattedText(
+        [
+            ("class:permission", f"{mode.value} "),
+            ("class:input-border", "│"),
+        ]
+    )
 
 
 def prompt_footer(
@@ -94,31 +141,84 @@ def prompt_footer(
     *,
     activity: str | None = None,
     spinner_frame: int = 0,
+    details_expanded: bool = False,
+    model: str | None = None,
+    permission: str | None = None,
+    workspace: str | None = None,
+    usage: tuple[int, int, float] = (0, 0, 0.0),
 ) -> FormattedText:
     terminal_width = width or shutil.get_terminal_size(fallback=(80, 24)).columns
-    status = []
-    if activity:
-        activity_label = activity if activity.endswith("...") else f"{activity}..."
-        activity_style = (
-            "class:thinking"
-            if activity.casefold().startswith("thinking")
-            else "class:running"
-        )
-        status = [
-            (
-                "class:running class:running.bold",
-                f"{SPINNER_FRAMES[spinner_frame % len(SPINNER_FRAMES)]} ",
-            ),
-            (f"{activity_style} {activity_style}.bold", activity_label),
-        ]
+    status = _activity_fragments(activity, spinner_frame, trailing_newline=False)
+    status_row = _status_label(
+        terminal_width,
+        details_expanded=details_expanded,
+        model=model,
+        permission=permission,
+        workspace=workspace,
+        usage=usage,
+    )
+    bottom = "╰" + "─" * max(1, terminal_width - 2) + "╯"
     return FormattedText(
         [
-            ("class:input-border", "─" * max(20, terminal_width - 1)),
+            ("class:input-border", bottom),
             ("", "\n"),
             *(status or [("", " ")]),
             ("", "\n"),
-            ("class:footer", "? /help  ·  ↑/↓ 选择  ·  Tab 补全"),
+            ("class:footer", _fit_cell(status_row, terminal_width - 1).rstrip()),
         ]
+    )
+
+
+def _activity_fragments(
+    activity: str | None,
+    spinner_frame: int,
+    *,
+    trailing_newline: bool = True,
+) -> list[tuple[str, str]]:
+    if not activity:
+        return []
+    activity_label = activity if activity.endswith("...") else f"{activity}..."
+    activity_style = (
+        "class:thinking"
+        if activity.casefold().startswith("thinking")
+        else "class:running"
+    )
+    fragments = [
+        (
+            "class:running class:running.bold",
+            f"{SPINNER_FRAMES[spinner_frame % len(SPINNER_FRAMES)]} ",
+        ),
+        (f"{activity_style} {activity_style}.bold", activity_label),
+    ]
+    if trailing_newline:
+        fragments.append(("", "\n"))
+    return fragments
+
+
+def _status_label(
+    terminal_width: int,
+    *,
+    details_expanded: bool,
+    model: str | None,
+    permission: str | None,
+    workspace: str | None,
+    usage: tuple[int, int, float],
+) -> str:
+    detail_state = "details on" if details_expanded else "details off"
+    input_tokens, output_tokens, cost_usd = usage
+    if terminal_width >= 100:
+        return (
+            f"{workspace or '-'}  ·  {model or '-'}  ·  {permission or '-'}  ·  "
+            f"{input_tokens}/{output_tokens} tok  ·  ${cost_usd:.4f}  ·  {detail_state}"
+        )
+    if terminal_width >= 72:
+        return (
+            f"{model or '-'}  ·  {permission or '-'}  ·  "
+            f"{input_tokens}/{output_tokens} tok  ·  {detail_state}"
+        )
+    return (
+        f"{permission or '-'}  ·  {input_tokens + output_tokens} tok  ·  "
+        f"{'details on' if details_expanded else 'details off'}"
     )
 
 
@@ -316,18 +416,97 @@ def anchor_completion_menus(container: object) -> None:
 
 def prompt_session(
     skill_provider: Callable[[], list[tuple[str, str]]] | None = None,
+    *,
+    toggle_details: Callable[[], None] | None = None,
+    prelude_provider: Callable[[], FormattedText] | None = None,
 ) -> PromptSession[str]:
+    inline_bindings = KeyBindings()
+
+    @inline_bindings.add("c-j")
+    def _insert_newline(event: object) -> None:
+        event.current_buffer.insert_text("\n")
+
+    @inline_bindings.add("c-m")
+    def _submit(event: object) -> None:
+        event.current_buffer.validate_and_handle()
+
+    @inline_bindings.add("c-c", eager=True)
+    def _cancel_or_exit(event: object) -> None:
+        event.app.exit(exception=KeyboardInterrupt())
+
+    if toggle_details is not None:
+
+        @inline_bindings.add("c-o")
+        def _toggle_details(event: object) -> None:
+            toggle_details()
+            event.app.invalidate()
+
     session = PromptSession(
         completer=SlashCommandCompleter(skill_provider),
         lexer=SlashCommandLexer(),
-        key_bindings=SLASH_KEY_BINDINGS,
+        key_bindings=merge_key_bindings([SLASH_KEY_BINDINGS, inline_bindings]),
         style=PROMPT_STYLE,
+        enable_history_search=True,
         complete_while_typing=True,
         complete_style=CompleteStyle.COLUMN,
         reserve_space_for_menu=16,
+        erase_when_done=True,
+        include_default_pygments_style=False,
+        show_frame=True,
     )
+    root = session.app.layout.container
+    if isinstance(root, HSplit) and root.children:
+        framed = root.children[0]
+        main_input = getattr(framed, "alternative_content", None)
+        if main_input is not None:
+            framed.content = _composer_frame(main_input)
+        if prelude_provider is not None:
+            root.children.insert(
+                0,
+                Window(
+                    FormattedTextControl(prelude_provider),
+                    dont_extend_height=True,
+                ),
+            )
     anchor_completion_menus(session.app.layout.container)
     return session
+
+
+def _composer_frame(main_input: object) -> HSplit:
+    border_style = "class:frame.border"
+
+    def label(value: str, width: int) -> Window:
+        return Window(
+            FormattedTextControl([(border_style, value)]),
+            width=width,
+            height=1,
+            dont_extend_width=True,
+        )
+
+    top = VSplit(
+        [
+            label("╭─ Ask CapsLock ", len("╭─ Ask CapsLock ")),
+            Window(char="─", style=border_style, height=1),
+            label("╮", 1),
+        ],
+        height=1,
+    )
+    body = VSplit(
+        [
+            label("│ ", 2),
+            main_input,
+            label("│", 1),
+        ]
+    )
+    bottom = VSplit(
+        [
+            label("╰", 1),
+            Window(char="─", style=border_style, height=1),
+            label("╯", 1),
+        ],
+        height=1,
+    )
+    return HSplit([top, body, bottom])
 
 
 def move_selection(selected: int, key: str, option_count: int) -> int:

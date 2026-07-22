@@ -88,7 +88,13 @@ v2 不解析旧 alias，也不提供独立 `/cost`、`/context`、`/tasks`、`/c
 
 ## TUI 输出
 
-启动 banner 恢复 v1.7.1 的 `Welcome back`、CapsLock 字符画和 Tips 布局；窄终端使用纵向布局，宽终端使用双栏布局。模型提供方返回的 reasoning 单独显示在低对比度、暗化斜体的 `◇ Model reasoning` 区域；最终回答显示在高对比度主文本样式的 `◆ CapsLock` 区域，不使用额外的 `Final answer` 标签。
+交互入口支持 `--ui inline|fullscreen`；当前默认是 `inline`，也可用
+`CAPSLOCK_UI` 选择。inline UI 使用 prompt-toolkit/Rich 在普通终端主缓冲区
+输出，可靠保留原生 scrollback；fullscreen UI 是保留的第一版 Textual 全屏界面，
+运行在 alternate screen。
+两个界面都不设置背景色，使用终端默认背景。
+
+启动 banner 保留 v1.7.1 的 `Welcome back`、CapsLock 字符画和 Tips 布局；窄终端使用纵向布局，宽终端使用双栏布局。原 full-screen UI 的语义左边框消息卡、QueueBar、Composer、ActivityBar、响应式 StatusBar 和审批 Dialog 均由 Rich/prompt-toolkit 在 inline 动态区实现。动态区不使用 `bottom_toolbar`，每次上下文输出后都会在新光标位置重画，因此 Composer 跟随上下文向下移动而不固定在窗口底部。模型提供方返回的 reasoning 默认折叠为一行 `◇ Reasoning` 摘要，开启 details 时以低对比度、暗化斜体显示；最终回答在 `◆ CapsLock` 下按 Markdown 渲染，不使用额外的 `Final answer` 标签。连续读取和搜索工具合并为一条 `Explored` 摘要，修改、命令与失败结果单独显示。
 
 模型请求和工具执行期间，底部活动行在 `Thinking` 或 `Running <tool>` 左侧循环显示 `◐ ◓ ◑ ◒`。产生待审批提案后，输入框暂停并逐条显示完整脱敏载荷与选择框；选择批准即直接进入执行前复检，不再追加 `y/N`。阶段结束后动画消失，并在 scrollback 中留下静态结果：绿色圆点表示成功，红色圆点表示失败，黄色圆点表示等待审批，警告色圆点表示取消。
 
@@ -97,10 +103,10 @@ v2 不解析旧 alias，也不提供独立 `/cost`、`/context`、`/tasks`、`/c
 ## CLI
 
 ```text
-capslock
+capslock [--ui inline|fullscreen]
 capslock exec [PROMPT] [--json] [--max-tool-rounds N] [--max-tool-calls N]
   [--max-duration-seconds N] [--max-tokens N] [--max-budget-usd N]
-capslock resume [SESSION] [--limit N]
+capslock resume [SESSION] [--limit N] [--ui inline|fullscreen]
 capslock sessions|session [--limit N]
 capslock sessions|session search <QUERY> [--archived]
 capslock sessions|session rename <SESSION> <TITLE>
@@ -141,6 +147,11 @@ capslock doctor [--json] [--strict] [--network] [--fix] [--yes]
 非终止事件：`queued`、`thinking`、`text_delta`、`tool_running`、`tool_completed`、`budget_updated`、`limit_reached`、`budget_extended`。
 
 `thinking.data.text` 是模型提供方显式返回的 reasoning；`text_delta.data.text` 是最终回答的流式正文。TUI 分区渲染二者，`completed.data.answer` 只包含最终回答。
+
+`tool_running.data.presentation` 与 `tool_completed.data.presentation` 是可选的
+版本化展示摘要，当前 `version=1`，包含 `category`、`title` 以及可选的
+`detail`、`target`、`outcome`。它只从工具 allowlist 字段生成并经过脱敏与长度
+限制，不承载原始参数、完整输出或文件正文；旧消费者可以忽略该字段。
 
 终止事件：
 

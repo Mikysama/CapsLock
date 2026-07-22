@@ -1,5 +1,7 @@
 from io import StringIO
+import re
 
+from capslock.cli.views.conversation import assistant_content
 from capslock.theme import (
     RICH_BOLD_STYLE_DEFINITIONS,
     RICH_STYLE_DEFINITIONS,
@@ -66,4 +68,33 @@ def test_no_color_convention_and_prompt_style_use_only_terminal_default_backgrou
     assert all(
         "bg:" not in style or "bg:default" in style for _, style in colored.style_rules
     )
+    assert all(
+        "bg:" not in style or "noreverse" in style
+        for _, style in colored.style_rules
+    )
     assert all("#" not in style for _, style in plain.style_rules)
+
+
+def test_markdown_inline_code_and_code_blocks_never_set_a_black_background() -> None:
+    stream = StringIO()
+    terminal = make_console(
+        file=stream,
+        color_system="truecolor",
+        force_terminal=True,
+        no_color=False,
+        width=80,
+    )
+    terminal.print(
+        assistant_content(
+            "Use `capslock` here.\n\n```python\nprint('transparent')\n```"
+        )
+    )
+    sgr_parameters = [
+        [int(value) for value in match.split(";") if value]
+        for match in re.findall(r"\x1b\[([0-9;]*)m", stream.getvalue())
+    ]
+    assert not any(
+        48 in parameters
+        or any(40 <= value <= 47 or 100 <= value <= 107 for value in parameters)
+        for parameters in sgr_parameters
+    )

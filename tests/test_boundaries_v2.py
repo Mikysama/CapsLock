@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from capslock.bootstrap import WorkspaceApplication
 from capslock.cli.app import create_client
 from capslock.config import Settings
 from capslock.external import is_suspicious, validate_public_url
@@ -97,6 +98,20 @@ def test_bootstrap_has_no_agent_backfill_cycle() -> None:
     )
     assert "agent_ref" not in source
     assert "RunInteraction" in source
+
+
+def test_workspace_application_retains_client_ownership_flag() -> None:
+    application = WorkspaceApplication(
+        workspace=Path("."),
+        layout=object(),
+        settings=object(),
+        client=object(),
+        repositories=object(),
+        memory_repositories=object(),
+        agent=object(),
+        close_client=False,
+    )
+    assert application.close_client is False
 
 
 def test_all_registered_tools_have_async_executors() -> None:
