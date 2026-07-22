@@ -9,7 +9,7 @@
 ### Added
 
 - 新增基于 prompt-toolkit/Rich 的 `inline` 前端并设为默认，完整替换旧行内 TUI；保留第一版 Textual 全屏 TUI，并通过 `--ui fullscreen` 显式启用。
-- 新增固定输入区、Markdown 回答、折叠 reasoning、只读工具分组、输入历史搜索、队列状态和响应式终端布局。
+- 新增完整边框输入区、Markdown 回答、折叠 reasoning、只读工具分组、输入历史搜索、队列状态和响应式终端布局。
 - 工具事件增加向后兼容的脱敏 `presentation` 元数据；审批面板可显示最多 40 行、4 KiB 的本机脱敏命令或 diff 预览。
 
 ### Security
@@ -22,6 +22,7 @@
 - `resume` 与裸入口统一要求交互终端；`exec`、JSONL v2、退出码和 inline TUI 保持兼容。
 - inline 与 fullscreen TUI 的页面、消息、输入区和模态框均使用透明背景，只保留语义前景色与边框。
 - inline Composer 不再通过 prompt-toolkit `bottom_toolbar` 锚定窗口底部，而是随上下文输出向下移动；覆盖 Rich `markdown.code` 和所有选择/补全样式，禁止黑色或反转背景。
+- fullscreen 的 `/` 命令候选改为可滚动的纵向完整列表，不再横向拼接或截断为前 8 项；键盘选中项始终保持可见。
 
 ## [2.2.0] - 2026-07-22
 
