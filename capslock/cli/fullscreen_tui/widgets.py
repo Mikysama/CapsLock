@@ -14,6 +14,7 @@ from textual.widgets import Static, TextArea
 
 from ...status import SPINNER_FRAMES
 from .models import MessageKind, MessageViewModel, QueueViewModel, TuiState
+from .rendering import TransparentBackground
 
 
 class Composer(TextArea):
@@ -72,7 +73,7 @@ class MessageWidget(Static):
     def update_message(self, message: MessageViewModel) -> None:
         self.set_classes(f"message {message.kind.value}")
         if message.kind is MessageKind.ASSISTANT:
-            self.update(RichMarkdown(message.text or " "))
+            self.update(TransparentBackground(RichMarkdown(message.text or " ")))
             return
         if message.kind is MessageKind.USER:
             self.update(Text.assemble(("❯ ", "bold #8CB9DC"), message.text))

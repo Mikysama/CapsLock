@@ -2,7 +2,7 @@
 
 CapsLock 是一个本机工作区 Agent，用于读取代码、检索证据、检查 Git、提出受控文件修改、执行固定命令，以及按审批策略访问 Web 和本地 MCP。v2 内核完全异步，运行、动作、审批、记忆和审计分别通过强类型领域接口与 SQLite repository 管理。
 
-当前源码版本为 `2.2.2`。v2.2.2 完成配置、Memory、Lifecycle、Action、Workflow、runtime 与 CLI/TUI 的分层解耦，并修复 inline 命令树的即时刷新；架构、协议和安全边界见 [v2 开发者文档](docs/development/v2/README.md)，升级摘要见 [v2.2.2 发布说明](docs/releases/v2.2.2.md)。
+当前源码版本为 `2.2.3`。v2.2.3 修复 fullscreen 模型选择器卡死及 Textual、Markdown、Syntax 和 Composer 的黑色背景残留；架构、协议和安全边界见 [v2 开发者文档](docs/development/v2/README.md)，升级摘要见 [v2.2.3 发布说明](docs/releases/v2.2.3.md)。
 
 正式支持矩阵：Linux/macOS，Python 3.12。发布 CI 会在两个操作系统组合中执行测试、构建、依赖审计和安装冒烟。
 
@@ -94,12 +94,15 @@ Markdown 渲染，reasoning 与连续只读/搜索工具在完成后折叠；`Ct
 `Ctrl-R` 搜索输入历史，`Tab` 补全 `/` 命令或 `$` Skill，`Ctrl-J` 插入换行。
 输入 `/` 后，命令候选按纵向逐行显示，完整命令集可滚动浏览，并自动跟随
 `↑/↓` 当前选中项。
+`/model` 等需要模态选择的命令在独立 Textual worker 中等待结果，不会阻塞
+界面消息泵。
 活跃 run 中按 `Ctrl-C` 取消，空闲时按 `Ctrl-C` 退出。审批面板展示经过脱敏和
 截断的动作摘要、命令或 diff，并始终默认拒绝。终端小于 48×14 时只显示尺寸
 提示，不允许进行审批。
 
-inline 与 fullscreen 均不指定固定背景色；所有容器、消息、输入区和模态框沿用用户终端的
-默认背景色，只设置前景色和边框。
+inline 与 fullscreen 均不指定固定背景色；fullscreen 根层使用终端原生默认背景，
+所有容器、消息、输入区和模态框保持透明。Markdown、代码高亮和输入光标行只移除
+字符背景，不改变前景色、粗细、斜体、下划线或链接样式。
 
 `capslock resume` 使用方向键选择历史 session 并重放完整可见对话；也可显式传入完整 session ID 或唯一前缀。已完成消息以及中断/失败 run 的用户问题和已产生文本都会进入恢复视图与后续模型上下文。
 

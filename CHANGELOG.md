@@ -4,6 +4,21 @@
 
 ## [Unreleased]
 
+## [2.2.3] - 2026-07-23
+
+### Fixed
+
+- 修复 fullscreen Composer 提交 `/model` 后等待模态结果会阻塞 Textual 消息泵，导致模型选择器无法关闭的问题；斜杠命令现在由受管理的 worker 执行。
+- 修复 fullscreen 输入行、光标行、括号高亮、Markdown 行内代码与代码块以及审批 Syntax 预览仍绘制黑色背景的问题。
+
+### Changed
+
+- fullscreen App 根层使用终端原生 `ansi_default`，其余容器保持透明；Rich 字符级背景统一回到终端默认值，同时保留前景色、粗体、斜体、下划线、删除线和链接样式。
+
+### Compatibility
+
+- workspace schema v5、memory schema v3、config v2、portable archive v2、JSONL v2、CLI 退出码、权限、工具和网络范围均保持不变。
+
 ## [2.2.2] - 2026-07-23
 
 ### Added

@@ -17,6 +17,7 @@ from ...domain import ActionRecord, ApprovalDecision, SessionInfo
 from ...models import SELECTABLE_MODELS
 from ...permissions import PermissionMode
 from .presentation import present_action
+from .rendering import TransparentBackground
 
 
 class ContentScreen(ModalScreen[None]):
@@ -133,7 +134,14 @@ class ApprovalScreen(ModalScreen[ApprovalDecision]):
                 )
                 with VerticalScroll(classes="approval-preview"):
                     yield Static(
-                        Syntax(view.preview, lexer, word_wrap=True, theme="ansi_dark")
+                        TransparentBackground(
+                            Syntax(
+                                view.preview,
+                                lexer,
+                                word_wrap=True,
+                                theme="ansi_dark",
+                            )
+                        )
                     )
             with Horizontal(classes="dialog-actions"):
                 yield Button("No, reject", id="reject", variant="default")

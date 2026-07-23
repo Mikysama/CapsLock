@@ -70,6 +70,9 @@ _Result = TypeVar("_Result")
 
 
 CSS = """
+App {
+    background: ansi_default;
+}
 Screen {
     background: transparent;
     color: #DCE6F2;
@@ -160,6 +163,16 @@ Screen {
 #composer:focus {
     border: solid #8CB9DC;
 }
+#composer .text-area--cursor-line,
+#composer .text-area--cursor-gutter,
+#composer .text-area--matching-bracket {
+    background: transparent;
+}
+#composer .text-area--cursor {
+    background: transparent;
+    color: #DCE6F2;
+    text-style: underline;
+}
 #activity {
     height: 1;
     padding: 0 2;
@@ -236,7 +249,7 @@ class CapsLockApp(App[int]):
     ]
 
     def __init__(self, context: CliContext, *, status_enabled: bool = True) -> None:
-        super().__init__()
+        super().__init__(ansi_color=True)
         self.context = context
         self.agent = context.agent
         self.status_enabled = status_enabled
@@ -318,7 +331,14 @@ class CapsLockApp(App[int]):
         self._completion_values = []
         self._completion_items = []
         if text.startswith("/"):
-            await self._dispatch_command(text)
+            # Commands such as /model wait for a modal screen result.  Keeping
+            # that wait inside the App's message handler blocks the message
+            # pump that must pop the screen, leaving the selector frozen.
+            self.run_worker(
+                self._dispatch_command(text),
+                group="slash-command",
+                exclusive=True,
+            )
             return
         if self.agent.permission_mode is PermissionMode.ASK_FOR_APPROVAL:
             allowed = await self._modal_wait(
@@ -698,7 +718,7 @@ class _SessionPickerApp(App[str | None]):
     CSS = CSS
 
     def __init__(self, sessions: list[SessionInfo]) -> None:
-        super().__init__()
+        super().__init__(ansi_color=True)
         self.sessions = sessions
 
     def on_mount(self) -> None:

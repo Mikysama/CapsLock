@@ -1,6 +1,6 @@
 # CapsLock v2 开发者文档
 
-本目录记录 CapsLock v2 的架构、开发过程、兼容边界与发布验证。当前稳定版本为 `2.2.2`。
+本目录记录 CapsLock v2 的架构、开发过程、兼容边界与发布验证。当前稳定版本为 `2.2.3`。
 
 ## 文档入口
 
@@ -13,6 +13,7 @@
 - [v2.2.0 发布说明](../../releases/v2.2.0.md)：本机子 Agent 委派、隔离、验证和恢复边界。
 - [v2.2.1 发布说明](../../releases/v2.2.1.md)：默认 inline TUI、保留的 Textual fullscreen、透明主题和安全展示摘要。
 - [v2.2.2 发布说明](../../releases/v2.2.2.md)：repository/ports 分层解耦、组合根与运行时提取、共享前台控制器和 inline 命令树修复。
+- [v2.2.3 发布说明](../../releases/v2.2.3.md)：fullscreen 模态命令消息泵修复、终端默认背景和字符级透明渲染。
 
 ## 当前稳定边界
 
@@ -20,5 +21,6 @@
 - 模型、工具、动作、workflow 和记忆接口均为异步；公开 Agent 执行入口只有 `WorkspaceAgent.ask_stream()`。
 - workspace schema v5、memory schema v3、portable archive v2、JSONL schema v2 和 `config_version = 2` 是当前稳定协议。
 - 配置依赖图、Memory/Workflow repository、Lifecycle I/O/import merge、Action handler、子 Agent runner 与模型路由均使用显式窄接口；只有组合根可同时装配具体 storage、runtime 与 application。
+- fullscreen 中等待模态结果的斜杠命令运行在 Textual worker；根背景使用原生 `ansi_default`，Rich 内容通过只替换背景的渲染适配器保留全部字体样式。
 - 支持 Linux/macOS 与 Python 3.12；两个操作系统组合由发布 CI 验证。
 - 新弃用至少提前一个 minor 版本公告；2.0 已删除的接口不再提供静默兼容。

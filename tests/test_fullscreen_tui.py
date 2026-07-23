@@ -5,6 +5,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from rich.style import Style
+from rich.text import Text
 from textual.widgets import Static
 
 from capslock.cli.context import CliContext
@@ -13,11 +15,13 @@ from capslock.cli.commands import COMMANDS
 from capslock.cli.fullscreen_tui.app import CSS, CapsLockApp, run_fullscreen_tui
 from capslock.cli.fullscreen_tui.models import (
     MessageKind,
+    MessageViewModel,
     TuiState,
     reduce_event,
     toggle_details,
 )
 from capslock.cli.fullscreen_tui.presentation import present_action
+from capslock.cli.fullscreen_tui.rendering import TransparentBackground
 from capslock.cli.fullscreen_tui.screens import ApprovalScreen, ModelScreen
 from capslock.cli.fullscreen_tui.widgets import (
     CompletionBar,
@@ -134,6 +138,33 @@ def test_reducer_groups_read_tools_and_collapses_completed_reasoning() -> None:
     )
 
 
+def test_transparent_background_preserves_font_style() -> None:
+    console = make_console(width=40)
+    source_style = Style(
+        color="#AABBCC",
+        bgcolor="#000000",
+        bold=True,
+        dim=True,
+        italic=True,
+        underline=True,
+        strike=True,
+        link="https://example.test",
+    )
+    rendered = list(
+        console.render(TransparentBackground(Text("styled", style=source_style)))
+    )
+    style = next(segment.style for segment in rendered if segment.text == "styled")
+    assert style is not None
+    assert style.color == source_style.color
+    assert style.bold == source_style.bold
+    assert style.dim == source_style.dim
+    assert style.italic == source_style.italic
+    assert style.underline == source_style.underline
+    assert style.strike == source_style.strike
+    assert style.link == source_style.link
+    assert style.bgcolor is not None and style.bgcolor.is_default
+
+
 class _Sessions:
     def __init__(self, transcript: list[dict] | None = None) -> None:
         self.entries = transcript or []
@@ -211,6 +242,60 @@ def test_fullscreen_layout_at_supported_sizes(size: tuple[int, int]) -> None:
     asyncio.run(scenario())
 
 
+def test_fullscreen_composer_input_background_is_transparent() -> None:
+    async def scenario() -> None:
+        app = CapsLockApp(CliContext(make_console(), _Agent()))
+        async with app.run_test(size=(80, 24)) as pilot:
+            composer = app.query_one(Composer)
+            composer.load_text("user input")
+            composer.cursor_location = (0, 0)
+            await pilot.pause()
+
+            input_segments = [
+                segment for segment in composer.render_line(0) if segment.text.strip()
+            ]
+            assert input_segments
+            assert all(
+                segment.style is not None
+                and segment.style.bgcolor is not None
+                and segment.style.bgcolor.is_default
+                for segment in input_segments
+            )
+
+    asyncio.run(scenario())
+
+
+def test_fullscreen_markdown_character_backgrounds_are_transparent() -> None:
+    async def scenario() -> None:
+        app = CapsLockApp(CliContext(make_console(), _Agent()))
+        async with app.run_test(size=(80, 24)) as pilot:
+            message = MessageWidget(
+                MessageViewModel(
+                    id="styled-answer",
+                    kind=MessageKind.ASSISTANT,
+                    text="**bold** `inline`\n\n```python\nprint(1)\n```",
+                )
+            )
+            await app.screen.mount(message)
+            await pilot.pause()
+
+            segments = [
+                segment
+                for y in range(message.content_region.height)
+                for segment in message.render_line(y)
+                if segment.text.strip()
+            ]
+            assert segments
+            assert all(
+                segment.style is not None
+                and segment.style.bgcolor is not None
+                and segment.style.bgcolor.is_default
+                for segment in segments
+            )
+
+    asyncio.run(scenario())
+
+
 def test_fullscreen_submit_streams_answer_and_keeps_composer_fixed() -> None:
     events = [
         _event(AgentEventKind.QUEUED, {"status": "running"}, 1),
@@ -276,12 +361,13 @@ def test_fullscreen_model_command_uses_model_dialog() -> None:
         agent = _Agent()
         app = CapsLockApp(CliContext(make_console(), agent))
         async with app.run_test(size=(80, 24)) as pilot:
-            pending = asyncio.create_task(app._dispatch_command("/model"))
+            composer = app.query_one(Composer)
+            composer.load_text("/model")
+            await pilot.press("enter")
             await pilot.pause()
             assert isinstance(app.screen, ModelScreen)
 
             await pilot.press("down", "enter")
-            await pending
             await pilot.pause()
             assert agent.model == "deepseek-v4-pro"
             assert not isinstance(app.screen, ModelScreen)
@@ -357,6 +443,20 @@ def test_approval_escape_rejects_and_never_defaults_to_execute() -> None:
             await pilot.pause()
             assert isinstance(app.screen, ApprovalScreen)
             assert "do-not-show" not in app.export_screenshot()
+            preview = app.screen.query_one(".approval-preview Static", Static)
+            preview_segments = [
+                segment
+                for y in range(preview.content_region.height)
+                for segment in preview.render_line(y)
+                if segment.text.strip()
+            ]
+            assert preview_segments
+            assert all(
+                segment.style is not None
+                and segment.style.bgcolor is not None
+                and segment.style.bgcolor.is_default
+                for segment in preview_segments
+            )
             await pilot.press("escape")
             assert await pending is ApprovalDecision.REJECT
 
@@ -395,9 +495,23 @@ def test_fullscreen_tui_uses_alternate_screen_driver(
     assert options == {"mouse": True}
 
 
-def test_fullscreen_tui_uses_only_transparent_backgrounds() -> None:
+def test_fullscreen_tui_uses_only_terminal_default_or_transparent_backgrounds() -> None:
     background_rules = [
         line.strip() for line in CSS.splitlines() if "background:" in line
     ]
     assert background_rules
-    assert all(line.endswith("background: transparent;") for line in background_rules)
+    assert all(
+        line.endswith(("background: transparent;", "background: ansi_default;"))
+        for line in background_rules
+    )
+
+
+def test_fullscreen_tui_root_uses_terminal_default_background() -> None:
+    async def scenario() -> None:
+        app = CapsLockApp(CliContext(make_console(), _Agent()))
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            assert app.native_ansi_color
+            assert app.styles.background.ansi == -1
+
+    asyncio.run(scenario())
