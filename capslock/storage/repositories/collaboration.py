@@ -213,6 +213,13 @@ class CollaborationRepository(Repository):
         row = await self.one("SELECT * FROM agent_tasks WHERE id=?", (task_id,))
         return None if row is None else dict(row)
 
+    async def workspace(self, task_id: str) -> dict[str, Any] | None:
+        row = await self.one(
+            "SELECT path,retained,cleaned_at FROM agent_workspaces WHERE task_id=?",
+            (task_id,),
+        )
+        return None if row is None else dict(row)
+
     async def messages(self, task_id: str) -> list[dict[str, Any]]:
         rows = await self.all(
             "SELECT * FROM agent_messages WHERE task_id=? ORDER BY sequence", (task_id,)

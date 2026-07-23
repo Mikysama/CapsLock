@@ -11,7 +11,7 @@ from .views.memory import render_candidates, render_memories, render_memory
 
 
 async def memory_command(context: CliContext, text: str) -> None:
-    memory, console = context.agent.memory, context.console
+    memory, console = context.session.memory, context.console
     if memory is None:
         console.print("[warning]Memory is unavailable.[/]")
         return
@@ -100,7 +100,7 @@ async def _candidate(context: CliContext, arguments: list[str]) -> None:
     if len(arguments) < 2:
         raise ValueError("usage: /memory candidate <accept|reject|purge|show> <id>")
     operation, identifier = arguments[0], arguments[1]
-    memory = context.agent.memory
+    memory = context.session.memory
     if operation == "accept":
         render_memory(context.console, await memory.accept_candidate(identifier))
     elif operation == "reject":
@@ -117,7 +117,7 @@ async def _candidate(context: CliContext, arguments: list[str]) -> None:
 
 
 async def _embeddings(context: CliContext, arguments: list[str]) -> None:
-    memory = context.agent.memory
+    memory = context.session.memory
     if not arguments:
         view = await memory.settings()
         context.console.print(

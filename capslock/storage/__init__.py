@@ -1,4 +1,4 @@
-"""CapsLock v2 asynchronous persistence."""
+"""CapsLock asynchronous persistence."""
 
 from .async_database import IncompatibleDatabaseError, MemoryDatabase, WorkspaceDatabase
 from .memory_repositories import MemoryRepositories, workspace_key

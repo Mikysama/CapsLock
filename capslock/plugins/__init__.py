@@ -3,7 +3,8 @@
 from .manifest import (
     MANIFEST_VERSION,
     PROTOCOL_VERSION,
-    PluginManifestV1,
+    PluginManifest,
+    PluginCapabilities,
     PluginPermission,
     PluginToolSpec,
     PluginValidationError,
@@ -12,12 +13,14 @@ from .manifest import (
 from .client import PluginProcessClient, PluginProtocolError
 from .registry import InstalledPlugin, PluginRegistry, append_plugin_audit
 from .service import PluginService
+from .sandbox import SandboxUnavailableError
 
 __all__ = [
     "InstalledPlugin",
     "MANIFEST_VERSION",
     "PROTOCOL_VERSION",
-    "PluginManifestV1",
+    "PluginManifest",
+    "PluginCapabilities",
     "PluginPermission",
     "PluginProcessClient",
     "PluginProtocolError",
@@ -25,6 +28,7 @@ __all__ = [
     "PluginService",
     "PluginToolSpec",
     "PluginValidationError",
+    "SandboxUnavailableError",
     "append_plugin_audit",
     "load_plugin_manifest",
 ]

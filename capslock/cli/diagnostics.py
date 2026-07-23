@@ -1,4 +1,4 @@
-"""Async session management and v2 diagnostics."""
+"""Async session management and diagnostics."""
 
 from __future__ import annotations
 
@@ -11,11 +11,7 @@ from pathlib import Path
 
 from rich.console import Console
 
-from ..configuration import (
-    migrate_config,
-    read_config_document,
-    validate_config_document,
-)
+from ..configuration import read_config_document, validate_config_document
 from ..credentials import credential_status
 from ..layout import ProjectLayout
 from ..lifecycle import LifecycleService
@@ -165,7 +161,7 @@ async def doctor(
 ) -> int:
     diagnostics = [
         Diagnostic("ok", "workspace", "Workspace", str(workspace)),
-        Diagnostic("ok", "layout", "Layout", "v2 canonical"),
+        Diagnostic("ok", "layout", "Layout", "canonical"),
     ]
     config_valid = False
     if not layout.config.exists():
@@ -188,7 +184,7 @@ async def doctor(
                     item.code,
                     item.path,
                     item.message,
-                    item.code == "config_deprecated",
+                    False,
                 )
                 for item in issues
             )
@@ -382,11 +378,10 @@ def _database_diagnostics(
     elif version < expected_version:
         output.append(
             Diagnostic(
-                "warning",
-                "database_migration",
+                "error",
+                "database_schema",
                 label,
-                f"schema {version} will migrate to {expected_version}",
-                True,
+                f"schema={version}, expected {expected_version}",
             )
         )
     else:
@@ -419,13 +414,9 @@ def _credential_references(document: dict[str, object]) -> set[str]:
                 continue
             if provider.get("credential"):
                 references.add(str(provider["credential"]))
-            elif provider.get("api_key_env"):
-                references.add(f"env:{provider['api_key_env']}")
     web = document.get("web")
     if isinstance(web, dict) and web.get("tavily_credential"):
         references.add(str(web["tavily_credential"]))
-    if not providers:
-        references.add("env:CAPSLOCK_API_KEY")
     return references
 
 
@@ -443,25 +434,13 @@ async def _apply_fixes(
             )
             if answer.strip().casefold() not in {"y", "yes"}:
                 continue
-        if item.code == "config_deprecated":
-            migrate_config(layout.config, apply=True)
-        elif item.code == "private_permissions":
+        if item.code == "private_permissions":
             path = (
                 layout.user.memory
                 if item.subject == "Memory database"
                 else layout.local_mcp
             )
             path.chmod(0o600)
-        elif item.code == "database_migration":
-            if item.subject == "Workspace database":
-                repositories = await WorkspaceRepositories.open(
-                    layout.database, workspace=layout.workspace
-                )
-            else:
-                from ..storage.memory_repositories import MemoryRepositories
-
-                repositories = await MemoryRepositories.open(layout.user.memory)
-            await repositories.close()
         elif item.code == "lifecycle_incomplete":
             journal = layout.root / "state" / "lifecycle-journal.json"
             try:

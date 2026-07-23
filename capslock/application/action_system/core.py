@@ -169,9 +169,11 @@ class ActionCoordinator:
             level=assessment.level,
             rollback=assessment.rollback,
         )
-        requires_approval = self._skill_change(
-            record
-        ) or self.approvals.requires_approval(self.permission_mode, action_type)
+        requires_approval = (
+            record.request.get("force_manual_approval") is True
+            or self._skill_change(record)
+            or self.approvals.requires_approval(self.permission_mode, action_type)
+        )
         if requires_approval:
             if self.approval_authorizer is None:
                 return record

@@ -251,17 +251,17 @@ class CapsLockApp(App[int]):
     def __init__(self, context: CliContext, *, status_enabled: bool = True) -> None:
         super().__init__(ansi_color=True)
         self.context = context
-        self.agent = context.agent
+        self.agent_session = context.session
         self.status_enabled = status_enabled
         self.state = TuiState()
         self.session: SessionInfo | None = None
         self.controller = ForegroundRunController(
-            self.agent,
+            self.agent_session,
             consumer=self._controller_event,
             authorize_limit=self._authorize_limit,
         )
         self._authorizers = AuthorizerBindings(
-            self.agent,
+            self.agent_session,
             action_authorizer=self._authorize_action,
             budget_authorizer=self._authorize_budget,
         )
@@ -285,12 +285,9 @@ class CapsLockApp(App[int]):
         )
 
     async def on_mount(self) -> None:
-        self.session = await self.agent.repositories.sessions.require(
-            self.agent.session_id
-        )
-        transcript = await self.agent.repositories.sessions.transcript(
-            self.agent.session_id
-        )
+        queries = self.context.require_queries()
+        self.session = await queries.session(self.agent_session.session_id)
+        transcript = await queries.transcript(self.agent_session.session_id)
         self.state = history_state(transcript)
         if not transcript:
             self.state = add_system_message(
@@ -340,13 +337,13 @@ class CapsLockApp(App[int]):
                 exclusive=True,
             )
             return
-        if self.agent.permission_mode is PermissionMode.ASK_FOR_APPROVAL:
+        if self.agent_session.permission_mode is PermissionMode.ASK_FOR_APPROVAL:
             allowed = await self._modal_wait(
                 ConfirmScreen("Send this request?", text[:1000])
             )
             if not allowed:
                 return
-        item = await self.agent.enqueue(text)
+        item = await self.agent_session.enqueue(text)
         self._input_history.append(text)
         self._history_index = len(self._input_history)
         self.state = add_user_message(self.state, item.id, text)
@@ -482,7 +479,7 @@ class CapsLockApp(App[int]):
             return
         if name == "/permissions" and len(parts) == 1:
             selected = await self._modal_wait(
-                PermissionScreen(self.agent.permission_mode)
+                PermissionScreen(self.agent_session.permission_mode)
             )
             if selected is not None:
                 await self._capture_controller(
@@ -490,7 +487,7 @@ class CapsLockApp(App[int]):
                 )
             return
         if name == "/model" and len(parts) == 1:
-            selected = await self._modal_wait(ModelScreen(self.agent.model))
+            selected = await self._modal_wait(ModelScreen(self.agent_session.model))
             if selected is not None:
                 await self._capture_controller(actions.set_model, selected)
             return
@@ -505,7 +502,7 @@ class CapsLockApp(App[int]):
         await self._capture_command(text)
 
     async def _interactive_memory(self, parts: list[str]) -> bool:
-        memory = self.agent.memory
+        memory = self.agent_session.memory
         operation = parts[1] if len(parts) > 1 else "list"
         if operation == "add":
             if memory is None:
@@ -576,8 +573,8 @@ class CapsLockApp(App[int]):
         return False
 
     async def _approvals(self, parts: list[str]) -> None:
-        items = await self.agent.repositories.actions.list(
-            self.agent.session_id,
+        items = await self.context.require_queries().actions(
+            self.agent_session.session_id,
             statuses={
                 ActionStatus.PENDING,
                 ActionStatus.APPROVED,
@@ -602,7 +599,7 @@ class CapsLockApp(App[int]):
             )
             await self._sync()
             return
-        action = await self.agent.action_factory("cli").resolve(parts[2])
+        action = await self.agent_session.action_factory("cli").resolve(parts[2])
         decision = ApprovalDecision.REJECT
         if parts[1] == "approve":
             decision = await self._authorize_action(action)
@@ -630,7 +627,9 @@ class CapsLockApp(App[int]):
             file=buffer, width=max(48, self.size.width - 6), force_terminal=False
         )
         try:
-            result = await dispatch_slash_command(CliContext(console, self.agent), text)
+            result = await dispatch_slash_command(
+                CliContext(console, self.agent_session, self.context.queries), text
+            )
             if result == "exit":
                 self.exit(0)
                 return
@@ -645,7 +644,9 @@ class CapsLockApp(App[int]):
         console = make_console(
             file=buffer, width=max(48, self.size.width - 6), force_terminal=False
         )
-        await function(CliContext(console, self.agent), *args)
+        await function(
+            CliContext(console, self.agent_session, self.context.queries), *args
+        )
         content = buffer.getvalue().rstrip()
         if content:
             self.state = add_system_message(self.state, content)
@@ -660,7 +661,7 @@ class CapsLockApp(App[int]):
             candidates = [(value, descriptions[value]) for value in values]
         elif text.startswith("$") and " " not in text:
             prefix = text[1:].casefold()
-            for entry in self.agent.skills.entries():
+            for entry in self.agent_session.skills.entries():
                 if (
                     entry.enabled
                     and entry.error is None
@@ -696,18 +697,18 @@ class CapsLockApp(App[int]):
         width = self.size.width
         self.query_one(SessionHeader).update_header(
             title=self.session.title,
-            workspace=str(self.agent.workspace),
-            model=self.agent.model,
-            permission=self.agent.permission_mode.value,
+            workspace=str(self.agent_session.workspace),
+            model=self.agent_session.model,
+            permission=self.agent_session.permission_mode.value,
             width=width,
         )
         self.query_one(StatusBar).update_status(
             self.state,
-            model=self.agent.model,
-            permission=self.agent.permission_mode.value,
-            workspace=str(self.agent.workspace),
+            model=self.agent_session.model,
+            permission=self.agent_session.permission_mode.value,
+            workspace=str(self.agent_session.workspace),
             width=width,
-            context_limit=self.agent.max_context_messages,
+            context_limit=self.agent_session.context_budget.input_budget,
         )
         self.query_one(ActivityBar).update_state(
             self.state, enabled=self.status_enabled

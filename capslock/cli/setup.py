@@ -15,10 +15,9 @@ from rich.console import Console
 from ..configuration import (
     CONFIG_VERSION,
     Settings,
-    _atomic_write,
-    migrate_config,
     read_config_document,
     validate_config_document,
+    write_config,
 )
 from ..credentials import (
     credential_status,
@@ -77,8 +76,6 @@ async def initialize(console: Console, workspace: Path, args) -> int:
     if any(item.severity == "error" for item in issues):
         raise ValueError("generated configuration did not validate")
     if path.exists():
-        if read_config_document(path).get("config_version", 0) == 0:
-            migrate_config(path, apply=True)
         import tomlkit
 
         current = tomlkit.parse(path.read_text(encoding="utf-8"))
@@ -100,7 +97,7 @@ async def initialize(console: Console, workspace: Path, args) -> int:
         backup = path.parent / "state" / "backups" / f"config.before-init.{stamp}.toml"
         backup.parent.mkdir(parents=True, exist_ok=True)
         backup.write_bytes(path.read_bytes())
-    _atomic_write(path, content)
+    write_config(path, content)
     console.print(f"[success]Initialized:[/] {path}")
     settings = Settings.load(workspace, layout=layout)
     if args.check_provider:
@@ -141,7 +138,7 @@ async def config_validate(
             document = read_config_document(path)
             issues = [item.__dict__ for item in validate_config_document(document)]
             if not any(item["severity"] == "error" for item in issues):
-                # Exercise semantic parsing without modifying a v0 file.
+                # Exercise semantic parsing without modifying the source file.
                 pass
         except ValueError as exc:
             issues = [
@@ -164,19 +161,6 @@ async def config_validate(
     errors = any(item["severity"] == "error" for item in issues)
     warnings = any(item["severity"] == "warning" for item in issues)
     return 1 if errors or (strict and warnings) else 0
-
-
-async def config_migrate(console: Console, path: Path, *, apply: bool) -> int:
-    if not path.exists():
-        raise ValueError(f"configuration does not exist: {path}")
-    changed, result = migrate_config(path, apply=apply)
-    if not changed:
-        console.print("[success]Configuration is already current.[/]")
-    elif apply:
-        console.print(f"[success]Migrated configuration; backup:[/] {result}")
-    else:
-        console.print(result or "")
-    return 0
 
 
 async def credentials_command(console: Console, path: Path, args) -> int:
@@ -208,8 +192,6 @@ async def credentials_command(console: Console, path: Path, args) -> int:
                 reference = provider.get("credential")
                 if reference:
                     references.add(str(reference))
-                elif provider.get("api_key_env"):
-                    references.add(f"env:{provider['api_key_env']}")
         web = document.get("web")
         if isinstance(web, dict) and web.get("tavily_credential"):
             references.add(str(web["tavily_credential"]))

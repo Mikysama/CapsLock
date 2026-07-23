@@ -23,13 +23,13 @@ class EventAgent:
     def __init__(self, events: list[AgentEvent]) -> None:
         self.events = events
 
-    async def ask_stream(self, question: str):
+    async def run_stream(self, request):
         for item in self.events:
             yield item
 
 
 class BlockingAgent:
-    async def ask_stream(self, question: str):
+    async def run_stream(self, request):
         yield _event(AgentEventKind.THINKING)
         await asyncio.Event().wait()
 

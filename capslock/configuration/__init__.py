@@ -1,4 +1,4 @@
-"""Configuration document, migration, validation, and resolution pipeline."""
+"""Configuration document validation and resolution pipeline."""
 
 from .service import (
     CONFIG_VERSION,
@@ -6,6 +6,7 @@ from .service import (
     BudgetSettings,
     AgentSettings,
     CommandSettings,
+    ContextSettings,
     ConfigIssue,
     McpSettings,
     MemorySettings,
@@ -16,11 +17,10 @@ from .service import (
     RuntimeSettings,
     Settings,
     WebSettings,
-    _atomic_write,
     load_config_document,
-    migrate_config,
     read_config_document,
     validate_config_document,
+    write_config,
 )
 
 __all__ = [
@@ -29,6 +29,7 @@ __all__ = [
     "BudgetSettings",
     "AgentSettings",
     "CommandSettings",
+    "ContextSettings",
     "ConfigIssue",
     "McpSettings",
     "MemorySettings",
@@ -39,9 +40,8 @@ __all__ = [
     "RuntimeSettings",
     "Settings",
     "WebSettings",
-    "_atomic_write",
     "load_config_document",
-    "migrate_config",
     "read_config_document",
     "validate_config_document",
+    "write_config",
 ]

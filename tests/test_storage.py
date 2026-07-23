@@ -1,3 +1,5 @@
+"""Storage tests."""
+
 from __future__ import annotations
 
 import asyncio
@@ -144,20 +146,20 @@ def test_workspace_schema_enforces_json_and_required_run_work_item(
 def test_incompatible_database_is_rejected_without_mutation(tmp_path: Path) -> None:
     path = tmp_path / "old.sqlite3"
     connection = sqlite3.connect(path)
-    connection.execute("CREATE TABLE legacy(value TEXT)")
-    connection.execute("INSERT INTO legacy VALUES('keep me')")
+    connection.execute("CREATE TABLE sentinel(value TEXT)")
+    connection.execute("INSERT INTO sentinel VALUES('keep me')")
     connection.commit()
     connection.close()
     before = hashlib.sha256(path.read_bytes()).digest()
 
     async def scenario() -> None:
-        with pytest.raises(IncompatibleDatabaseError, match="move it to a backup"):
+        with pytest.raises(IncompatibleDatabaseError, match="schema is not supported"):
             await WorkspaceDatabase.open(path)
 
     asyncio.run(scenario())
     assert hashlib.sha256(path.read_bytes()).digest() == before
     with sqlite3.connect(path) as check:
-        assert check.execute("SELECT value FROM legacy").fetchone()[0] == "keep me"
+        assert check.execute("SELECT value FROM sentinel").fetchone()[0] == "keep me"
 
 
 def test_wrong_schema_version_and_cross_database_are_rejected(tmp_path: Path) -> None:
@@ -176,17 +178,14 @@ def test_wrong_schema_version_and_cross_database_are_rejected(tmp_path: Path) ->
     asyncio.run(scenario())
 
 
-def test_canonical_layout_and_legacy_layout_rejection(tmp_path: Path) -> None:
+def test_canonical_layout_ignores_unmanaged_files(tmp_path: Path) -> None:
     user = UserLayout(tmp_path / "home", tmp_path / "memory.sqlite3")
     layout = ProjectLayout.discover(tmp_path, user=user)
     assert layout.database == tmp_path / ".capslock" / "state" / "capslock.sqlite3"
-    assert layout.mode == "v2"
-
-    legacy = tmp_path / "capslock.toml"
-    legacy.write_text("[model]\n", encoding="utf-8")
-    with pytest.raises(LayoutConflict, match=str(legacy)):
-        ProjectLayout.discover(tmp_path, user=user)
-    assert legacy.read_text(encoding="utf-8") == "[model]\n"
+    unmanaged = tmp_path / "capslock.toml"
+    unmanaged.write_text("[model]\n", encoding="utf-8")
+    assert ProjectLayout.discover(tmp_path, user=user) == layout
+    assert unmanaged.read_text(encoding="utf-8") == "[model]\n"
 
 
 def test_layout_rejects_managed_symlinks(tmp_path: Path) -> None:
@@ -198,7 +197,7 @@ def test_layout_rejects_managed_symlinks(tmp_path: Path) -> None:
         ProjectLayout.discover(tmp_path, user=user)
 
 
-def test_v110_state_reopens_in_v2_without_schema_migration(tmp_path: Path) -> None:
+def test_current_state_reopens_without_mutation(tmp_path: Path) -> None:
     async def scenario() -> None:
         workspace_path = tmp_path / "workspace.sqlite3"
         memory_path = tmp_path / "memory.sqlite3"
@@ -207,7 +206,7 @@ def test_v110_state_reopens_in_v2_without_schema_migration(tmp_path: Path) -> No
         try:
             workspace_version = (await workspace.fetch_one("PRAGMA user_version"))[0]
             memory_version = (await memory.fetch_one("PRAGMA user_version"))[0]
-            assert workspace_version == WORKSPACE_SCHEMA_VERSION == 5
+            assert workspace_version == WORKSPACE_SCHEMA_VERSION == 6
             assert memory_version == MEMORY_SCHEMA_VERSION == 3
         finally:
             await workspace.close()
@@ -217,7 +216,9 @@ def test_v110_state_reopens_in_v2_without_schema_migration(tmp_path: Path) -> No
         workspace = await WorkspaceDatabase.open(workspace_path)
         memory = await MemoryDatabase.open(memory_path)
         try:
-            assert (await workspace.fetch_one("PRAGMA user_version"))[0] == 5
+            assert (
+                await workspace.fetch_one("PRAGMA user_version")
+            )[0] == WORKSPACE_SCHEMA_VERSION
             assert (await memory.fetch_one("PRAGMA user_version"))[0] == 3
         finally:
             await workspace.close()
@@ -226,7 +227,7 @@ def test_v110_state_reopens_in_v2_without_schema_migration(tmp_path: Path) -> No
     asyncio.run(scenario())
 
 
-def test_session_export_v2_includes_all_snapshot_tables(tmp_path: Path) -> None:
+def test_session_export_includes_all_snapshot_tables(tmp_path: Path) -> None:
     async def scenario() -> None:
         repositories = await WorkspaceRepositories.open(
             tmp_path / "state.sqlite3", workspace=tmp_path

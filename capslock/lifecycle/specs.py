@@ -24,6 +24,9 @@ WORKSPACE_IMPORT_SPECS = tuple(
         ("tasks", "id"),
         ("sources", "id"),
         ("tool_calls", "id"),
+        ("tool_invocations", "id"),
+        ("tool_artifacts", "id"),
+        ("context_compactions", "id"),
         ("citations", "id"),
         ("workspace_settings", "key"),
         ("skill_settings", "name"),
@@ -78,4 +81,7 @@ REFERENCE_FIELDS = {
     "extraction_id": "memory_extractions",
     "source_run_id": "runs",
     "task_id": "agent_tasks",
+    "invocation_id": "tool_invocations",
+    "source_compaction_id": "context_compactions",
+    "artifact_id": "tool_artifacts",
 }

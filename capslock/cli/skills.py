@@ -15,7 +15,7 @@ async def skills_command(context: CliContext, text: str) -> None:
     operation, arguments = (parts[1], parts[2:]) if len(parts) > 1 else ("list", [])
     try:
         if operation == "list":
-            entries = await asyncio.to_thread(context.agent.skills.entries)
+            entries = await asyncio.to_thread(context.session.skills.entries)
             output = table("Skill", "Scope", "Status", "Description")
             for entry in entries:
                 description = (
@@ -38,12 +38,12 @@ async def skills_command(context: CliContext, text: str) -> None:
         name = arguments[0]
         if operation in {"enable", "disable"}:
             enabled = operation == "enable"
-            await context.agent.repositories.settings.set_skill_enabled(name, enabled)
+            await context.session.set_skill_enabled(name, enabled)
             context.console.print(
                 f"[success]{name} {'enabled' if enabled else 'disabled'}.[/]"
             )
         elif operation in {"show", "validate"}:
-            package = await asyncio.to_thread(context.agent.skills.get, name)
+            package = await asyncio.to_thread(context.session.skills.get, name)
             context.console.print(
                 f"[primary.bold]{package.name}[/] [{package.scope}]\n{package.description}\n\n{package.instructions}"
             )

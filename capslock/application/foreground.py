@@ -10,6 +10,7 @@ from enum import StrEnum
 from typing import Any
 
 from ..domain import AgentEvent, MemoryScope, RunMode, WorkItemStatus
+from ..runtime import RunRequest
 
 
 class ControllerEventKind(StrEnum):
@@ -37,29 +38,29 @@ class AuthorizerBindings:
 
     def __init__(
         self,
-        agent: Any,
+        session: Any,
         *,
         action_authorizer=None,
         budget_authorizer=None,
     ) -> None:
-        self.agent = agent
+        self.session = session
         self.action_authorizer = action_authorizer
         self.budget_authorizer = budget_authorizer
 
     async def __aenter__(self) -> "AuthorizerBindings":
-        budget_setter = getattr(self.agent.chat_model, "set_budget_authorizer", None)
+        budget_setter = getattr(self.session.chat_model, "set_budget_authorizer", None)
         if callable(budget_setter):
             budget_setter(self.budget_authorizer)
-        action_setter = getattr(self.agent, "set_action_authorizer", None)
+        action_setter = getattr(self.session, "set_action_authorizer", None)
         if callable(action_setter):
             action_setter(self.action_authorizer)
         return self
 
     async def __aexit__(self, exc_type, exc, traceback) -> None:
-        budget_setter = getattr(self.agent.chat_model, "set_budget_authorizer", None)
+        budget_setter = getattr(self.session.chat_model, "set_budget_authorizer", None)
         if callable(budget_setter):
             budget_setter(None)
-        action_setter = getattr(self.agent, "set_action_authorizer", None)
+        action_setter = getattr(self.session, "set_action_authorizer", None)
         if callable(action_setter):
             action_setter(None)
 
@@ -67,12 +68,12 @@ class AuthorizerBindings:
 class ForegroundRunController:
     def __init__(
         self,
-        agent: Any,
+        session: Any,
         *,
         consumer: ControllerConsumer,
         authorize_limit=None,
     ) -> None:
-        self.agent = agent
+        self.session = session
         self.consumer = consumer
         self.authorize_limit = authorize_limit
         self.queue: asyncio.Queue[tuple[str, str, str | None] | None] = asyncio.Queue()
@@ -86,7 +87,7 @@ class ForegroundRunController:
             )
 
     async def submit(self, question: str):
-        item = await self.agent.enqueue(question)
+        item = await self.session.enqueue(question)
         await self.enqueue_item(item.id, item.question)
         return item
 
@@ -101,19 +102,15 @@ class ForegroundRunController:
         await self.consumer(ControllerEvent(ControllerEventKind.QUEUED, item_id))
 
     async def retry(self, prefix: str):
-        run = await self.agent.repositories.runs.retryable(
-            self.agent.session_id, prefix
-        )
-        item = await self.agent.enqueue(
+        run = await self.session.retryable_run(prefix)
+        item = await self.session.enqueue(
             run.question, parent_work_item_id=run.work_item_id
         )
         await self.enqueue_item(item.id, item.question, run.id)
         return item, run
 
     async def start_queued(self, prefix: str):
-        item = await self.agent.repositories.work_items.require(prefix)
-        if item.session_id != self.agent.session_id:
-            raise ValueError("work item does not belong to this session")
+        item = await self.session.queued_work_item(prefix)
         if item.status is not WorkItemStatus.QUEUED:
             raise ValueError("only queued work can be started")
         await self.enqueue_item(item.id, item.question)
@@ -167,12 +164,14 @@ class ForegroundRunController:
                 )
 
     async def _run(self, item_id: str, question: str, resume_from: str | None) -> None:
-        async for event in self.agent.ask_stream(
-            question,
-            work_item_id=item_id,
-            resume_from_run_id=resume_from,
-            mode=RunMode.INTERACTIVE,
-            authorize_limit=self.authorize_limit,
+        async for event in self.session.run_stream(
+            RunRequest(
+                question=question,
+                work_item_id=item_id,
+                resume_from_run_id=resume_from,
+                mode=RunMode.INTERACTIVE,
+                authorize_limit=self.authorize_limit,
+            )
         ):
             await self.consumer(
                 ControllerEvent(
@@ -183,7 +182,7 @@ class ForegroundRunController:
             )
 
     async def _delete_empty_session(self) -> None:
-        memory = self.agent.memory
+        memory = self.session.memory
         if memory is not None:
             try:
                 if await memory.list(
@@ -194,4 +193,4 @@ class ForegroundRunController:
                     return
             except Exception:
                 return
-        await self.agent.repositories.sessions.delete_if_empty(self.agent.session_id)
+        await self.session.delete_if_empty()

@@ -197,16 +197,27 @@ class _Skills:
         return []
 
 
+class _Queries:
+    def __init__(self, sessions: _Sessions | None = None) -> None:
+        self.sessions = sessions or _Sessions()
+
+    async def session(self, session_id: str):
+        return await self.sessions.require(session_id)
+
+    async def transcript(self, session_id: str) -> list[dict]:
+        return await self.sessions.transcript(session_id)
+
+
 class _Agent:
     session_id = "s" * 32
     workspace = Path(".")
     model = "test-model"
     permission_mode = PermissionMode.APPROVE_FOR_ME
     memory = None
-    max_context_messages = 24
+    context_budget = SimpleNamespace(input_budget=128_000)
 
     def __init__(self, events: list[AgentEvent] | None = None) -> None:
-        self.repositories = SimpleNamespace(sessions=_Sessions())
+        self.queries = _Queries()
         self.chat_model = _Model()
         self.skills = _Skills()
         self.events = events or []
@@ -224,7 +235,10 @@ class _Agent:
         self.model = selectable_model(value)
         return self.model
 
-    async def ask_stream(self, question: str, **kwargs):
+    async def delete_if_empty(self) -> bool:
+        return await self.queries.sessions.delete_if_empty(self.session_id)
+
+    async def run_stream(self, request):
         for item in self.events:
             yield item
 
@@ -383,7 +397,7 @@ def test_long_transcript_only_mounts_latest_page() -> None:
 
     async def scenario() -> None:
         agent = _Agent()
-        agent.repositories.sessions = _Sessions(transcript)
+        agent.queries.sessions = _Sessions(transcript)
         app = CapsLockApp(CliContext(make_console(), agent))
         async with app.run_test(size=(80, 24)) as pilot:
             await pilot.pause()
@@ -402,7 +416,7 @@ def test_new_stream_content_does_not_snap_scrolled_transcript_to_bottom() -> Non
 
     async def scenario() -> None:
         agent = _Agent()
-        agent.repositories.sessions = _Sessions(transcript)
+        agent.queries.sessions = _Sessions(transcript)
         app = CapsLockApp(CliContext(make_console(), agent))
         async with app.run_test(size=(80, 24)) as pilot:
             view = app.query_one(TranscriptView)

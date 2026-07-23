@@ -1,4 +1,4 @@
-"""Async v2 session export and deletion."""
+"""Async session export and deletion."""
 
 from __future__ import annotations
 

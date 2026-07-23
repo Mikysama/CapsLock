@@ -77,4 +77,6 @@ def event(row) -> AgentEvent:
         str(row["work_item_id"]),
         AgentEventKind(row["event_kind"]),
         json.loads(row["payload_json"]),
+        str(row["event_id"]),
+        str(row["trace_id"]),
     )

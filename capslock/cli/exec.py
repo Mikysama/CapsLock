@@ -1,4 +1,4 @@
-"""Non-interactive v2 execution and JSONL rendering."""
+"""Non-interactive execution and JSONL rendering."""
 
 from __future__ import annotations
 
@@ -8,11 +8,12 @@ import sys
 from typing import TextIO
 
 from ..domain import AgentEvent, AgentEventKind, RunLimits, RunMode
+from ..runtime import RunRequest
 from ..status import AgentStatus, status_for_event
 from .context import CliContext
 from .status import AsyncStatusRenderer
 
-EXEC_EVENT_SCHEMA_VERSION = 2
+EXEC_EVENT_SCHEMA_VERSION = 3
 APPROVAL_REQUIRED_EXIT = 3
 GOVERNANCE_STOP_EXIT = 4
 
@@ -44,16 +45,16 @@ async def run_exec(
         )
         await renderer.start()
     try:
-        stream = (
-            context.agent.ask_stream(prompt, mode=RunMode.EXEC, limits=limits)
-            if limits is not None or hasattr(context.agent, "default_limits")
-            else context.agent.ask_stream(prompt)
+        stream = context.session.run_stream(
+            RunRequest(question=prompt, mode=RunMode.EXEC, limits=limits)
         )
         async for event in stream:
             if json_events:
                 record = {
                     "schema_version": EXEC_EVENT_SCHEMA_VERSION,
                     "sequence": event.sequence,
+                    "event_id": event.event_id,
+                    "trace_id": event.trace_id,
                     "timestamp": event.timestamp,
                     "session_id": event.session_id,
                     "work_item_id": event.work_item_id,

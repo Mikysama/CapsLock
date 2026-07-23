@@ -11,7 +11,6 @@ from .action import (
 from .collaboration import CollaborationPort
 from .memory import MemoryPort, SkillPort, SkillRegistryPort
 from .model import GovernancePort, ModelAuditPort
-from .services import WorkspaceServicesPort
 from .workflow import (
     RunJournal,
     RunJournalRepositoryPort,
@@ -46,5 +45,4 @@ __all__ = [
     "WorkItemRepositoryPort",
     "WorkflowPort",
     "WorkflowUnitOfWorkPort",
-    "WorkspaceServicesPort",
 ]

@@ -13,8 +13,8 @@ from typing import Any
 
 
 MANIFEST_NAME = "capslock-plugin.toml"
-MANIFEST_VERSION = 1
-PROTOCOL_VERSION = 1
+MANIFEST_VERSION = 3
+PROTOCOL_VERSION = 3
 NAME_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 TOOL_PATTERN = re.compile(r"^[a-z0-9]+(?:_[a-z0-9]+)*$")
 MAX_PACKAGE_BYTES = 20 * 1024 * 1024
@@ -34,6 +34,50 @@ class PluginPermission(StrEnum):
     CREDENTIALS = "credentials"
 
 
+PROCESS_TEMPLATES = frozenset(
+    {"pytest", "npm_test", "npm_build", "ruff_check", "prettier_check"}
+)
+
+
+@dataclass(frozen=True)
+class PluginCapabilities:
+    workspace_read: tuple[str, ...] = ()
+    workspace_write: tuple[str, ...] = ()
+    network_hosts: tuple[str, ...] = ()
+    process_templates: tuple[str, ...] = ()
+    credentials: tuple[str, ...] = ()
+
+    @property
+    def permissions(self) -> frozenset[PluginPermission]:
+        values: set[PluginPermission] = set()
+        if self.workspace_read:
+            values.add(PluginPermission.WORKSPACE_READ)
+        if self.workspace_write:
+            values.add(PluginPermission.WORKSPACE_WRITE)
+        if self.network_hosts:
+            values.add(PluginPermission.NETWORK)
+        if self.process_templates:
+            values.add(PluginPermission.PROCESS)
+        if self.credentials:
+            values.add(PluginPermission.CREDENTIALS)
+        return frozenset(values)
+
+    def as_dict(self) -> dict[str, list[str]]:
+        return {
+            "workspace_read": list(self.workspace_read),
+            "workspace_write": list(self.workspace_write),
+            "network_hosts": list(self.network_hosts),
+            "process_templates": list(self.process_templates),
+            "credentials": list(self.credentials),
+        }
+
+    def contains(self, grant: "PluginCapabilities") -> bool:
+        return all(
+            set(getattr(grant, field)).issubset(getattr(self, field))
+            for field in self.as_dict()
+        )
+
+
 @dataclass(frozen=True)
 class PluginToolSpec:
     name: str
@@ -45,21 +89,25 @@ class PluginToolSpec:
 
 
 @dataclass(frozen=True)
-class PluginManifestV1:
+class PluginManifest:
     root: Path
     name: str
     version: str
     description: str
     entrypoint: tuple[str, ...]
     tools: tuple[PluginToolSpec, ...]
-    permissions: frozenset[PluginPermission]
+    capabilities: PluginCapabilities
     digest: str
     requires_capslock: str | None = None
     manifest_version: int = MANIFEST_VERSION
     protocol_version: int = PROTOCOL_VERSION
 
+    @property
+    def permissions(self) -> frozenset[PluginPermission]:
+        return self.capabilities.permissions
 
-def load_plugin_manifest(root: Path) -> PluginManifestV1:
+
+def load_plugin_manifest(root: Path) -> PluginManifest:
     root = root.absolute()
     if root.is_symlink() or not root.is_dir():
         raise PluginValidationError(
@@ -83,7 +131,7 @@ def load_plugin_manifest(root: Path) -> PluginManifestV1:
         "description",
         "requires_capslock",
         "entrypoint",
-        "permissions",
+        "capabilities",
         "tools",
     }
     unknown = sorted(set(document) - allowed)
@@ -136,17 +184,7 @@ def load_plugin_manifest(root: Path) -> PluginManifestV1:
         raise PluginValidationError(
             f"plugin entrypoint does not exist: {entrypoint[0]}"
         )
-    permissions_raw = document.get("permissions", [])
-    if not isinstance(permissions_raw, list) or not all(
-        isinstance(item, str) for item in permissions_raw
-    ):
-        raise PluginValidationError("plugin permissions must be a string array")
-    try:
-        permissions = frozenset(PluginPermission(item) for item in permissions_raw)
-    except ValueError as exc:
-        raise PluginValidationError(
-            f"unsupported plugin permission: {exc.args[0]}"
-        ) from exc
+    capabilities = _capabilities(document.get("capabilities", {}))
     tools_raw = document.get("tools")
     if not isinstance(tools_raw, list) or not tools_raw:
         raise PluginValidationError("plugin must declare at least one tool")
@@ -176,14 +214,14 @@ def load_plugin_manifest(root: Path) -> PluginManifestV1:
         ):
             raise PluginValidationError(f"invalid plugin tool declaration: {tool_name}")
         tools.append(PluginToolSpec(tool_name, tool_description, parameters))
-    return PluginManifestV1(
+    return PluginManifest(
         root=root,
         name=name,
         version=version,
         description=description,
         entrypoint=entrypoint,
         tools=tuple(tools),
-        permissions=permissions,
+        capabilities=capabilities,
         digest=_digest(root, files),
         requires_capslock=_optional_string(document, "requires_capslock"),
         manifest_version=manifest_version,
@@ -256,3 +294,49 @@ def _integer(document: dict[str, Any], key: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool):
         raise PluginValidationError(f"plugin manifest field {key} must be an integer")
     return value
+
+
+def _capabilities(value: object) -> PluginCapabilities:
+    if not isinstance(value, dict):
+        raise PluginValidationError("plugin capabilities must be a table")
+    allowed = {
+        "workspace_read",
+        "workspace_write",
+        "network_hosts",
+        "process_templates",
+        "credentials",
+    }
+    unknown = sorted(set(value) - allowed)
+    if unknown:
+        raise PluginValidationError(f"unsupported plugin capability: {unknown[0]}")
+
+    def strings(name: str) -> tuple[str, ...]:
+        items = value.get(name, [])
+        if not isinstance(items, list) or not all(
+            isinstance(item, str) and item for item in items
+        ):
+            raise PluginValidationError(f"capabilities.{name} must be a string array")
+        if len(set(items)) != len(items):
+            raise PluginValidationError(f"capabilities.{name} contains duplicates")
+        return tuple(items)
+
+    read, write = strings("workspace_read"), strings("workspace_write")
+    for path in (*read, *write):
+        pure = PurePosixPath(path)
+        if pure.is_absolute() or ".." in pure.parts or path.startswith("~"):
+            raise PluginValidationError("workspace capability paths must be relative")
+    hosts = strings("network_hosts")
+    for host in hosts:
+        if not re.fullmatch(r"(?:\*\.)?[A-Za-z0-9.-]+(?::[1-9]\d{0,4})?", host):
+            raise PluginValidationError(f"invalid network capability host: {host}")
+    templates = strings("process_templates")
+    unsupported = sorted(set(templates) - PROCESS_TEMPLATES)
+    if unsupported:
+        raise PluginValidationError(
+            f"unsupported process template: {unsupported[0]}"
+        )
+    credentials = strings("credentials")
+    for name in credentials:
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,127}", name):
+            raise PluginValidationError(f"invalid credential capability name: {name}")
+    return PluginCapabilities(read, write, hosts, templates, credentials)

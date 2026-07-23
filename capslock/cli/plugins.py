@@ -19,7 +19,13 @@ async def plugin_command(console: Console, layout: ProjectLayout, args) -> int:
             console.print("No plugins installed.")
             return 0
         for entry in entries:
-            state = "enabled" if entry.enabled else "disabled"
+            state = (
+                "trusted-native"
+                if entry.enabled and entry.trusted_native
+                else "sandboxed"
+                if entry.enabled
+                else "disabled"
+            )
             console.print(
                 f"[bold]{entry.manifest.name}[/] {entry.manifest.version} "
                 f"[{state}] digest={entry.manifest.digest[:12]}"
@@ -47,10 +53,21 @@ async def plugin_command(console: Console, layout: ProjectLayout, args) -> int:
         return 0
     entry = service.registry.get(args.name, require_enabled=False)
     _print_manifest(console, entry.manifest, enabled=entry.enabled)
+    if (
+        command == "enable"
+        and bool(getattr(args, "trusted_native", False))
+        and not args.yes
+    ):
+        console.print(
+            "[warning]Trusted-native enable requires both --trusted-native and --yes.[/]"
+        )
+        return 3
     if not _confirmed(console, args.yes, f"{command} this plugin"):
         return 3
     if command == "enable":
-        service.enable(args.name)
+        service.enable(
+            args.name, trusted_native=bool(getattr(args, "trusted_native", False))
+        )
     elif command == "disable":
         service.disable(args.name)
     elif command == "uninstall":
@@ -69,13 +86,11 @@ def _print_manifest(console: Console, manifest, *, enabled: bool) -> None:
     console.print(f"Digest: {manifest.digest}")
     console.print(f"State: {'enabled' if enabled else 'disabled'}")
     console.print(
-        "Permissions: "
-        + (", ".join(sorted(item.value for item in manifest.permissions)) or "none")
+        "Capabilities: "
+        + str(manifest.capabilities.as_dict())
     )
     console.print("Tools: " + ", ".join(item.name for item in manifest.tools))
-    console.print(
-        "[warning]Local plugins are trusted code; process isolation is not a malicious-code sandbox.[/]"
-    )
+    console.print("Execution: OS sandbox with host-brokered capabilities")
 
 
 def _confirmed(console: Console, yes: bool, operation: str) -> bool:

@@ -19,6 +19,7 @@ from ..domain import (
 from ..ports import GovernancePort, ModelAuditPort, RunJournal, WorkflowPort
 from ..security import redact
 from .governance import RunGovernor
+from .events import RunEventBus
 from .model import ChatModel, ModelRunContext, ModelRunSession, open_model_session
 
 
@@ -103,21 +104,24 @@ class RunEventPublisher:
         self.journal = journal
         self.event = event
         self.consumer = consumer
+        self.bus = RunEventBus(
+            run_id=run_id,
+            journal=journal,
+            consumer=consumer,
+            diagnostic=event,
+        )
 
     async def publish(self, event: AgentEvent) -> None:
-        self.event(
-            "workflow_event",
-            run_id=event.run_id,
-            work_item_id=event.work_item_id,
-            event=event.kind.value,
-            data=event.data,
-        )
-        await self.consumer(event)
+        await self.bus.publish_persisted(event)
 
     async def emit(self, kind: AgentEventKind, data: dict[str, Any]) -> None:
-        await self.publish(
-            await self.journal.append_event(self.run_id, kind, redact(data))
-        )
+        await self.bus.emit(kind, redact(data))
+
+    async def flush(self) -> None:
+        await self.bus.flush()
+
+    async def close(self) -> None:
+        await self.bus.close()
 
 
 @dataclass(frozen=True)

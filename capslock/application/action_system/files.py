@@ -27,8 +27,29 @@ class FileActionHandler:
         self, action_type: ActionType, payload: dict[str, Any]
     ) -> ActionProposal:
         if action_type is ActionType.FILE_EDIT:
+            if "replace_content" in payload:
+                return await asyncio.to_thread(self._propose_replace, payload)
             return await asyncio.to_thread(self._propose_edit, payload)
         return await asyncio.to_thread(self._propose_create, payload)
+
+    def _propose_replace(self, payload: dict[str, Any]) -> ActionProposal:
+        path_text = _string(payload, "path")
+        after = _string(payload, "replace_content")
+        path = self.policy.writable_file(path_text)
+        before = path.read_text(encoding="utf-8")
+        self.policy.validate_write_content(after)
+        relative = str(path.relative_to(self.policy.root))
+        return ActionProposal(
+            str(payload.get("summary") or "Replace file contents"),
+            {
+                "path": relative,
+                "operation": "edit",
+                "expected_hash": content_hash(before),
+                "before_content": before,
+                "after_content": after,
+                "diff": make_diff(Path(relative), before, after),
+            },
+        )
 
     def _propose_edit(self, payload: dict[str, Any]) -> ActionProposal:
         path_text = _string(payload, "path")

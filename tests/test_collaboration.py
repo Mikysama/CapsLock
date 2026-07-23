@@ -1,3 +1,5 @@
+"""Child-agent collaboration tests."""
+
 from __future__ import annotations
 
 import asyncio
@@ -20,7 +22,7 @@ from capslock.collaboration import (
 )
 from capslock.storage.repositories import WorkspaceRepositories
 from capslock.tooling.async_catalog import workspace_tools
-from capslock.tooling.async_core import RunContext
+from capslock.tooling.async_core import ExecutionContext
 from capslock.tooling.collaboration import _reserve_parent_budget
 from capslock.domain import BudgetSnapshot, RunLimits, RunMode
 from capslock.policy import WorkspacePolicy
@@ -48,7 +50,7 @@ def test_parent_budget_is_divided_before_child_launch(tmp_path: Path) -> None:
                 tool_rounds=2,
             )
 
-    context = RunContext(
+    context = ExecutionContext(
         session_id="session",
         run_id="parent",
         policy=WorkspacePolicy(tmp_path),
@@ -290,14 +292,14 @@ def test_cancel_queued_child_does_not_cancel_siblings(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
-def test_fresh_workspace_uses_schema_v5(tmp_path: Path) -> None:
+def test_fresh_workspace_contains_collaboration_tables(tmp_path: Path) -> None:
     async def scenario() -> None:
         repositories = await WorkspaceRepositories.open(
             tmp_path / "state.sqlite3", workspace=tmp_path
         )
         try:
             version = await repositories.database.fetch_one("PRAGMA user_version")
-            assert int(version[0]) == 5
+            assert int(version[0]) == 6
             tables = await repositories.database.fetch_all(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'agent_%'"
             )
@@ -314,7 +316,7 @@ def test_fresh_workspace_uses_schema_v5(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
-def test_schema_v4_is_backed_up_and_migrated_to_v5(tmp_path: Path) -> None:
+def test_non_current_collaboration_schema_is_rejected(tmp_path: Path) -> None:
     async def scenario() -> None:
         path = tmp_path / "state.sqlite3"
         repositories = await WorkspaceRepositories.open(path, workspace=tmp_path)
@@ -332,13 +334,8 @@ def test_schema_v4_is_backed_up_and_migrated_to_v5(tmp_path: Path) -> None:
         connection.execute("PRAGMA user_version=4")
         connection.commit()
         connection.close()
-        repositories = await WorkspaceRepositories.open(path, workspace=tmp_path)
-        try:
-            version = await repositories.database.fetch_one("PRAGMA user_version")
-            assert int(version[0]) == 5
-            assert list(path.parent.joinpath("backups").glob("*.schema-4.*.bak"))
-        finally:
-            await repositories.close()
+        with pytest.raises(Exception, match="schema is not supported"):
+            await WorkspaceRepositories.open(path, workspace=tmp_path)
 
     asyncio.run(scenario())
 

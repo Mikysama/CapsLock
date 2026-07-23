@@ -1,3 +1,5 @@
+"""Action system tests."""
+
 from __future__ import annotations
 
 import asyncio
@@ -13,6 +15,7 @@ from capslock.application.action_system import (
     ActionCoordinator,
     ActionRunState,
     CommandActionHandler,
+    CredentialActionHandler,
     FileActionHandler,
     McpActionHandler,
     WebActionHandler,
@@ -89,6 +92,43 @@ def test_required_file_action_is_approved_and_executed_inline(tmp_path: Path) ->
         finally:
             await repositories.close()
 
+    asyncio.run(scenario())
+
+
+def test_named_credential_requires_approval_and_never_persists_secret(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        repositories = await WorkspaceRepositories.open(
+            tmp_path / "credential.sqlite3", workspace=tmp_path
+        )
+        try:
+            async def approve(action):
+                assert action.request["name"] == "PLUGIN_TOKEN"
+                assert "secret-value" not in str(action)
+                return ApprovalDecision.APPROVE
+
+            session, prepared = await workspace_run(repositories)
+            actions = coordinator(
+                repositories,
+                session.id,
+                prepared.run.id,
+                [CredentialActionHandler()],
+                mode=PermissionMode.FULL_ACCESS,
+                approval_authorizer=approve,
+            )
+            record = await actions.propose(
+                ActionType.CREDENTIAL_ACCESS, name="PLUGIN_TOKEN"
+            )
+            assert record.status is ActionStatus.COMPLETED
+            assert record.result == {"name": "PLUGIN_TOKEN", "delivered": True}
+            assert "secret-value" not in str(record)
+            stored = await repositories.actions.require(record.id)
+            assert "secret-value" not in str(stored)
+        finally:
+            await repositories.close()
+
+    monkeypatch.setenv("PLUGIN_TOKEN", "secret-value")
     asyncio.run(scenario())
 
 

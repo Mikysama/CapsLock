@@ -77,7 +77,7 @@ class ChildAgentRunner:
                 async def authorize_child(action):
                     return await self._authorize(contract, capability_policy, action)
 
-                child.agent.set_action_authorizer(authorize_child)
+                child.session.set_action_authorizer(authorize_child)
             prompt = self._prompt(contract)
             answer = ""
             usage: dict[str, object] = {}
@@ -93,10 +93,10 @@ class ChildAgentRunner:
                 max_tokens=child_budget.max_run_tokens,
                 max_budget_usd=child_budget.max_run_usd,
             )
-            async for event in child.agent.ask_stream(
-                prompt,
-                mode=RunMode.EXEC,
-                limits=limits,
+            from ..runtime.engine import RunRequest
+
+            async for event in child.session.run_stream(
+                RunRequest(question=prompt, mode=RunMode.EXEC, limits=limits)
             ):
                 child_run_id = event.run_id
                 if event.kind is AgentEventKind.COMPLETED:
@@ -112,12 +112,10 @@ class ChildAgentRunner:
                     raise RuntimeError(
                         str(event.data.get("error", "child Agent failed"))
                     )
-            budget = await child.repositories.governance.latest_for_session(
-                child.agent.session_id
-            )
+            budget = await child.queries.latest_budget(child.session.session_id)
             output = parse_child_output(answer, contract)
-            actions = await child.repositories.actions.list(
-                child.agent.session_id,
+            actions = await child.queries.actions(
+                child.session.session_id,
                 run_id=child_run_id or None,
                 types={ActionType.COMMAND},
             )

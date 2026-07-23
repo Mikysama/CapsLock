@@ -1,8 +1,8 @@
-"""Fresh v2 workspace and user-memory schemas."""
+"""Fresh workspace and user-memory schemas."""
 
 WORKSPACE_APPLICATION_ID = 0x434C4B32  # CLK2
 MEMORY_APPLICATION_ID = 0x434C4D32  # CLM2
-WORKSPACE_SCHEMA_VERSION = 5
+WORKSPACE_SCHEMA_VERSION = 6
 MEMORY_SCHEMA_VERSION = 3
 
 WORKSPACE_SCHEMA = """
@@ -90,6 +90,8 @@ CREATE TABLE run_events (
   id INTEGER PRIMARY KEY,
   run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
   sequence INTEGER NOT NULL CHECK(sequence>=1),
+  event_id TEXT NOT NULL UNIQUE,
+  trace_id TEXT NOT NULL,
   event_kind TEXT NOT NULL CHECK(event_kind IN ('queued','thinking','text_delta','tool_running','tool_completed','budget_updated','limit_reached','budget_extended','waiting_approval','completed','failed','cancelled','stopped')),
   payload_json TEXT NOT NULL CHECK(json_valid(payload_json)),
   created_at TEXT NOT NULL,
@@ -108,7 +110,7 @@ CREATE TABLE actions (
   id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
   run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-  action_type TEXT NOT NULL CHECK(action_type IN ('file_edit','file_create','command','web_search','web_fetch','mcp_connect','mcp_call')),
+  action_type TEXT NOT NULL CHECK(action_type IN ('file_edit','file_create','command','web_search','web_fetch','mcp_connect','mcp_call','credential_access')),
   status TEXT NOT NULL CHECK(status IN ('pending','approved','running','completed','failed','rejected','cancelled')),
   result_kind TEXT,
   summary TEXT NOT NULL,
@@ -160,6 +162,59 @@ CREATE TABLE tool_calls (
   result_summary TEXT NOT NULL,
   duration_ms INTEGER NOT NULL CHECK(duration_ms>=0)
 ) STRICT;
+CREATE TABLE tool_invocations (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  sequence INTEGER NOT NULL CHECK(sequence>=1),
+  tool_call_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  spec_json TEXT NOT NULL CHECK(json_valid(spec_json)),
+  capabilities_json TEXT NOT NULL CHECK(json_valid(capabilities_json)),
+  arguments_json TEXT NOT NULL CHECK(json_valid(arguments_json)),
+  status TEXT NOT NULL CHECK(status IN ('validating','authorizing','running','completed','failed','cancelled')),
+  result_preview TEXT,
+  artifact_id TEXT,
+  error_code TEXT,
+  started_at TEXT NOT NULL,
+  finished_at TEXT,
+  duration_ms INTEGER CHECK(duration_ms IS NULL OR duration_ms>=0),
+  UNIQUE(run_id,sequence)
+) STRICT;
+CREATE INDEX idx_tool_invocations_run ON tool_invocations(run_id,sequence);
+CREATE TABLE tool_artifacts (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  invocation_id TEXT REFERENCES tool_invocations(id) ON DELETE SET NULL,
+  sha256 TEXT NOT NULL,
+  size_bytes INTEGER NOT NULL CHECK(size_bytes>=0 AND size_bytes<=5242880),
+  media_type TEXT NOT NULL,
+  relative_path TEXT NOT NULL,
+  preview TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(session_id,sha256)
+) STRICT;
+CREATE INDEX idx_tool_artifacts_session ON tool_artifacts(session_id,created_at);
+CREATE TABLE context_compactions (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+  first_message_id INTEGER,
+  last_message_id INTEGER,
+  summary_json TEXT NOT NULL CHECK(json_valid(summary_json)),
+  source_compaction_id TEXT REFERENCES context_compactions(id) ON DELETE SET NULL,
+  input_tokens INTEGER NOT NULL CHECK(input_tokens>=0),
+  output_tokens INTEGER NOT NULL CHECK(output_tokens>=0),
+  source_tokens INTEGER NOT NULL CHECK(source_tokens>=0),
+  target_tokens INTEGER NOT NULL CHECK(target_tokens>=0),
+  model_profile TEXT NOT NULL,
+  source_digest TEXT NOT NULL,
+  valid INTEGER NOT NULL DEFAULT 1 CHECK(valid IN (0,1)),
+  created_at TEXT NOT NULL,
+  CHECK(first_message_id IS NULL OR last_message_id IS NULL OR first_message_id<=last_message_id)
+) STRICT;
+CREATE INDEX idx_context_compactions_session ON context_compactions(session_id,created_at);
 CREATE TABLE citations (
   id INTEGER PRIMARY KEY,
   run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
@@ -519,304 +574,3 @@ CREATE VIRTUAL TABLE memory_fts USING fts5(
   tokenize='unicode61'
 );
 """
-
-
-WORKSPACE_MIGRATIONS = {
-    1: """
-CREATE TABLE routing_decisions (
-  id INTEGER PRIMARY KEY,
-  run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-  sequence INTEGER NOT NULL CHECK(sequence>=1),
-  role TEXT NOT NULL CHECK(role IN ('reasoning','fast','embedding','vision')),
-  candidates_json TEXT NOT NULL CHECK(json_valid(candidates_json)),
-  selected_profile TEXT,
-  reason_json TEXT NOT NULL CHECK(json_valid(reason_json)),
-  created_at TEXT NOT NULL,
-  UNIQUE(run_id,sequence)
-) STRICT;
-CREATE TABLE model_calls (
-  id TEXT PRIMARY KEY,
-  run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-  routing_decision_id INTEGER REFERENCES routing_decisions(id) ON DELETE SET NULL,
-  role TEXT NOT NULL CHECK(role IN ('reasoning','fast','embedding','vision')),
-  profile TEXT NOT NULL,
-  provider TEXT NOT NULL,
-  model TEXT NOT NULL,
-  attempt INTEGER NOT NULL CHECK(attempt>=1),
-  status TEXT NOT NULL CHECK(status IN ('running','completed','failed')),
-  data_policy TEXT NOT NULL,
-  fallback_from TEXT,
-  started_at TEXT NOT NULL,
-  finished_at TEXT,
-  duration_ms INTEGER CHECK(duration_ms IS NULL OR duration_ms>=0),
-  input_tokens INTEGER NOT NULL DEFAULT 0 CHECK(input_tokens>=0),
-  output_tokens INTEGER NOT NULL DEFAULT 0 CHECK(output_tokens>=0),
-  cost_usd REAL NOT NULL DEFAULT 0 CHECK(cost_usd>=0),
-  error_code TEXT,
-  error_message TEXT
-) STRICT;
-CREATE INDEX idx_model_calls_run ON model_calls(run_id,started_at);
-CREATE INDEX idx_model_calls_model ON model_calls(provider,model,started_at);
-CREATE TABLE budget_decisions (
-  id INTEGER PRIMARY KEY,
-  run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-  scope TEXT NOT NULL CHECK(scope IN ('run','session')),
-  limit_type TEXT NOT NULL CHECK(limit_type IN ('tokens','cost_usd')),
-  current_value REAL NOT NULL CHECK(current_value>=0),
-  reserved_value REAL NOT NULL CHECK(reserved_value>=0),
-  limit_value REAL NOT NULL CHECK(limit_value>=0),
-  decision TEXT NOT NULL CHECK(decision IN ('allowed','denied','hard_stop')),
-  profile TEXT NOT NULL,
-  created_at TEXT NOT NULL
-) STRICT;
-""",
-    2: """
-CREATE TABLE IF NOT EXISTS lifecycle_imports (
-  id TEXT PRIMARY KEY,
-  archive_id TEXT NOT NULL UNIQUE,
-  archive_sha256 TEXT NOT NULL,
-  source_version TEXT NOT NULL,
-  status TEXT NOT NULL CHECK(status IN ('running','completed','failed')),
-  report_json TEXT NOT NULL CHECK(json_valid(report_json)),
-  created_at TEXT NOT NULL,
-  completed_at TEXT
-) STRICT;
-CREATE TABLE IF NOT EXISTS lifecycle_import_items (
-  import_id TEXT NOT NULL REFERENCES lifecycle_imports(id) ON DELETE CASCADE,
-  entity_type TEXT NOT NULL,
-  source_id TEXT NOT NULL,
-  target_id TEXT,
-  fingerprint TEXT NOT NULL,
-  disposition TEXT NOT NULL CHECK(disposition IN ('imported','skipped','remapped','blocked')),
-  PRIMARY KEY(import_id,entity_type,source_id)
-) STRICT;
-""",
-    3: """
-CREATE TABLE work_items_v4 (
-  id TEXT PRIMARY KEY,
-  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-  question TEXT NOT NULL,
-  status TEXT NOT NULL CHECK(status IN ('queued','running','waiting_approval','completed','failed','cancelled','interrupted','stopped')),
-  position INTEGER NOT NULL CHECK(position>=0),
-  parent_work_item_id TEXT REFERENCES work_items_v4(id) ON DELETE SET NULL,
-  error TEXT,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-) STRICT;
-CREATE TABLE runs_v4 (
-  id TEXT PRIMARY KEY,
-  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-  work_item_id TEXT NOT NULL REFERENCES work_items_v4(id) ON DELETE CASCADE,
-  question TEXT NOT NULL,
-  status TEXT NOT NULL CHECK(status IN ('running','waiting_approval','completed','failed','cancelled','interrupted','stopped')),
-  started_at TEXT NOT NULL,
-  finished_at TEXT,
-  duration_ms INTEGER CHECK(duration_ms IS NULL OR duration_ms>=0),
-  input_tokens INTEGER NOT NULL DEFAULT 0 CHECK(input_tokens>=0),
-  output_tokens INTEGER NOT NULL DEFAULT 0 CHECK(output_tokens>=0),
-  cost_usd REAL NOT NULL DEFAULT 0 CHECK(cost_usd>=0),
-  error_code TEXT,
-  error_message TEXT,
-  parent_run_id TEXT REFERENCES runs_v4(id) ON DELETE SET NULL,
-  resume_from_step_id TEXT,
-  stop_reason TEXT CHECK(stop_reason IS NULL OR stop_reason IN ('max_tool_rounds','max_tool_calls','max_duration','max_tokens','max_budget_usd','repeated_tool_call'))
-) STRICT;
-CREATE TABLE run_events_v4 (
-  id INTEGER PRIMARY KEY,
-  run_id TEXT NOT NULL REFERENCES runs_v4(id) ON DELETE CASCADE,
-  sequence INTEGER NOT NULL CHECK(sequence>=1),
-  event_kind TEXT NOT NULL CHECK(event_kind IN ('queued','thinking','text_delta','tool_running','tool_completed','budget_updated','limit_reached','budget_extended','waiting_approval','completed','failed','cancelled','stopped')),
-  payload_json TEXT NOT NULL CHECK(json_valid(payload_json)),
-  created_at TEXT NOT NULL,
-  UNIQUE(run_id,sequence)
-) STRICT;
-INSERT INTO work_items_v4 SELECT * FROM work_items;
-INSERT INTO runs_v4(id,session_id,work_item_id,question,status,started_at,finished_at,duration_ms,input_tokens,output_tokens,cost_usd,error_code,error_message,parent_run_id,resume_from_step_id)
-SELECT id,session_id,work_item_id,question,status,started_at,finished_at,duration_ms,input_tokens,output_tokens,cost_usd,error_code,error_message,parent_run_id,resume_from_step_id FROM runs;
-INSERT INTO run_events_v4 SELECT * FROM run_events;
-DROP TABLE run_events;
-DROP TABLE runs;
-DROP TABLE work_items;
-ALTER TABLE work_items_v4 RENAME TO work_items;
-ALTER TABLE runs_v4 RENAME TO runs;
-ALTER TABLE run_events_v4 RENAME TO run_events;
-CREATE INDEX idx_work_items_session_position ON work_items(session_id,status,position);
-CREATE INDEX idx_runs_session_started ON runs(session_id,started_at);
-CREATE INDEX idx_runs_work_item ON runs(work_item_id,started_at);
-CREATE TABLE IF NOT EXISTS run_governance (
-  run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
-  root_run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-  mode TEXT NOT NULL CHECK(mode IN ('interactive','exec')),
-  limits_json TEXT NOT NULL CHECK(json_valid(limits_json)),
-  tool_rounds INTEGER NOT NULL DEFAULT 0 CHECK(tool_rounds>=0),
-  tool_calls INTEGER NOT NULL DEFAULT 0 CHECK(tool_calls>=0),
-  elapsed_ms INTEGER NOT NULL DEFAULT 0 CHECK(elapsed_ms>=0),
-  input_tokens INTEGER NOT NULL DEFAULT 0 CHECK(input_tokens>=0),
-  output_tokens INTEGER NOT NULL DEFAULT 0 CHECK(output_tokens>=0),
-  cost_usd REAL NOT NULL DEFAULT 0 CHECK(cost_usd>=0),
-  extensions INTEGER NOT NULL DEFAULT 0 CHECK(extensions>=0),
-  history_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(history_json)),
-  stop_reason TEXT CHECK(stop_reason IS NULL OR stop_reason IN ('max_tool_rounds','max_tool_calls','max_duration','max_tokens','max_budget_usd','repeated_tool_call')),
-  updated_at TEXT NOT NULL
-) STRICT;
-CREATE TABLE IF NOT EXISTS tool_call_attempts (
-  id INTEGER PRIMARY KEY,
-  run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-  sequence INTEGER NOT NULL CHECK(sequence>=1),
-  round_index INTEGER NOT NULL CHECK(round_index>=1),
-  name TEXT NOT NULL,
-  arguments_json TEXT NOT NULL CHECK(json_valid(arguments_json)),
-  fingerprint TEXT NOT NULL,
-  ok INTEGER CHECK(ok IS NULL OR ok IN (0,1)),
-  duration_ms INTEGER CHECK(duration_ms IS NULL OR duration_ms>=0),
-  created_at TEXT NOT NULL,
-  finished_at TEXT,
-  UNIQUE(run_id,sequence)
-) STRICT;
-CREATE INDEX IF NOT EXISTS idx_tool_call_attempts_run ON tool_call_attempts(run_id,sequence);
-INSERT OR IGNORE INTO run_governance(run_id,root_run_id,mode,limits_json,tool_rounds,tool_calls,elapsed_ms,input_tokens,output_tokens,cost_usd,updated_at)
-SELECT id,id,'interactive','{"max_tool_rounds":32,"max_tool_calls":null,"max_duration_seconds":null,"max_tokens":null,"max_budget_usd":null}',
-       (SELECT count(*) FROM run_steps s WHERE s.run_id=runs.id AND s.kind='model' AND s.status='completed' AND instr(coalesce(s.checkpoint_json,''),'tool_calls')>0),
-       (SELECT count(*) FROM tool_calls t WHERE t.run_id=runs.id),coalesce(duration_ms,0),input_tokens,output_tokens,cost_usd,started_at
-FROM runs;
-""",
-    4: """
-CREATE TABLE IF NOT EXISTS agent_tasks (
-  id TEXT PRIMARY KEY,
-  parent_run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-  objective TEXT NOT NULL,
-  contract_json TEXT NOT NULL CHECK(json_valid(contract_json)),
-  state TEXT NOT NULL CHECK(state IN ('created','running','waiting_approval','completed','failed','cancelled','interrupted')),
-  child_run_id TEXT,
-  child_workspace TEXT,
-  error TEXT,
-  created_at TEXT NOT NULL,
-  started_at TEXT,
-  finished_at TEXT
-) STRICT;
-CREATE INDEX IF NOT EXISTS idx_agent_tasks_parent ON agent_tasks(parent_run_id,created_at);
-CREATE TABLE IF NOT EXISTS agent_workspaces (
-  task_id TEXT PRIMARY KEY REFERENCES agent_tasks(id) ON DELETE CASCADE,
-  path TEXT NOT NULL,
-  source_path TEXT NOT NULL,
-  retained INTEGER NOT NULL DEFAULT 0 CHECK(retained IN (0,1)),
-  created_at TEXT NOT NULL,
-  cleaned_at TEXT
-) STRICT;
-CREATE TABLE IF NOT EXISTS agent_capabilities (
-  task_id TEXT NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
-  ordinal INTEGER NOT NULL CHECK(ordinal>=0),
-  capability_json TEXT NOT NULL CHECK(json_valid(capability_json)),
-  PRIMARY KEY(task_id,ordinal)
-) STRICT;
-CREATE TABLE IF NOT EXISTS agent_messages (
-  id TEXT PRIMARY KEY,
-  task_id TEXT NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
-  parent_run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-  sender TEXT NOT NULL,
-  recipient TEXT NOT NULL,
-  sequence INTEGER NOT NULL CHECK(sequence>=1),
-  message_kind TEXT NOT NULL,
-  payload_json TEXT NOT NULL CHECK(json_valid(payload_json)),
-  payload_sha256 TEXT NOT NULL,
-  created_at TEXT NOT NULL,
-  UNIQUE(task_id,sequence)
-) STRICT;
-CREATE INDEX IF NOT EXISTS idx_agent_messages_task ON agent_messages(task_id,sequence);
-CREATE TABLE IF NOT EXISTS agent_outputs (
-  task_id TEXT PRIMARY KEY REFERENCES agent_tasks(id) ON DELETE CASCADE,
-  state TEXT NOT NULL CHECK(state IN ('completed','failed','cancelled','interrupted')),
-  output_json TEXT NOT NULL CHECK(json_valid(output_json)),
-  verified INTEGER NOT NULL CHECK(verified IN (0,1)),
-  output_sha256 TEXT NOT NULL,
-  created_at TEXT NOT NULL
-) STRICT;
-""",
-}
-
-
-MEMORY_MIGRATIONS = {
-    1: """
-ALTER TABLE memory_workspace_settings RENAME TO memory_workspace_settings_v1;
-CREATE TABLE memory_workspace_settings (
-  workspace_key TEXT PRIMARY KEY,
-  write_enabled INTEGER NOT NULL DEFAULT 1 CHECK(write_enabled IN (0,1)),
-  policy TEXT NOT NULL DEFAULT 'review' CHECK(policy IN ('off','review','automatic')),
-  recall_enabled INTEGER NOT NULL DEFAULT 1 CHECK(recall_enabled IN (0,1)),
-  embedding_backend TEXT NOT NULL DEFAULT 'off' CHECK(embedding_backend IN ('off','fastembed','local_http','external')),
-  embedding_model TEXT,
-  embedding_endpoint TEXT,
-  embedding_provider TEXT,
-  embedding_data_policy TEXT,
-  embedding_consent_id INTEGER
-) STRICT;
-INSERT INTO memory_workspace_settings(workspace_key,write_enabled,policy,recall_enabled,embedding_backend,embedding_model,embedding_endpoint)
-SELECT workspace_key,write_enabled,policy,recall_enabled,embedding_backend,embedding_model,embedding_endpoint FROM memory_workspace_settings_v1;
-DROP TABLE memory_workspace_settings_v1;
-ALTER TABLE memory_embeddings RENAME TO memory_embeddings_v1;
-CREATE TABLE memory_embeddings (
-  memory_id TEXT NOT NULL,
-  revision INTEGER NOT NULL,
-  backend TEXT NOT NULL CHECK(backend IN ('fastembed','local_http','external')),
-  model TEXT NOT NULL,
-  dimensions INTEGER NOT NULL CHECK(dimensions>0),
-  vector BLOB NOT NULL,
-  content_hash TEXT NOT NULL,
-  created_at TEXT NOT NULL,
-  PRIMARY KEY(memory_id,revision,backend,model),
-  FOREIGN KEY(memory_id,revision) REFERENCES memory_revisions(memory_id,revision) ON DELETE CASCADE
-) STRICT;
-INSERT INTO memory_embeddings SELECT * FROM memory_embeddings_v1;
-DROP TABLE memory_embeddings_v1;
-CREATE TABLE embedding_consents (
-  id INTEGER PRIMARY KEY,
-  workspace_key TEXT NOT NULL,
-  provider TEXT NOT NULL,
-  model TEXT NOT NULL,
-  data_policy TEXT NOT NULL,
-  fields_json TEXT NOT NULL CHECK(json_valid(fields_json)),
-  record_count INTEGER NOT NULL CHECK(record_count>=0),
-  byte_count INTEGER NOT NULL CHECK(byte_count>=0),
-  content_hash TEXT NOT NULL,
-  confirmed_at TEXT NOT NULL,
-  revoked_at TEXT
-) STRICT;
-CREATE INDEX idx_embedding_consents_workspace ON embedding_consents(workspace_key,confirmed_at);
-CREATE TABLE embedding_requests (
-  id INTEGER PRIMARY KEY,
-  consent_id INTEGER NOT NULL REFERENCES embedding_consents(id) ON DELETE RESTRICT,
-  workspace_key TEXT NOT NULL,
-  run_id TEXT,
-  operation TEXT NOT NULL CHECK(operation IN ('rebuild','recall')),
-  record_count INTEGER NOT NULL CHECK(record_count>=0),
-  byte_count INTEGER NOT NULL CHECK(byte_count>=0),
-  duration_ms INTEGER NOT NULL CHECK(duration_ms>=0),
-  input_tokens INTEGER NOT NULL DEFAULT 0 CHECK(input_tokens>=0),
-  cost_usd REAL NOT NULL DEFAULT 0 CHECK(cost_usd>=0),
-  status TEXT NOT NULL CHECK(status IN ('completed','failed')),
-  error_code TEXT,
-  created_at TEXT NOT NULL
-) STRICT;
-""",
-    2: """
-CREATE TABLE IF NOT EXISTS lifecycle_imports (
-  id TEXT PRIMARY KEY,
-  archive_id TEXT NOT NULL UNIQUE,
-  archive_sha256 TEXT NOT NULL,
-  source_version TEXT NOT NULL,
-  status TEXT NOT NULL CHECK(status IN ('running','completed','failed')),
-  report_json TEXT NOT NULL CHECK(json_valid(report_json)),
-  created_at TEXT NOT NULL,
-  completed_at TEXT
-) STRICT;
-CREATE TABLE IF NOT EXISTS lifecycle_import_items (
-  import_id TEXT NOT NULL REFERENCES lifecycle_imports(id) ON DELETE CASCADE,
-  entity_type TEXT NOT NULL,
-  source_id TEXT NOT NULL,
-  target_id TEXT,
-  fingerprint TEXT NOT NULL,
-  disposition TEXT NOT NULL CHECK(disposition IN ('imported','skipped','remapped','blocked')),
-  PRIMARY KEY(import_id,entity_type,source_id)
-) STRICT;
-""",
-}

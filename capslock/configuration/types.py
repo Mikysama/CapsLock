@@ -21,7 +21,6 @@ class ProviderSettings:
     name: str
     kind: str
     base_url: str
-    api_key_env: str
     api_key: str | None
     timeout_seconds: float
     data_policy: str
@@ -57,7 +56,17 @@ class BudgetSettings:
 @dataclass(frozen=True)
 class RuntimeSettings:
     max_tool_rounds: int
-    max_context_messages: int
+
+
+@dataclass(frozen=True)
+class ContextSettings:
+    auto_compact: bool = True
+    trigger_ratio: float = 0.80
+    target_ratio: float = 0.60
+    preserve_recent_turns: int = 6
+    inline_tool_result_bytes: int = 16_384
+    summary_max_tokens: int = 2_048
+    max_compaction_failures: int = 3
 
 
 @dataclass(frozen=True)

@@ -1,11 +1,10 @@
-"""Async v2 slash-command routing."""
+"""Async slash-command routing."""
 
 from __future__ import annotations
 
 import json
 import shlex
 
-from ..domain import WorkItemStatus
 from . import actions
 from .commands import COMMANDS, resolve_command
 from .context import CliContext
@@ -62,23 +61,20 @@ async def dispatch_slash_command(context: CliContext, text: str) -> str:
         if len(parts) < 2:
             context.console.print("[error]Usage:[/] /rename <title>")
         else:
-            session = await context.agent.repositories.sessions.rename(
-                context.agent.session_id, " ".join(parts[1:])
-            )
+            session = await context.session.rename(" ".join(parts[1:]))
             context.console.print(f"[success]Renamed:[/] {session.title}")
     return "handled"
 
 
 async def _status(context: CliContext) -> None:
-    agent = context.agent
-    session = await agent.repositories.sessions.require(agent.session_id)
-    tasks = await agent.repositories.tasks.list(agent.session_id)
-    work = await agent.repositories.work_items.list(agent.session_id, active_only=True)
-    cost = await agent.repositories.runs.session_cost(agent.session_id)
-    count = await agent.repositories.sessions.message_count(agent.session_id)
-    latest_budget = await agent.repositories.governance.latest_for_session(
-        agent.session_id
-    )
+    agent = context.session
+    queries = context.require_queries()
+    session = await queries.session(agent.session_id)
+    tasks = await queries.tasks(agent.session_id)
+    work = await queries.work_items(agent.session_id, active_only=True)
+    cost = await queries.session_cost(agent.session_id)
+    count = await queries.message_count(agent.session_id)
+    latest_budget = await queries.latest_budget(agent.session_id)
     render_status(
         context.console,
         StatusView(
@@ -90,15 +86,13 @@ async def _status(context: CliContext) -> None:
             work,
             *cost,
             count,
-            agent.max_context_messages,
+            agent.context_budget.input_budget,
             latest_budget.as_dict() if latest_budget else None,
         ),
     )
     collaboration = getattr(agent, "collaboration", None)
     if collaboration is not None:
-        children = await agent.repositories.collaboration.list_for_session(
-            agent.session_id
-        )
+        children = await queries.collaboration_tasks(agent.session_id)
         active = sum(
             item["state"] in {"created", "running", "waiting_approval"}
             for item in children
@@ -107,7 +101,7 @@ async def _status(context: CliContext) -> None:
             item["state"] in {"failed", "cancelled", "interrupted"} for item in children
         )
         waiting = sum(item["state"] == "waiting_approval" for item in children)
-        usage = await _collaboration_usage(agent.repositories.collaboration, children)
+        usage = await _collaboration_usage(queries, children)
         context.console.print(
             f"[text.secondary]Child Agents:[/] {len(children)} total, "
             f"{active}/{collaboration.max_concurrency} active, {waiting} waiting approval, "
@@ -117,13 +111,13 @@ async def _status(context: CliContext) -> None:
 
 
 async def _agents(context: CliContext, parts: list[str]) -> None:
-    collaboration = getattr(context.agent, "collaboration", None)
+    collaboration = getattr(context.session, "collaboration", None)
     if collaboration is None:
         context.console.print("[warning]Multi-Agent collaboration is disabled.[/]")
         return
-    repository = context.agent.repositories.collaboration
+    queries = context.require_queries()
     if len(parts) == 1:
-        items = await repository.list_for_session(context.agent.session_id)
+        items = await queries.collaboration_tasks(context.session.session_id)
         if not items:
             context.console.print("[text.secondary]No child Agent tasks.[/]")
             return
@@ -131,14 +125,14 @@ async def _agents(context: CliContext, parts: list[str]) -> None:
             item["state"] in {"created", "running", "waiting_approval"}
             for item in items
         )
-        usage = await _collaboration_usage(repository, items)
+        usage = await _collaboration_usage(queries, items)
         context.console.print(
             f"[text.secondary]Concurrency {active}/{collaboration.max_concurrency}; "
             f"budget used {usage['tokens']} tokens, {usage['tool_rounds']} rounds, "
             f"${usage['cost_usd']:.6f}[/]"
         )
         for item in items:
-            output = await repository.get_output(str(item["id"]))
+            output = await queries.collaboration_output(str(item["id"]))
             verification = (
                 "verified"
                 if output is not None and output.verified
@@ -152,7 +146,7 @@ async def _agents(context: CliContext, parts: list[str]) -> None:
             )
         return
     if len(parts) == 3 and parts[1] == "inspect":
-        item = await repository.get_task(parts[2])
+        item = await queries.collaboration_task(parts[2])
         if item is None:
             raise ValueError("child task does not exist")
         context.console.print(f"[command]Task:[/] {item['id']}")
@@ -168,10 +162,7 @@ async def _agents(context: CliContext, parts: list[str]) -> None:
         context.console.print(
             f"[command]Limits:[/] {json.dumps(contract.get('limits', {}), ensure_ascii=False)}"
         )
-        workspace = await repository.one(
-            "SELECT path,retained,cleaned_at FROM agent_workspaces WHERE task_id=?",
-            (str(item["id"]),),
-        )
+        workspace = await queries.collaboration_workspace(str(item["id"]))
         if workspace is not None:
             context.console.print(
                 f"[command]Workspace:[/] {workspace['path']} "
@@ -181,11 +172,11 @@ async def _agents(context: CliContext, parts: list[str]) -> None:
             context.console.print(f"[command]Child run:[/] {item['child_run_id']}")
         if item.get("error"):
             context.console.print(f"[error]Failure:[/] {item['error']}")
-        for message in await repository.messages(str(item["id"])):
+        for message in await queries.collaboration_messages(str(item["id"])):
             context.console.print(
                 f"[text.secondary]{message['sequence']} {message['message_kind']} {message['payload_sha256'][:12]}[/]"
             )
-        output = await repository.get_output(str(item["id"]))
+        output = await queries.collaboration_output(str(item["id"]))
         if output is not None:
             context.console.print(
                 f"[command]Verified:[/] {output.verified} {output.summary or output.error or ''}"
@@ -200,14 +191,14 @@ async def _agents(context: CliContext, parts: list[str]) -> None:
     raise ValueError("usage: /agents [inspect|cancel|cleanup <task-id>]")
 
 
-async def _collaboration_usage(repository, items: list[dict]) -> dict[str, float | int]:
+async def _collaboration_usage(queries, items: list[dict]) -> dict[str, float | int]:
     usage: dict[str, float | int] = {
         "tokens": 0,
         "tool_rounds": 0,
         "cost_usd": 0.0,
     }
     for item in items:
-        output = await repository.get_output(str(item["id"]))
+        output = await queries.collaboration_output(str(item["id"]))
         if output is None:
             continue
         usage["tokens"] += int(output.usage.get("input_tokens", 0)) + int(
@@ -219,26 +210,18 @@ async def _collaboration_usage(repository, items: list[dict]) -> dict[str, float
 
 
 async def _queue(context: CliContext, parts: list[str]) -> None:
-    repository = context.agent.repositories.work_items
+    queries = context.require_queries()
     if len(parts) == 1:
         render_queue(
             context.console,
-            await repository.list(context.agent.session_id, active_only=True),
+            await queries.work_items(context.session.session_id, active_only=True),
         )
         return
     if len(parts) == 3 and parts[1] == "cancel":
-        item = await repository.require(parts[2])
-        if item.session_id != context.agent.session_id:
-            raise ValueError("work item does not belong to this session")
-        await repository.update(
-            item.id, WorkItemStatus.CANCELLED, error="cancelled before start"
-        )
+        await context.session.cancel_queued_work_item(parts[2])
         return
     if len(parts) == 4 and parts[1] == "move":
-        item = await repository.require(parts[2])
-        if item.session_id != context.agent.session_id:
-            raise ValueError("work item does not belong to this session")
-        await repository.reorder(item.id, int(parts[3]))
+        await context.session.reorder_queued_work_item(parts[2], int(parts[3]))
         return
     if len(parts) == 3 and parts[1] == "retry":
         context.console.print(

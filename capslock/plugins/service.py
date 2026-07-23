@@ -10,8 +10,9 @@ from pathlib import Path
 from .. import __version__
 from ..layout import ProjectLayout
 from .client import PluginProcessClient
-from .manifest import PluginManifestV1, PluginValidationError, load_plugin_manifest
+from .manifest import PluginManifest, PluginValidationError, load_plugin_manifest
 from .registry import InstalledPlugin, PluginRegistry, append_plugin_audit
+from .sandbox import SandboxUnavailableError
 
 
 class PluginService:
@@ -28,11 +29,10 @@ class PluginService:
     def entries(self) -> list[InstalledPlugin]:
         return self.registry.entries()
 
-    async def install(self, source: Path) -> PluginManifestV1:
+    async def install(self, source: Path) -> PluginManifest:
         source = source.expanduser().resolve()
         manifest = load_plugin_manifest(source)
         _check_capslock_compatibility(manifest)
-        await self.client.verify(manifest)
         target = self.layout.user.plugins / manifest.name / manifest.version
         if target.exists():
             installed = load_plugin_manifest(target)
@@ -82,14 +82,22 @@ class PluginService:
         )
         return installed
 
-    async def verify(self, name: str) -> PluginManifestV1:
+    async def verify(self, name: str) -> PluginManifest:
         entry = self.registry.get(name, require_enabled=False)
-        await self.client.verify(entry.manifest)
+        await self.client.verify(
+            entry.manifest, trusted_native=entry.trusted_native
+        )
         return entry.manifest
 
-    def enable(self, name: str) -> PluginManifestV1:
+    def enable(
+        self, name: str, *, trusted_native: bool = False
+    ) -> PluginManifest:
         entry = self.registry.get(name, require_enabled=False)
-        self.registry.enable(entry.manifest)
+        if self.client.sandbox is None and not trusted_native:
+            raise SandboxUnavailableError(
+                "no plugin sandbox backend is available; use --trusted-native explicitly"
+            )
+        self.registry.enable(entry.manifest, trusted_native=trusted_native)
         append_plugin_audit(
             self.layout.user,
             {
@@ -100,13 +108,15 @@ class PluginService:
                 "permissions": sorted(
                     item.value for item in entry.manifest.permissions
                 ),
+                "capabilities": entry.manifest.capabilities.as_dict(),
+                "mode": "trusted-native" if trusted_native else "sandboxed",
                 "workspace": str(self.layout.workspace),
                 "result": "completed",
             },
         )
         return entry.manifest
 
-    def disable(self, name: str) -> PluginManifestV1:
+    def disable(self, name: str) -> PluginManifest:
         entry = self.registry.get(name, require_enabled=False)
         self.registry.disable(name)
         append_plugin_audit(
@@ -122,7 +132,7 @@ class PluginService:
         )
         return entry.manifest
 
-    def uninstall(self, name: str) -> PluginManifestV1:
+    def uninstall(self, name: str) -> PluginManifest:
         entry = self.registry.get(name, require_enabled=False)
         workspaces = self.registry.enabled_workspaces(name)
         if workspaces:
@@ -147,7 +157,7 @@ class PluginService:
         return entry.manifest
 
 
-def _check_capslock_compatibility(manifest: PluginManifestV1) -> None:
+def _check_capslock_compatibility(manifest: PluginManifest) -> None:
     requirement = manifest.requires_capslock
     if not requirement:
         return

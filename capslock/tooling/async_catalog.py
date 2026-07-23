@@ -17,24 +17,27 @@ from .async_adapters import (
     propose_web_fetch,
     propose_web_search,
     read_file,
+    read_tool_artifact,
     read_skill_resource,
     search_files,
     search_memories,
     task_list_update,
     task_status_update,
 )
-from .async_core import Tool, ToolRegistry
+from .async_core import Tool, ToolCapabilities, ToolRegistry
 from .collaboration import delegation_tool
 
 
 def workspace_tools(*, include_collaboration: bool = True) -> ToolRegistry:
     empty = {"type": "object", "properties": {}, "additionalProperties": False}
+    safe_read = ToolCapabilities(read_only=True, concurrency_safe=True)
     tools = [
         Tool(
             "list_files",
             "List readable workspace files.",
             _schema({"path": _str(), "pattern": _str()}, ["path"]),
             list_files,
+            capabilities=safe_read,
         ),
         Tool(
             "read_file",
@@ -43,6 +46,22 @@ def workspace_tools(*, include_collaboration: bool = True) -> ToolRegistry:
                 {"path": _str(), "start_line": _int(), "end_line": _int()}, ["path"]
             ),
             read_file,
+            capabilities=safe_read,
+        ),
+        Tool(
+            "read_tool_artifact",
+            "Read a session-scoped tool artifact in bounded chunks.",
+            _schema(
+                {
+                    "artifact_id": _str(),
+                    "offset": {"type": "integer", "minimum": 0},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 16384},
+                },
+                ["artifact_id"],
+            ),
+            read_tool_artifact,
+            capabilities=safe_read,
+            inline_result_bytes=16_384,
         ),
         Tool(
             "search_files",
@@ -52,13 +71,21 @@ def workspace_tools(*, include_collaboration: bool = True) -> ToolRegistry:
                 ["path", "query"],
             ),
             search_files,
+            capabilities=safe_read,
         ),
-        Tool("git_status", "Show the Git working-tree status.", empty, git_status),
+        Tool(
+            "git_status",
+            "Show the Git working-tree status.",
+            empty,
+            git_status,
+            capabilities=safe_read,
+        ),
         Tool(
             "git_diff",
             "Show the Git diff, optionally for one path.",
             _schema({"path": _str()}),
             git_diff,
+            capabilities=safe_read,
         ),
         Tool(
             "task_list_update",
@@ -93,6 +120,7 @@ def workspace_tools(*, include_collaboration: bool = True) -> ToolRegistry:
             "List persisted untrusted Web sources.",
             empty,
             list_external_sources,
+            capabilities=safe_read,
         ),
         Tool(
             "search_memories",
@@ -105,12 +133,14 @@ def workspace_tools(*, include_collaboration: bool = True) -> ToolRegistry:
                 ["query"],
             ),
             search_memories,
+            capabilities=safe_read,
         ),
         Tool(
             "get_memory",
             "Read one visible memory.",
             _schema({"memory_id": _str()}, ["memory_id"]),
             get_memory,
+            capabilities=safe_read,
         ),
         Tool(
             "load_skill",

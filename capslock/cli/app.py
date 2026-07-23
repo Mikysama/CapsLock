@@ -1,4 +1,4 @@
-"""CapsLock v2 command-line composition root."""
+"""CapsLock command-line composition root."""
 
 from __future__ import annotations
 
@@ -11,43 +11,8 @@ from pathlib import Path
 from rich.console import Console
 
 from .. import __version__
-from ..bootstrap import WorkspaceApplication
-from ..configuration import Settings
-from ..credentials import CredentialError
 from ..environment import load_project_environment
-from ..layout import LayoutConflict, ProjectLayout
-from ..lifecycle import LifecycleError
-from ..runtime import AgentRuntimeError
-from ..domain import RunLimits
-from ..session_management import SessionManager
-from ..storage.async_database import IncompatibleDatabaseError
-from ..storage.memory_repositories import MemoryRepositories
-from ..storage.repositories import WorkspaceRepositories
-from ..theme import make_console
-from .context import CliContext
-from .diagnostics import (
-    archive_session,
-    delete_session,
-    doctor,
-    export_session,
-    list_sessions,
-    rename_session,
-    search_sessions,
-    select_session,
-)
-from .exec import run_exec
-from .lifecycle import backup_command, export_lifecycle, import_lifecycle
-from .plugins import plugin_command
-from .providers import create_provider_clients
-from .status import dynamic_status_supported
-from .setup import (
-    config_migrate,
-    config_validate,
-    credentials_command,
-    initialize,
-)
-from .tui import run_tui
-from .fullscreen_tui import run_fullscreen_tui, select_session_fullscreen
+from ..layout import ProjectLayout
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -114,17 +79,11 @@ def build_parser() -> argparse.ArgumentParser:
     initialize_parser.add_argument("--disable-memory", action="store_true")
     initialize_parser.add_argument("--update", action="store_true")
     initialize_parser.add_argument("--check-provider", action="store_true")
-    config_parser = subparsers.add_parser(
-        "config", help="Validate or migrate configuration"
-    )
+    config_parser = subparsers.add_parser("config", help="Validate configuration")
     config_commands = config_parser.add_subparsers(dest="config_command")
     validate = config_commands.add_parser("validate")
     validate.add_argument("--json", action="store_true")
     validate.add_argument("--strict", action="store_true")
-    migrate = config_commands.add_parser("migrate")
-    migrate_mode = migrate.add_mutually_exclusive_group()
-    migrate_mode.add_argument("--dry-run", action="store_true")
-    migrate_mode.add_argument("--apply", action="store_true")
     credentials = subparsers.add_parser("credentials", help="Manage OS credentials")
     credential_commands = credentials.add_subparsers(dest="credentials_command")
     credential_commands.add_parser("status")
@@ -149,6 +108,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     portable_export.add_argument("destination", type=Path)
     portable_export.add_argument("--include-global-memory", action="store_true")
+    portable_export.add_argument("--include-artifacts", action="store_true")
     portable_import = subparsers.add_parser(
         "import", help="Merge a portable data export"
     )
@@ -171,6 +131,8 @@ def build_parser() -> argparse.ArgumentParser:
         plugin_change = plugin_commands.add_parser(command)
         plugin_change.add_argument("name")
         plugin_change.add_argument("--yes", action="store_true")
+        if command == "enable":
+            plugin_change.add_argument("--trusted-native", action="store_true")
     doctor_parser = subparsers.add_parser(
         "doctor", help="Check configuration and state"
     )
@@ -184,11 +146,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 async def create_application(
     workspace: Path,
-    settings: Settings,
+    settings,
     session_id: str | None = None,
     *,
     layout: ProjectLayout | None = None,
-) -> WorkspaceApplication:
+):
+    from ..bootstrap import WorkspaceApplication
+    from .providers import create_provider_clients
+
     return await WorkspaceApplication.open(
         workspace=workspace,
         settings=settings,
@@ -196,14 +161,6 @@ async def create_application(
         session_id=session_id,
         layout=layout,
     )
-
-
-def create_client(settings: Settings):
-    """Compatibility export; provider construction lives in ``cli.providers``."""
-
-    from .providers import create_client as provider_client
-
-    return provider_client(settings)
 
 
 def main(argv: list[str] | None = None, *, console: Console | None = None) -> int:
@@ -218,6 +175,8 @@ async def async_main(
     argv: list[str] | None = None, *, console: Console | None = None
 ) -> int:
     args = build_parser().parse_args(argv)
+    from ..theme import make_console
+
     output = console or make_console()
     errors = (
         make_console(file=sys.stderr)
@@ -232,8 +191,12 @@ async def async_main(
         layout = ProjectLayout.discover(workspace)
         load_project_environment(workspace)
         if args.command == "init":
+            from .setup import initialize
+
             return await initialize(output, workspace, args)
         if args.command == "config":
+            from .setup import config_validate
+
             if args.config_command in {None, "validate"}:
                 return await config_validate(
                     output,
@@ -241,23 +204,37 @@ async def async_main(
                     json_output=getattr(args, "json", False),
                     strict=getattr(args, "strict", False),
                 )
-            return await config_migrate(output, layout.config, apply=bool(args.apply))
+            raise ValueError("unknown config command")
         if args.command == "credentials":
+            from .setup import credentials_command
+
             return await credentials_command(output, layout.config, args)
         if args.command in {"plugin", "plugins"}:
+            from .plugins import plugin_command
+
             return await plugin_command(output, layout, args)
         if args.command == "doctor":
+            from .diagnostics import doctor
+
             return await doctor(output, workspace, layout=layout, args=args)
         if args.command == "backup":
+            from .lifecycle import backup_command
+
             return await backup_command(output, layout, args)
         if args.command == "export":
+            from .lifecycle import export_lifecycle
+
             return await export_lifecycle(
                 output,
                 layout,
                 args.destination,
                 include_global_memory=args.include_global_memory,
+                include_artifacts=args.include_artifacts,
             )
         if args.command == "import":
+            from ..lifecycle import LifecycleError
+            from .lifecycle import import_lifecycle
+
             journal = layout.root / "state" / "lifecycle-journal.json"
             if journal.exists():
                 raise LifecycleError(
@@ -266,14 +243,11 @@ async def async_main(
             return await import_lifecycle(output, layout, args.archive, yes=args.yes)
         journal = layout.root / "state" / "lifecycle-journal.json"
         if journal.exists():
+            from ..lifecycle.errors import LifecycleError
+
             raise LifecycleError(
                 f"an incomplete lifecycle operation requires `capslock doctor --fix`: {journal}"
             )
-        settings = Settings.load(workspace, layout=layout)
-        if args.command in {"session", "sessions"}:
-            return await _sessions(output, args, workspace, layout, settings)
-        session_id = getattr(args, "session_id", None)
-        ui_mode = _ui_mode(args) if args.command in {None, "resume"} else "inline"
         interactive_terminal = (
             sys.stdin.isatty()
             and output.is_terminal
@@ -284,7 +258,18 @@ async def async_main(
                 "[error]Interactive TUI requires a terminal; use `capslock exec`.[/]"
             )
             return 2
+        from ..configuration import Settings
+
+        settings = Settings.load(workspace, layout=layout)
+        if args.command in {"session", "sessions"}:
+            return await _sessions(output, args, workspace, layout, settings)
+        session_id = getattr(args, "session_id", None)
+        ui_mode = _ui_mode(args) if args.command in {None, "resume"} else "inline"
         if args.command == "resume":
+            from ..runtime import AgentRuntimeError
+            from ..storage.repositories import WorkspaceRepositories
+            from .diagnostics import select_session
+
             repositories = await WorkspaceRepositories.open(
                 layout.database, workspace=workspace
             )
@@ -292,6 +277,8 @@ async def async_main(
                 if session_id is None:
                     if ui_mode == "fullscreen":
                         try:
+                            from .fullscreen_tui import select_session_fullscreen
+
                             session_id = await select_session_fullscreen(
                                 await repositories.sessions.list(args.limit)
                             )
@@ -319,16 +306,22 @@ async def async_main(
             workspace, settings, session_id, layout=layout
         )
         async with application:
-            context = CliContext(output, application.agent)
+            from .context import CliContext
+
+            context = CliContext(output, application.session, application.queries)
             if args.command == "exec":
+                from .exec import run_exec
+
                 return await run_exec(
                     context,
                     args.question,
                     json_events=args.json,
                     spinner=not args.no_spinner,
                     quiet=args.quiet,
-                    limits=_exec_limits(application.agent.default_limits, args),
+                    limits=_exec_limits(application.session.default_limits, args),
                 )
+            from .status import dynamic_status_supported
+
             status_enabled = (
                 not args.no_spinner
                 and not args.quiet
@@ -338,6 +331,8 @@ async def async_main(
             )
             if ui_mode == "fullscreen":
                 try:
+                    from .fullscreen_tui import run_fullscreen_tui
+
                     return await run_fullscreen_tui(
                         context, status_enabled=status_enabled
                     )
@@ -348,24 +343,43 @@ async def async_main(
                         "terminal-native UI."
                     )
                     return 1
+            from .tui import run_tui
+
             return await run_tui(context, status_enabled=status_enabled)
     except KeyboardInterrupt:
         errors.print("\n[warning]Cancelled.[/]")
         return 130
-    except (LayoutConflict, IncompatibleDatabaseError) as exc:
-        errors.print(f"[error]Incompatible state:[/] {exc}")
-        return 2
-    except (AgentRuntimeError, CredentialError, LifecycleError, ValueError) as exc:
-        errors.print(f"[error]Error:[/] {exc}")
-        return 2
     except Exception as exc:
+        if type(exc).__name__ in {"LayoutConflict", "IncompatibleDatabaseError"}:
+            errors.print(f"[error]Incompatible state:[/] {exc}")
+            return 2
+        if isinstance(exc, ValueError) or type(exc).__name__ in {
+            "AgentRuntimeError",
+            "CredentialError",
+            "LifecycleError",
+            "PluginValidationError",
+            "SandboxUnavailableError",
+        }:
+            errors.print(f"[error]Error:[/] {exc}")
+            return 2
         errors.print(f"[error]Model or transport error:[/] {exc}")
         return 1
 
 
 async def _sessions(
-    output: Console, args, workspace: Path, layout: ProjectLayout, settings: Settings
+    output: Console, args, workspace: Path, layout: ProjectLayout, settings
 ) -> int:
+    from ..session_management import SessionManager
+    from ..storage.memory_repositories import MemoryRepositories
+    from ..storage.repositories import WorkspaceRepositories
+    from .diagnostics import (
+        archive_session,
+        delete_session,
+        export_session,
+        list_sessions,
+        rename_session,
+        search_sessions,
+    )
     repositories = await WorkspaceRepositories.open(
         layout.database, workspace=workspace
     )
@@ -446,7 +460,9 @@ def _tighter(configured, requested):
     return min(configured, requested)
 
 
-def _exec_limits(defaults: RunLimits, args) -> RunLimits:
+def _exec_limits(defaults, args):
+    from ..domain import RunLimits
+
     return RunLimits(
         max_tool_rounds=_tighter(defaults.max_tool_rounds, args.max_tool_rounds),
         max_tool_calls=args.max_tool_calls,

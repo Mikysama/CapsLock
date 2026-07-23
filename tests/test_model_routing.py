@@ -1,7 +1,8 @@
+"""Model routing tests."""
+
 from __future__ import annotations
 
 import asyncio
-import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -28,7 +29,6 @@ from capslock.runtime.model import ModelDelta, ModelMessage, ModelResponse, Mode
 from capslock.runtime.model import ModelRunContext
 from capslock.runtime.routing import ModelRouter, _retry_delay
 from capslock.storage.memory_repositories import MemoryRepositories
-from capslock.storage.async_database import IncompatibleDatabaseError, WorkspaceDatabase
 from capslock.storage.repositories import WorkspaceRepositories
 
 from .helpers import workspace_run
@@ -70,13 +70,13 @@ class StreamingClient:
 
 def provider(name: str, *, policy: str = "shared") -> ProviderSettings:
     return ProviderSettings(
-        name,
-        "openai_compatible",
-        f"https://{name}.example.test",
-        f"{name.upper()}_KEY",
-        "secret",
-        10,
-        policy,
+        name=name,
+        kind="openai_compatible",
+        base_url=f"https://{name}.example.test",
+        api_key="secret",
+        timeout_seconds=10,
+        data_policy=policy,
+        credential_ref=f"env:{name.upper()}_KEY",
     )
 
 
@@ -84,17 +84,17 @@ def profile(name: str, provider_name: str) -> ModelProfileSettings:
     return ModelProfileSettings(name, provider_name, name, 10_000, 100, 1, 2)
 
 
-def test_multi_provider_config_and_legacy_mix_rejection(
+def test_multi_provider_config_and_unknown_group_rejection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("CAPSLOCK_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("PRIMARY_KEY", "secret")
     config = tmp_path / ".capslock"
     config.mkdir()
-    document = """
+    document = """config_version = 3
 [providers.primary]
 base_url = "https://models.example.test/v1"
-api_key_env = "PRIMARY_KEY"
+credential = "env:PRIMARY_KEY"
 data_policy = "company-approved"
 [models.main]
 provider = "primary"
@@ -121,9 +121,9 @@ max_run_usd = 1.5
     assert settings.providers["primary"].api_key == "secret"
     assert settings.budget.max_run_tokens == 9000
     (config / "config.toml").write_text(
-        document + "\n[model]\nmodel='legacy'\n", encoding="utf-8"
+        document + "\n[unsupported]\nvalue='removed'\n", encoding="utf-8"
     )
-    with pytest.raises(ValueError, match="legacy"):
+    with pytest.raises(ValueError, match="unknown top-level field"):
         Settings.load(tmp_path)
 
 
@@ -384,83 +384,6 @@ def test_stream_retry_only_happens_before_first_visible_delta(tmp_path: Path) ->
             assert partial.calls == 1
         finally:
             await repositories.close()
-
-    asyncio.run(scenario())
-
-
-def test_schema_v1_is_backed_up_and_migrated_to_v2(tmp_path: Path) -> None:
-    async def scenario() -> None:
-        workspace_path = tmp_path / "workspace.sqlite3"
-        memory_path = tmp_path / "memory.sqlite3"
-        workspace = await WorkspaceRepositories.open(workspace_path, workspace=tmp_path)
-        memory = await MemoryRepositories.open(memory_path)
-        await workspace.close()
-        await memory.close()
-        connection = sqlite3.connect(workspace_path)
-        for table in ("budget_decisions", "model_calls", "routing_decisions"):
-            connection.execute(f"DROP TABLE {table}")
-        connection.execute("PRAGMA user_version=1")
-        connection.commit()
-        connection.close()
-        connection = sqlite3.connect(memory_path)
-        for table in ("embedding_requests", "embedding_consents"):
-            connection.execute(f"DROP TABLE {table}")
-        connection.execute("PRAGMA user_version=1")
-        connection.commit()
-        connection.close()
-        workspace = await WorkspaceRepositories.open(workspace_path, workspace=tmp_path)
-        memory = await MemoryRepositories.open(memory_path)
-        try:
-            assert await workspace.database.fetch_one(
-                "SELECT count(*) FROM model_calls"
-            )
-            assert await memory.database.fetch_one(
-                "SELECT count(*) FROM embedding_consents"
-            )
-            backups = list((tmp_path / "backups").glob("*.schema-1.*.bak"))
-            assert backups and all(
-                path.stat().st_mode & 0o777 == 0o600 for path in backups
-            )
-        finally:
-            await workspace.close()
-            await memory.close()
-
-    asyncio.run(scenario())
-
-
-def test_failed_schema_migration_rolls_back_and_preserves_backup(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    async def scenario() -> None:
-        path = tmp_path / "workspace.sqlite3"
-        repositories = await WorkspaceRepositories.open(path, workspace=tmp_path)
-        await repositories.close()
-        connection = sqlite3.connect(path)
-        for table in ("budget_decisions", "model_calls", "routing_decisions"):
-            connection.execute(f"DROP TABLE {table}")
-        connection.execute("PRAGMA user_version=1")
-        connection.commit()
-        connection.close()
-        monkeypatch.setattr(
-            WorkspaceDatabase,
-            "migrations",
-            {1: "CREATE TABLE migration_probe(value INTEGER) STRICT; INVALID SQL;"},
-        )
-        with pytest.raises(IncompatibleDatabaseError, match="backup preserved"):
-            await WorkspaceDatabase.open(path)
-        connection = sqlite3.connect(path)
-        try:
-            assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
-            assert (
-                connection.execute(
-                    "SELECT count(*) FROM sqlite_master WHERE name='migration_probe'"
-                ).fetchone()[0]
-                == 0
-            )
-        finally:
-            connection.close()
-        backups = list((tmp_path / "backups").glob("*.schema-1.*.bak"))
-        assert backups and backups[0].stat().st_mode & 0o777 == 0o600
 
     asyncio.run(scenario())
 

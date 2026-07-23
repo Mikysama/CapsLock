@@ -1,4 +1,4 @@
-"""CapsLock v2 asynchronous memory subsystem."""
+"""CapsLock asynchronous memory subsystem."""
 
 from .candidates import MemoryExtractionResult
 from .embeddings import (

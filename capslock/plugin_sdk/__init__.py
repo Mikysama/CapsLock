@@ -1,4 +1,4 @@
-"""Public SDK for CapsLock protocol-v1 local tool plugins."""
+"""Public SDK for sandboxed CapsLock tool plugins."""
 
 from __future__ import annotations
 
@@ -6,14 +6,44 @@ import asyncio
 import inspect
 import json
 import sys
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
-
 from ..plugins.manifest import PROTOCOL_VERSION
 
 
-PluginCallable = Callable[[dict[str, Any]], object]
+PluginCallable = Callable[..., object]
+
+
+class CapabilityClient:
+    """Request a scoped host capability over the bidirectional stdio channel."""
+
+    async def request(self, capability: str, **params: object) -> dict[str, object]:
+        identifier = f"cap_{uuid.uuid4().hex}"
+        message = {
+            "protocol_version": PROTOCOL_VERSION,
+            "id": identifier,
+            "method": "capability_request",
+            "params": {"capability": capability, **params},
+        }
+        sys.stdout.write(json.dumps(message, ensure_ascii=False) + "\n")
+        sys.stdout.flush()
+        line = await asyncio.to_thread(sys.stdin.buffer.readline)
+        if not line:
+            raise RuntimeError("host closed the capability broker channel")
+        response = json.loads(line.decode("utf-8"))
+        if (
+            not isinstance(response, dict)
+            or response.get("protocol_version") != PROTOCOL_VERSION
+            or response.get("id") != identifier
+        ):
+            raise RuntimeError("invalid capability broker response")
+        if response.get("ok") is not True:
+            raise PermissionError(str(response.get("error", "capability denied")))
+        result = response.get("result")
+        if not isinstance(result, dict):
+            raise RuntimeError("capability broker result must be an object")
+        return result
 
 
 @dataclass(frozen=True)
@@ -65,7 +95,10 @@ async def _serve(tools: list[ToolDefinition]) -> None:
                 tool = catalog.get(name)
                 if tool is None:
                     raise ValueError(f"unknown tool: {name}")
-                value = tool.handler(arguments)
+                if len(inspect.signature(tool.handler).parameters) >= 2:
+                    value = tool.handler(arguments, CapabilityClient())
+                else:
+                    value = tool.handler(arguments)
                 if inspect.isawaitable(value):
                     value = await value
                 result = (
@@ -92,4 +125,9 @@ async def _serve(tools: list[ToolDefinition]) -> None:
         sys.stdout.flush()
 
 
-__all__ = ["PROTOCOL_VERSION", "ToolDefinition", "serve_plugin"]
+__all__ = [
+    "CapabilityClient",
+    "PROTOCOL_VERSION",
+    "ToolDefinition",
+    "serve_plugin",
+]

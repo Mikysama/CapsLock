@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the versioned CapsLock core evaluation suite and emit a JSON report."""
+"""Run the CapsLock core evaluation suite and emit a JSON report."""
 
 from __future__ import annotations
 
@@ -14,8 +14,8 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-FIXTURE = ROOT / "tests" / "fixtures" / "agent_eval_v2.json"
-BASELINE = ROOT / "tests" / "fixtures" / "agent_eval_baseline_v1.json"
+FIXTURE = ROOT / "tests" / "fixtures" / "agent_eval.json"
+BASELINE = ROOT / "tests" / "fixtures" / "agent_eval_baseline.json"
 
 
 def deterministic(output: Path | None) -> int:

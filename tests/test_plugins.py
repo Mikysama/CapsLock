@@ -24,20 +24,24 @@ def _layout(tmp_path: Path) -> ProjectLayout:
     )
 
 
-def _plugin(tmp_path: Path, *, version: str = "1.0.0", permissions: str = "") -> Path:
+def _plugin(tmp_path: Path, *, version: str = "1.0.0", read_access: bool = False) -> Path:
     root = tmp_path / f"source-{version}"
     root.mkdir()
-    permission_list = (
-        f'permissions = ["{permissions}"]' if permissions else "permissions = []"
-    )
+    read_paths = '["**"]' if read_access else "[]"
     (root / "capslock-plugin.toml").write_text(
-        f'''manifest_version = 1
-protocol_version = 1
+        f'''manifest_version = 3
+protocol_version = 3
 name = "echo-plugin"
 version = "{version}"
 description = "Echo arguments"
 entrypoint = ["plugin.py"]
-{permission_list}
+
+[capabilities]
+workspace_read = {read_paths}
+workspace_write = []
+network_hosts = []
+process_templates = []
+credentials = []
 
 [[tools]]
 name = "echo"
@@ -54,14 +58,14 @@ for line in sys.stdin:
     request = json.loads(line)
     method = request["method"]
     if method == "initialize":
-        result = {"protocol_version": 1}
+        result = {"protocol_version": 3}
     elif method == "list_tools":
         result = {"tools": [{"name": "echo"}]}
     elif method == "call_tool":
         result = {"ok": True, "data": request["params"]["arguments"]}
     else:
         raise RuntimeError(method)
-    print(json.dumps({"protocol_version": 1, "id": request["id"], "ok": True, "result": result}), flush=True)
+    print(json.dumps({"protocol_version": 3, "id": request["id"], "ok": True, "result": result}), flush=True)
 """,
         encoding="utf-8",
     )
@@ -78,8 +82,10 @@ def test_manifest_rejects_symlinks(tmp_path: Path) -> None:
 def test_plugin_protocol_verifies_and_calls(tmp_path: Path) -> None:
     manifest = load_plugin_manifest(_plugin(tmp_path))
     client = PluginProcessClient(timeout_seconds=2)
-    asyncio.run(client.verify(manifest))
-    assert asyncio.run(client.call(manifest, "echo", {"value": 3})) == {
+    asyncio.run(client.verify(manifest, trusted_native=True))
+    assert asyncio.run(
+        client.call(manifest, "echo", {"value": 3}, trusted_native=True)
+    ) == {
         "ok": True,
         "data": {"value": 3},
     }
@@ -89,12 +95,12 @@ def test_install_enable_and_uninstall_lifecycle(tmp_path: Path) -> None:
     layout = _layout(tmp_path)
     service = PluginService(layout, client=PluginProcessClient(timeout_seconds=2))
     installed = asyncio.run(
-        service.install(_plugin(tmp_path, permissions="workspace_read"))
+        service.install(_plugin(tmp_path, read_access=True))
     )
     assert installed.name == "echo-plugin"
     assert not service.entries()[0].enabled
 
-    service.enable("echo-plugin")
+    service.enable("echo-plugin", trusted_native=True)
     entry = service.entries()[0]
     assert entry.enabled
     assert [tool.name for tool in plugin_tools(PluginRegistry(layout))] == [
@@ -122,7 +128,7 @@ def test_upgrade_requires_workspace_reenable(tmp_path: Path) -> None:
     layout = _layout(tmp_path)
     service = PluginService(layout, client=PluginProcessClient(timeout_seconds=2))
     asyncio.run(service.install(_plugin(tmp_path, version="1.0.0")))
-    service.enable("echo-plugin")
+    service.enable("echo-plugin", trusted_native=True)
     asyncio.run(service.install(_plugin(tmp_path, version="1.1.0")))
     assert service.entries()[0].manifest.version == "1.1.0"
     assert not service.entries()[0].enabled
@@ -157,7 +163,7 @@ def test_plugin_tool_uses_audited_external_action(tmp_path: Path) -> None:
         layout = _layout(tmp_path)
         service = PluginService(layout, client=PluginProcessClient(timeout_seconds=2))
         await service.install(_plugin(tmp_path))
-        service.enable("echo-plugin")
+        service.enable("echo-plugin", trusted_native=True)
         actions = Actions()
         tool = plugin_tools(PluginRegistry(layout))[0]
         context = type("Context", (), {"actions": actions})()

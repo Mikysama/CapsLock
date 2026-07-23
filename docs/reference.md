@@ -1,12 +1,12 @@
-# CapsLock v2 Agent Reference
+# CapsLock Agent Reference
 
-本参考描述 v2 的模型工具、TUI 命令、审批边界与持久化契约。
+本参考描述当前模型工具、TUI 命令、审批边界与持久化契约。
 
 ## 稳定契约
 
-CapsLock 2.2.3 支持 Linux/macOS 与 Python 3.12。CLI 命令和退出码、`config_version = 2`、workspace schema v5、memory schema v3、portable archive v2、JSONL schema v2、Skill manifest、插件协议 v1 和 `ToolResult` 的 `ok/data/error` 模型输入协议在 2.x 系列内保持向后兼容。
+CapsLock 2.2.4 支持 Linux/macOS 与 Python 3.12。当前协议为 `config_version = 3`、workspace schema 6、memory schema 3、portable archive 3、JSONL schema 3 和插件 manifest/protocol/grant 3。非当前格式与已删除的 Python 接口直接拒绝，不提供兼容入口或转换命令。
 
-1.10.1 的 `repositories=`、`ModelRouter.bind_run()/use_role()/summary(run_id)` 与 `max_turns` 入口已删除。新弃用至少提前一个 minor 版本公告；删除的入口不提供静默兼容。完整映射见 [v2 开发过程与迁移](development/v2/v2.0.md)。
+公开运行入口为 `AgentSession.run_stream(RunRequest)`。CLI 通过应用查询面读取状态，不应依赖 repository 聚合对象。
 
 ## 权限模式
 
@@ -47,6 +47,22 @@ CapsLock 2.2.3 支持 Linux/macOS 与 Python 3.12。CLI 命令和退出码、`co
 
 模型只提交提案；统一 `ActionCoordinator` 决定是否等待批准或自动执行。TUI 为 Coordinator 安装阻塞式审批器：越过权限边界时显示动作类型、风险、目标，以及最多 40 行、4 KiB 的本机脱敏命令或 diff 预览，用户只能拒绝或执行且默认选择拒绝；原始参数、完整输出、文件正文和凭据不会进入展示事件。最终动作状态返回同一个模型工具调用，run 随后继续。非交互 `exec` 不安装审批器，仍保留 pending action、`waiting_approval` 终止事件和退出码 `3`。动作记录只使用 `request_json` 与 `result_json`，新增动作类型不需要 subtype 表。
 
+## 工具契约与 artifact
+
+每个工具提供 `ToolSpec`、输入/输出 JSON Schema、只读/并发/破坏性标记、取消行为、capability 与结果大小限制。执行顺序固定为校验、内置策略、授权、执行、脱敏、持久化和发布。连续的只读且并发安全调用使用有界并发执行，checkpoint 仍按模型 tool-call 顺序写入。
+
+超过 16 KiB 的结果写入 `.capslock/state/artifacts/sha256/`，单项最多 5 MiB。模型只收到脱敏预览和 artifact ID；`read_tool_artifact` 只能分块读取当前 session 的 artifact，session 删除会级联清理记录与文件。
+
+## 上下文预算
+
+输入预算由模型 `context_window - max_output_tokens` 计算，并计入 system prompt、memory、Skill catalog、工具 schema 与 checkpoint。达到触发比例后先外置大型工具结果，再保留最近六轮并由 fast 角色生成结构化摘要。摘要作为不可变 compaction artifact 保存来源边界、token、profile 与 digest；恢复时复用最近的有效记录。摘要失败使用确定性兜底，连续失败达到上限后返回 `context_budget_exceeded`，不会继续调用模型。
+
+## 插件隔离
+
+插件 manifest、stdio protocol 与 workspace grant 都使用协议 3。grant 只能收窄 manifest capability；版本、digest 或 capability 改变会使授权失效。Linux 使用 Bubblewrap，macOS 使用系统 sandbox profile，默认不挂载 workspace/home 且断网。插件通过双向 stdio 向宿主 broker 请求文件、网络、固定命令和命名 credential；宿主重新执行路径、SSRF、审批、脱敏和审计策略。
+
+没有 sandbox backend 时插件默认拒绝。`--trusted-native --yes` 是逐工作区高风险授权，不受 `full_access` 自动批准，每次调用仍需要人工确认。
+
 ## 动作状态
 
 合法转换：
@@ -60,7 +76,7 @@ pending -> approved -> running -> completed
    |---------> cancelled
 ```
 
-交互审批在 Action 工具调用内完成，因此批准执行或拒绝后由同一个 run 继续推理，不产生中间终止事件。非交互或导入数据的待审批动作仍可通过 `/approvals` 结算；该兼容路径在同一个 SQLite 事务内更新 action、run、work item 和终止事件。重复结算已完成的 run 返回空结果，不会产生第二个终止事件。
+交互审批在 Action 工具调用内完成，因此批准执行或拒绝后由同一个 run 继续推理，不产生中间终止事件。非交互产生的待审批动作可通过 `/approvals` 结算；同一个 SQLite 事务更新 action、run、work item 和终止事件。重复结算已完成的 run 返回空结果，不会产生第二个终止事件。
 
 文件执行前重新检查提案哈希；命令取消先向进程组发送 TERM，2 秒后仍未退出则发送 KILL；Web 跟随重定向前重新执行公开地址校验；MCP 在执行时再次检查工具 allowlist；插件在执行时重新检查安装摘要和工作区授权。
 
@@ -68,11 +84,11 @@ pending -> approved -> running -> completed
 
 | 命令 | 功能 |
 | --- | --- |
-| `/help` | 显示 v2 命令。 |
+| `/help` | 显示命令。 |
 | `/status` | 汇总 session、workspace、model、permissions、context、usage、tasks 和 queue。 |
 | `/model [deepseek-v4-flash\|deepseek-v4-pro]` | 查看或切换当前 session 的模型；无参数时打开选择器。 |
 | `/permissions [full|approve|ask]` | 无参数时打开权限选择框；带参数时直接切换。 |
-| `/approvals` | 处理非交互、导入或旧数据留下的待审批动作。 |
+| `/approvals` | 处理非交互运行留下的待审批动作。 |
 | `/queue` | 查看队列；`start <id>` 显式启动导入队列，另有 `move`、`cancel` 和 `retry`。 |
 | `/memory ...` | 管理记忆、候选、召回、导入导出和 embeddings。 |
 | `/skills ...` | 列出、查看、校验、启用或禁用 Skill。 |
@@ -85,7 +101,7 @@ pending -> approved -> running -> completed
 | `/exit` | 退出 TUI。 |
 | `/quit` | 退出 TUI，与 `/exit` 等价。 |
 
-v2 不解析旧 alias，也不提供独立 `/cost`、`/context`、`/tasks`、`/changes`、`/commands` 或 `/web` 页面。
+命令目录不提供额外 alias，也不提供独立 `/cost`、`/context`、`/tasks`、`/changes`、`/commands` 或 `/web` 页面。
 
 `/model` 只接受 `deepseek-v4-flash` 和 `deepseek-v4-pro`。选择写入当前
 session，恢复后继续生效；新 session 使用配置默认模型。运行中的模型会话保持
@@ -146,8 +162,10 @@ capslock doctor [--json] [--strict] [--network] [--fix] [--yes]
 
 | 字段 | 含义 |
 | --- | --- |
-| `schema_version` | 固定为 `2`。 |
+| `schema_version` | 固定为 `3`。 |
 | `sequence` | run 内从 1 递增。 |
+| `event_id` | 全局唯一事件 ID。 |
+| `trace_id` | run 级追踪 ID。 |
 | `timestamp` | 带时区的 RFC 3339 时间。 |
 | `session_id` | 会话 ID。 |
 | `work_item_id` | 前台工作项 ID。 |
@@ -164,7 +182,7 @@ capslock doctor [--json] [--strict] [--network] [--fix] [--yes]
 `tool_running.data.presentation` 与 `tool_completed.data.presentation` 是可选的
 版本化展示摘要，当前 `version=1`，包含 `category`、`title` 以及可选的
 `detail`、`target`、`outcome`。它只从工具 allowlist 字段生成并经过脱敏与长度
-限制，不承载原始参数、完整输出或文件正文；旧消费者可以忽略该字段。
+限制，不承载原始参数、完整输出或文件正文。
 
 终止事件：
 
@@ -179,7 +197,7 @@ capslock doctor [--json] [--strict] [--network] [--fix] [--yes]
 
 ToolLoop 每个模型或工具阶段写 `run_steps`。只有 completed 且带 checkpoint 的步骤可用于恢复。`resume` 创建新的 work item 和 run，记录 `parent_run_id` 与 `resume_from_step_id`，不会修改失败 run 的历史。空回答、模型错误或轮次耗尽会将当前模型 step 标为 failed。
 
-`WorkspaceAgent.ask_stream()` 是唯一 Agent 执行 API。每次流只产生一个终止事件；调用方取消流时，内部执行 task 也会被取消并等待资源清理。
+`AgentSession.run_stream(RunRequest)` 是唯一 Agent 执行 API。每次流只产生一个终止事件；同一 session 串行执行，调用方取消流时，内部执行 task 也会被取消并等待资源清理。
 
 ## 多 Agent 契约
 
@@ -187,7 +205,7 @@ ToolLoop 每个模型或工具阶段写 `run_steps`。只有 completed 且带 ch
 
 调度器按契约顺序返回结果，兄弟任务失败不会互相取消，父运行取消会传播到全部未完成子任务。子快照排除 `.git`、`.capslock`、环境文件和符号链接，并使用自己的 workspace/memory 数据库。`AgentOutputVerifier` 校验输出对象、allowlist 路径、必需检查、文件大小和 SHA-256；未通过的输出只返回失败诊断。
 
-workspace schema v5 使用 `agent_tasks`、`agent_workspaces`、`agent_capabilities`、`agent_messages` 和 `agent_outputs` 保存契约、状态、脱敏消息摘要和验证结果。portable archive v2 不包含临时工作区；导入时活跃任务转为 `interrupted`。
+workspace schema 6 使用 `agent_tasks`、`agent_workspaces`、`agent_capabilities`、`agent_messages` 和 `agent_outputs` 保存契约、状态、脱敏消息摘要和验证结果。portable archive 默认不包含 artifact 正文。
 
 ## 记忆契约
 
@@ -210,7 +228,7 @@ workspace schema v5 使用 `agent_tasks`、`agent_workspaces`、`agent_capabilit
 
 工作区数据库使用 application ID `0x434C4B32`，记忆数据库使用 `0x434C4D32`。两者开启 foreign keys、WAL 和 5 秒 busy timeout；记忆库额外开启 secure delete 并设置文件权限 `0600`。
 
-应用先读取 application ID 和 schema version，确认兼容后才切换 WAL。v2.2.0 将 workspace schema v4 在自动备份后迁移到 v5，增加协作任务、工作区、能力、消息和输出记录；memory schema 保持 v3。旧 application ID 和未知版本仍只报错。
+应用先读取 application ID 和 schema version，确认是当前格式后才切换 WAL。workspace schema 为 6，memory schema 为 3；其他 application ID 或 schema 只报错，不修改原数据库。
 
 portable import 使用 archive ID 幂等记录。相同 ID 与内容跳过，同 ID 不同内容确定性重映射并重写引用。running run 转为 interrupted，approved/running action 转为 pending；导入的历史副作用不能在目标工作区执行 undo。
 
@@ -221,4 +239,4 @@ portable import 使用 archive ID 幂等记录。相同 ID 与内容跳过，同
 - `/status` 和 JSONL 终止事件保留 run/session token、费用及逐模型摘要。预算预检失败时，TUI 可仅批准下一次模型调用，`exec` 返回 `model_budget_exceeded`。
 - `/memory embeddings enable external <model-profile>` 会先展示 `memory.content`、未来 `recall.query`、当前记录数和 UTF-8 字节数；确认记录失效或撤销后不会联网。
 
-canonical 路径与手工迁移步骤见 [v2 开发过程与迁移](development/v2/v2.0.md)。
+canonical 路径见项目 README。

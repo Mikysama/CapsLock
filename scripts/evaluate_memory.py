@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the deterministic v2 memory recall quality fixture."""
+"""Run the deterministic memory recall quality fixture."""
 
 from __future__ import annotations
 

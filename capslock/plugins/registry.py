@@ -12,21 +12,27 @@ from typing import Any
 
 from ..layout import ProjectLayout, UserLayout
 from .manifest import (
-    PluginManifestV1,
+    PluginCapabilities,
+    PluginManifest,
     PluginPermission,
     PluginValidationError,
     load_plugin_manifest,
 )
 
 
-REGISTRY_VERSION = 1
+REGISTRY_VERSION = 3
 
 
 @dataclass(frozen=True)
 class InstalledPlugin:
-    manifest: PluginManifestV1
+    manifest: PluginManifest
     enabled: bool
-    granted_permissions: frozenset[PluginPermission]
+    granted_capabilities: PluginCapabilities
+    trusted_native: bool = False
+
+    @property
+    def granted_permissions(self) -> frozenset[PluginPermission]:
+        return self.granted_capabilities.permissions
 
 
 class PluginRegistry:
@@ -47,21 +53,20 @@ class PluginRegistry:
             except PluginValidationError:
                 continue
             grant = enabled.get(name, {}) if isinstance(enabled, dict) else {}
-            grant_permissions = (
-                grant.get("permissions", []) if isinstance(grant, dict) else []
-            )
-            permissions = frozenset(
-                PluginPermission(item)
-                for item in grant_permissions
-                if item in {permission.value for permission in PluginPermission}
+            capabilities = _capabilities_from_record(
+                grant.get("capabilities", {}) if isinstance(grant, dict) else {}
             )
             entries.append(
                 InstalledPlugin(
                     manifest,
                     isinstance(grant, dict)
                     and grant.get("version") == manifest.version
-                    and grant.get("digest") == manifest.digest,
-                    permissions,
+                    and grant.get("digest") == manifest.digest
+                    and manifest.capabilities.contains(capabilities),
+                    capabilities,
+                    bool(grant.get("trusted_native", False))
+                    if isinstance(grant, dict)
+                    else False,
                 )
             )
         return entries
@@ -112,7 +117,7 @@ class PluginRegistry:
             raise PluginValidationError(f"plugin package changed on disk: {name}")
         return entry
 
-    def write_install(self, manifest: PluginManifestV1, source: Path) -> None:
+    def write_install(self, manifest: PluginManifest, source: Path) -> None:
         document = self._read(self.layout.user.plugin_registry)
         plugins = document.setdefault("plugins", {})
         previous = plugins.get(manifest.name, {})
@@ -133,12 +138,24 @@ class PluginRegistry:
         document.setdefault("plugins", {}).pop(name, None)
         self._write(self.layout.user.plugin_registry, document)
 
-    def enable(self, manifest: PluginManifestV1) -> None:
+    def enable(
+        self,
+        manifest: PluginManifest,
+        *,
+        capabilities: PluginCapabilities | None = None,
+        trusted_native: bool = False,
+    ) -> None:
+        granted = capabilities or manifest.capabilities
+        if not manifest.capabilities.contains(granted):
+            raise PluginValidationError(
+                "workspace grant cannot expand manifest capabilities"
+            )
         document = self._read(self.layout.local_plugins)
         document.setdefault("plugins", {})[manifest.name] = {
             "version": manifest.version,
             "digest": manifest.digest,
-            "permissions": sorted(item.value for item in manifest.permissions),
+            "capabilities": granted.as_dict(),
+            "trusted_native": trusted_native,
             "enabled_at": _now(),
         }
         self._write(self.layout.local_plugins, document, mode=0o600)
@@ -223,3 +240,20 @@ def append_plugin_audit(user: UserLayout, event: dict[str, object]) -> None:
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _capabilities_from_record(value: object) -> PluginCapabilities:
+    if not isinstance(value, dict):
+        return PluginCapabilities()
+
+    def items(name: str) -> tuple[str, ...]:
+        raw = value.get(name, [])
+        return tuple(item for item in raw if isinstance(item, str)) if isinstance(raw, list) else ()
+
+    return PluginCapabilities(
+        items("workspace_read"),
+        items("workspace_write"),
+        items("network_hosts"),
+        items("process_templates"),
+        items("credentials"),
+    )

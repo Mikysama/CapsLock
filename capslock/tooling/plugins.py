@@ -7,7 +7,7 @@ from typing import Any
 from ..domain import ActionType
 from ..plugins import PluginRegistry
 from .async_adapters import propose_action
-from .async_core import RunContext, Tool, ToolResult
+from .async_core import ExecutionContext, Tool, ToolResult
 
 
 def plugin_tools(registry: PluginRegistry) -> list[Tool]:
@@ -23,7 +23,7 @@ def plugin_tools(registry: PluginRegistry) -> list[Tool]:
             names.add(public_name)
 
             async def execute(
-                context: RunContext,
+                context: ExecutionContext,
                 arguments: dict[str, Any],
                 *,
                 plugin_name: str = entry.manifest.name,

@@ -1,1 +1,1 @@
-"""Typed v2 CLI views."""
+"""Typed CLI views."""

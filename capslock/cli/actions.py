@@ -16,8 +16,8 @@ from .prompt import select_model, select_permission_mode
 
 
 async def render_approvals(context: CliContext) -> None:
-    items = await context.agent.repositories.actions.list(
-        context.agent.session_id,
+    items = await context.require_queries().actions(
+        context.session.session_id,
         statuses={ActionStatus.PENDING, ActionStatus.APPROVED, ActionStatus.RUNNING},
     )
     render_approval_view(context.console, items)
@@ -26,12 +26,12 @@ async def render_approvals(context: CliContext) -> None:
 async def render_sources(context: CliContext) -> None:
     render_source_view(
         context.console,
-        await context.agent.repositories.sources.list(context.agent.session_id),
+        await context.require_queries().sources(context.session.session_id),
     )
 
 
 async def approve_action(context: CliContext, prefix: str) -> None:
-    coordinator = context.agent.action_factory("cli")
+    coordinator = context.session.action_factory("cli")
     try:
         action = await coordinator.resolve(prefix)
         context.console.print(
@@ -47,20 +47,20 @@ async def approve_action(context: CliContext, prefix: str) -> None:
         context.console.print(
             f"[success]{result.status.value}:[/] {result.id[:12]} {result.result or ''}"
         )
-        await context.agent.workflow.settle_approval(
-            context.agent.session_id, action.run_id
+        await context.session.workflow.settle_approval(
+            context.session.session_id, action.run_id
         )
     except ValueError as exc:
         context.console.print(f"[error]Error:[/] {exc}")
 
 
 async def reject_action(context: CliContext, prefix: str) -> None:
-    coordinator = context.agent.action_factory("cli")
+    coordinator = context.session.action_factory("cli")
     try:
         action = await coordinator.resolve(prefix)
         await coordinator.for_run(action.run_id).reject(action.id)
-        await context.agent.workflow.settle_approval(
-            context.agent.session_id, action.run_id
+        await context.session.workflow.settle_approval(
+            context.session.session_id, action.run_id
         )
         context.console.print(f"[warning]Rejected {action.type.value}.[/]")
     except ValueError as exc:
@@ -70,14 +70,14 @@ async def reject_action(context: CliContext, prefix: str) -> None:
 async def apply_action_decision(
     context: CliContext, action: ActionRecord, decision: str
 ) -> None:
-    coordinator = context.agent.action_factory("cli").for_run(action.run_id)
+    coordinator = context.session.action_factory("cli").for_run(action.run_id)
     if decision == "later":
         context.console.print(f"[waiting]Action remains pending:[/] {action.id[:12]}")
         return
     if decision == "reject":
         await coordinator.reject(action.id)
-        await context.agent.workflow.settle_approval(
-            context.agent.session_id, action.run_id
+        await context.session.workflow.settle_approval(
+            context.session.session_id, action.run_id
         )
         context.console.print(
             f"[warning]Rejected {action.type.value}:[/] {action.id[:12]}"
@@ -89,14 +89,14 @@ async def apply_action_decision(
     context.console.print(
         f"[success]{result.status.value}:[/] {result.id[:12]} {result.result or ''}"
     )
-    await context.agent.workflow.settle_approval(
-        context.agent.session_id, action.run_id
+    await context.session.workflow.settle_approval(
+        context.session.session_id, action.run_id
     )
 
 
 async def undo(context: CliContext) -> None:
     try:
-        action = await context.agent.action_factory("cli").reverse_last_file_action()
+        action = await context.session.action_factory("cli").reverse_last_file_action()
         context.console.print(f"[success]Undone:[/] {action.request.get('path')}")
     except ValueError as exc:
         context.console.print(f"[error]Error:[/] {exc}")
@@ -105,10 +105,7 @@ async def undo(context: CliContext) -> None:
 async def set_permission_mode(context: CliContext, value: str) -> None:
     try:
         mode = PermissionMode.parse(value)
-        context.agent.permission_mode = mode
-        await context.agent.repositories.settings.set_workspace(
-            "permission_mode", mode.value
-        )
+        await context.session.persist_permission_mode(mode)
         context.console.print(f"[success]Permission mode:[/] {mode.value}")
     except ValueError as exc:
         context.console.print(f"[error]Error:[/] {exc}")
@@ -119,7 +116,7 @@ async def permissions(context: CliContext, text: str) -> None:
     if len(parts) == 1:
         try:
             selected = await asyncio.to_thread(
-                select_permission_mode, context.agent.permission_mode
+                select_permission_mode, context.session.permission_mode
             )
         except (EOFError, KeyboardInterrupt):
             context.console.print("[waiting]Permission mode unchanged.[/]")
@@ -134,7 +131,7 @@ async def permissions(context: CliContext, text: str) -> None:
 
 async def set_model(context: CliContext, value: str) -> None:
     try:
-        model = await context.agent.set_model(value)
+        model = await context.session.set_model(value)
         context.console.print(f"[success]Model:[/] {model}")
     except ValueError as exc:
         context.console.print(f"[error]Error:[/] {exc}")
@@ -144,7 +141,7 @@ async def model_command(context: CliContext, text: str) -> None:
     parts = shlex.split(text)
     if len(parts) == 1:
         try:
-            selected = await asyncio.to_thread(select_model, context.agent.model)
+            selected = await asyncio.to_thread(select_model, context.session.model)
         except (EOFError, KeyboardInterrupt):
             context.console.print("[waiting]Model unchanged.[/]")
             return
@@ -161,7 +158,7 @@ async def model_command(context: CliContext, text: str) -> None:
 async def mcp_command(context: CliContext, text: str) -> None:
     parts = shlex.split(text)
     registry = McpRegistry(
-        context.agent.policy, layout=ProjectLayout.discover(context.agent.workspace)
+        context.session.policy, layout=ProjectLayout.discover(context.session.workspace)
     )
     try:
         if len(parts) == 1 or parts[1] == "list":
@@ -185,7 +182,7 @@ async def show_git_diff(context: CliContext) -> None:
     process = await asyncio.create_subprocess_exec(
         "git",
         "-C",
-        str(context.agent.workspace),
+        str(context.session.workspace),
         "diff",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,

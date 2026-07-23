@@ -11,7 +11,6 @@ from .types import (
     AgentSettings,
     BudgetSettings,
     ModelProfileSettings,
-    ModelSettings,
     ProviderSettings,
     RoutingSettings,
 )
@@ -43,7 +42,6 @@ def boolean(value: object) -> bool:
 
 def model_routes(
     document: dict[str, object],
-    legacy: ModelSettings,
     *,
     resolve_credentials: bool = True,
 ) -> tuple[
@@ -53,50 +51,6 @@ def model_routes(
 ]:
     raw_providers = document.get("providers")
     raw_models = document.get("models")
-    using_routes = any(name in document for name in ("providers", "models", "routing"))
-    if not using_routes:
-        provider = ProviderSettings(
-            "default",
-            "openai_compatible",
-            legacy.base_url,
-            "CAPSLOCK_API_KEY",
-            legacy.api_key,
-            legacy.timeout_seconds,
-            "provider:default",
-            "env:CAPSLOCK_API_KEY",
-        )
-        model = ModelProfileSettings(
-            "default",
-            provider.name,
-            legacy.model,
-            128_000,
-            8_192,
-            legacy.input_cost_per_million,
-            legacy.output_cost_per_million,
-        )
-        route = (model.name,)
-        return (
-            {provider.name: provider},
-            {model.name: model},
-            RoutingSettings(route, route, (), ()),
-        )
-    if isinstance(document.get("model"), dict) and document["model"]:
-        raise ValueError("legacy [model] cannot be combined with [providers]/[models]")
-    legacy_environment = {
-        "CAPSLOCK_BASE_URL",
-        "CAPSLOCK_MODEL",
-        "CAPSLOCK_TIMEOUT_SECONDS",
-        "CAPSLOCK_INPUT_COST_PER_MILLION",
-        "CAPSLOCK_OUTPUT_COST_PER_MILLION",
-        "DEEPSEEK_BASE_URL",
-        "DEEPSEEK_MODEL",
-    }
-    mixed = sorted(legacy_environment.intersection(os.environ))
-    if mixed:
-        raise ValueError(
-            "legacy model environment variables cannot be combined with routed "
-            "config: " + ", ".join(mixed)
-        )
     if not isinstance(raw_providers, dict) or not isinstance(raw_models, dict):
         raise ValueError("[providers] and [models] must be configured together")
     providers: dict[str, ProviderSettings] = {}
@@ -110,14 +64,10 @@ def model_routes(
         base_url = str(value.get("base_url", "")).rstrip("/")
         if not base_url.startswith(("https://", "http://")):
             raise ValueError(f"provider {name} requires an http(s) base_url")
-        credential_ref = str(
-            value.get(
-                "credential",
-                f"env:{value.get('api_key_env', 'CAPSLOCK_API_KEY')}",
-            )
-        )
-        source, credential_name = parse_reference(credential_ref)
-        key_env = credential_name if source == "env" else ""
+        credential_ref = str(value.get("credential", ""))
+        if not credential_ref:
+            raise ValueError(f"provider {name} requires credential")
+        parse_reference(credential_ref)
         timeout = float(value.get("timeout_seconds", 60))
         if timeout <= 0:
             raise ValueError(f"provider {name} timeout_seconds must be positive")
@@ -128,7 +78,6 @@ def model_routes(
             name,
             kind,
             base_url,
-            key_env,
             resolve_credential(credential_ref) if resolve_credentials else None,
             timeout,
             data_policy,
@@ -236,14 +185,6 @@ def agent_settings(raw: dict[str, object]) -> AgentSettings:
 
 
 def max_tool_rounds(runtime: dict[str, object]) -> int:
-    if "CAPSLOCK_MAX_TURNS" in os.environ:
-        raise ValueError(
-            "CAPSLOCK_MAX_TURNS was removed in 2.0.0; use CAPSLOCK_MAX_TOOL_ROUNDS"
-        )
-    if "max_turns" in runtime:
-        raise ValueError(
-            "runtime.max_turns was removed in 2.0.0; use runtime.max_tool_rounds"
-        )
     value = os.environ.get(
         "CAPSLOCK_MAX_TOOL_ROUNDS",
         runtime.get("max_tool_rounds", DEFAULT_MAX_TOOL_ROUNDS),

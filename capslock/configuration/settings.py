@@ -11,6 +11,7 @@ from .types import (
     AgentSettings,
     BudgetSettings,
     CommandSettings,
+    ContextSettings,
     McpSettings,
     MemorySettings,
     ModelProfileSettings,
@@ -29,6 +30,7 @@ if TYPE_CHECKING:
 class Settings:
     model_config: ModelSettings
     runtime: RuntimeSettings
+    context: ContextSettings
     command: CommandSettings
     web: WebSettings
     mcp: McpSettings
@@ -52,7 +54,7 @@ class Settings:
         resolved_layout = layout or ProjectLayout.discover(workspace)
         document: dict[str, object] = {}
         if resolved_layout.config.is_file():
-            document = load_config_document(resolved_layout.config, migrate=True)
+            document = load_config_document(resolved_layout.config)
         return resolve_settings(
             document,
             layout=resolved_layout,

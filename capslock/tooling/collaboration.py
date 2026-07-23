@@ -11,7 +11,7 @@ from ..collaboration.models import (
     CapabilityKind,
     VerificationRequirement,
 )
-from .async_core import RunContext, Tool, ToolResult
+from .async_core import ExecutionContext, Tool, ToolResult
 
 
 def delegation_tool() -> Tool:
@@ -84,7 +84,9 @@ def delegation_tool() -> Tool:
     )
 
 
-async def _delegate(context: RunContext, arguments: dict[str, Any]) -> ToolResult:
+async def _delegate(
+    context: ExecutionContext, arguments: dict[str, Any]
+) -> ToolResult:
     service = context.collaboration
     if service is None:
         return ToolResult(False, {}, "multi-Agent collaboration is not configured")
@@ -156,7 +158,7 @@ async def _delegate(context: RunContext, arguments: dict[str, Any]) -> ToolResul
 
 
 async def _reserve_parent_budget(
-    context: RunContext, contracts: list[AgentTaskContract]
+    context: ExecutionContext, contracts: list[AgentTaskContract]
 ) -> list[AgentTaskContract]:
     governor = context.governor
     if governor is None:

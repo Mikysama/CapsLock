@@ -7,7 +7,6 @@ import json
 import re
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +27,7 @@ from ..domain import (
     StopReason,
     WorkItemStatus,
 )
+from ..configuration import ContextSettings
 from ..evidence import Evidence
 from ..observability import EventSink
 from ..interaction import RunInteraction
@@ -35,17 +35,25 @@ from ..models import selectable_model
 from ..permissions import PermissionMode
 from ..ports import (
     ActionFactory,
+    ActionRepositoryPort,
+    GovernancePort,
+    ModelAuditPort,
+    RunJournal,
+    RunRepositoryPort,
+    SessionPort,
     SkillPort,
     SkillRegistryPort,
+    SourcePort,
+    TaskPort,
+    WorkItemRepositoryPort,
     WorkflowPort,
-    WorkspaceServicesPort,
 )
 from ..policy import WorkspacePolicy
 from ..skills import SkillValidationError
 from ..tooling.async_catalog import workspace_tools
-from ..tooling.async_core import RunContext, ToolRegistry
-from .context import CitationResolver, ContextBuilder, citation_data
-from .execution import RunExecutionService
+from ..tooling.async_core import ExecutionContext, ToolRegistry
+from .context import CitationResolver, ContextBudgetManager, citation_data
+from .engine import RunEngine, RunRequest
 from .model import ChatModel
 from .run_support import (
     RunEventPublisher,
@@ -74,14 +82,25 @@ EXPLICIT_SKILL_PATTERN = re.compile(
 )
 
 
-class WorkspaceAgent:
+class AgentSession:
     def __init__(
         self,
         *,
         workspace: Path,
         model_name: str,
         chat_model: ChatModel,
-        repositories: WorkspaceServicesPort,
+        sessions: SessionPort,
+        work_items: WorkItemRepositoryPort,
+        runs: RunRepositoryPort,
+        journal: RunJournal,
+        action_records: ActionRepositoryPort,
+        tasks: TaskPort,
+        sources: SourcePort,
+        settings_store: object,
+        model_audit: ModelAuditPort,
+        governance: GovernancePort,
+        collaboration_records: object,
+        compactions: object,
         workflow: WorkflowPort,
         session_id: str,
         policy: WorkspacePolicy,
@@ -93,7 +112,10 @@ class WorkspaceAgent:
         memory: Any = None,
         permission_mode: PermissionMode = PermissionMode.APPROVE_FOR_ME,
         max_tool_rounds: int = 32,
-        max_context_messages: int = 24,
+        context_settings: ContextSettings = ContextSettings(),
+        context_window: int = 128_000,
+        max_output_tokens: int = 8_192,
+        model_profile: str = "default",
         input_cost_per_million: float = 0,
         output_cost_per_million: float = 0,
         max_run_tokens: int | None = None,
@@ -101,11 +123,23 @@ class WorkspaceAgent:
         loop_detection: LoopDetectionSettings = LoopDetectionSettings(),
         interaction: RunInteraction | None = None,
         collaboration: Any = None,
+        artifacts: Any = None,
     ) -> None:
         self.workspace = workspace.resolve()
         self.model = model_name
         self.chat_model = chat_model
-        self.repositories = repositories
+        self.sessions = sessions
+        self.work_items = work_items
+        self.runs = runs
+        self.journal = journal
+        self.action_records = action_records
+        self.tasks = tasks
+        self.sources = sources
+        self.settings_store = settings_store
+        self.model_audit = model_audit
+        self.governance = governance
+        self.collaboration_records = collaboration_records
+        self.compactions = compactions
         self.workflow = workflow
         self.session_id = session_id
         self.policy = policy
@@ -118,8 +152,8 @@ class WorkspaceAgent:
             permission_mode=permission_mode
         )
         self.collaboration = collaboration
+        self.artifacts = artifacts
         self.max_tool_rounds = max_tool_rounds
-        self.max_context_messages = max_context_messages
         self.input_cost = input_cost_per_million
         self.output_cost = output_cost_per_million
         self.default_limits = RunLimits(
@@ -129,19 +163,30 @@ class WorkspaceAgent:
         )
         self.loop_detection = loop_detection
         self.tools = tools or workspace_tools()
+        self.context_budget = ContextBudgetManager(
+            sessions=sessions,
+            compactions=compactions,
+            settings=context_settings,
+            context_window=context_window,
+            max_output_tokens=max_output_tokens,
+            model_profile=model_profile,
+            model_name=model_name,
+            tool_schemas=self.tools.schemas,
+            memory=memory,
+        )
         self._active_runs = 0
-        self.citations = CitationResolver(repositories)
+        self.citations = CitationResolver(sources)
         self.tool_loop = ToolLoop(
             chat_model=chat_model,
             model=model_name,
             tools=self.tools,
-            journal=repositories.run_journal,
+            journal=journal,
             max_tool_rounds=self.max_tool_rounds,
             context_factory=self._run_context,
         )
         self.run_orchestrator = RunOrchestrator(
-            governance=repositories.governance,
-            model_audit=repositories.models,
+            governance=governance,
+            model_audit=model_audit,
             workflow=workflow,
             chat_model=chat_model,
             default_limits=self.default_limits,
@@ -149,12 +194,12 @@ class WorkspaceAgent:
         )
         self.run_finalizer = RunFinalizer(
             workflow=workflow,
-            journal=repositories.run_journal,
-            model_audit=repositories.models,
+            journal=journal,
+            model_audit=model_audit,
             input_cost_per_million=self.input_cost,
             output_cost_per_million=self.output_cost,
         )
-        self.execution = RunExecutionService(self)
+        self.engine = RunEngine(self._run_execution)
 
     def set_action_authorizer(
         self,
@@ -180,63 +225,57 @@ class WorkspaceAgent:
         """Switch future calls in this session to an allowlisted model."""
 
         model = selectable_model(value)
-        if self._active_runs:
+        if self.engine.active or self._active_runs:
             raise ValueError("cannot switch model while a run is active")
-        await self.repositories.sessions.set_model(self.session_id, model)
+        await self.sessions.set_model(self.session_id, model)
         self.model = model
+        self.context_budget.model_name = model
         self.tool_loop.model = model
         self.tool_loop.model_steps.model = model
         return model
+
+    async def rename(self, title: str):
+        return await self.sessions.rename(self.session_id, title)
+
+    async def persist_permission_mode(self, value: PermissionMode) -> None:
+        self.permission_mode = value
+        await self.settings_store.set_workspace("permission_mode", value.value)
+
+    async def set_skill_enabled(self, name: str, enabled: bool) -> None:
+        await self.settings_store.set_skill_enabled(name, enabled)
+
+    async def retryable_run(self, prefix: str):
+        return await self.runs.retryable(self.session_id, prefix)
+
+    async def queued_work_item(self, prefix: str):
+        item = await self.work_items.require(prefix)
+        if item.session_id != self.session_id:
+            raise ValueError("work item does not belong to this session")
+        return item
+
+    async def cancel_queued_work_item(self, prefix: str):
+        item = await self.queued_work_item(prefix)
+        return await self.work_items.update(
+            item.id,
+            WorkItemStatus.CANCELLED,
+            error="cancelled before start",
+        )
+
+    async def reorder_queued_work_item(self, prefix: str, position: int):
+        item = await self.queued_work_item(prefix)
+        return await self.work_items.reorder(item.id, position)
+
+    async def delete_if_empty(self) -> bool:
+        return await self.sessions.delete_if_empty(self.session_id)
 
     async def enqueue(self, question: str, *, parent_work_item_id: str | None = None):
         return await self.workflow.enqueue(
             self.session_id, question, parent_work_item_id=parent_work_item_id
         )
 
-    async def ask_stream(
-        self,
-        question: str,
-        *,
-        work_item_id: str | None = None,
-        resume_from_run_id: str | None = None,
-        mode: RunMode = RunMode.INTERACTIVE,
-        limits: RunLimits | None = None,
-        authorize_limit: Callable[[BudgetSnapshot], Awaitable[bool]] | None = None,
-    ) -> AsyncIterator[AgentEvent]:
-        queue: asyncio.Queue[AgentEvent | None] = asyncio.Queue()
-
-        async def consume(event: AgentEvent) -> None:
-            await queue.put(event)
-
-        async def execute() -> None:
-            self._active_runs += 1
-            try:
-                await self.execution.execute(
-                    question,
-                    work_item_id=work_item_id,
-                    resume_from_run_id=resume_from_run_id,
-                    mode=mode,
-                    limits=limits,
-                    authorize_limit=authorize_limit,
-                    consumer=consume,
-                )
-            finally:
-                self._active_runs -= 1
-                await queue.put(None)
-
-        task = asyncio.create_task(execute())
-        try:
-            while True:
-                event = await queue.get()
-                if event is None:
-                    break
-                yield event
-            await task
-        finally:
-            if not task.done():
-                task.cancel()
-            with suppress(asyncio.CancelledError):
-                await task
+    async def run_stream(self, request: RunRequest) -> AsyncIterator[AgentEvent]:
+        async for event in self.engine.run_stream(request):
+            yield event
 
     async def _run_execution(
         self,
@@ -267,7 +306,7 @@ class WorkspaceAgent:
         input_tokens = output_tokens = 0
         publisher = RunEventPublisher(
             run_id=run_id,
-            journal=self.repositories.run_journal,
+            journal=self.journal,
             event=self.events.emit,
             consumer=consumer,
         )
@@ -287,19 +326,20 @@ class WorkspaceAgent:
                 prompt = self._explicit_skill_prompt(
                     name, loaded.package.instructions, arguments
                 )
-            context = ContextBuilder(
-                self.repositories,
-                self.max_context_messages,
-                await self._instructions(),
-                self.memory,
-            )
             checkpoint = prepared.checkpoint.checkpoint if prepared.checkpoint else None
-            messages = (
-                list(checkpoint.get("messages", []))
-                if checkpoint
-                else await context.build(self.session_id, prompt, run_id=run_id)
-            )
-            await self.repositories.sessions.append_message(
+            context_result = None
+            if checkpoint:
+                messages = list(checkpoint.get("messages", []))
+            else:
+                context_result = await self.context_budget.build(
+                    self.session_id,
+                    prompt,
+                    run_id=run_id,
+                    instructions=await self._instructions(),
+                    summarizer=model_session.for_role(ModelRole.FAST),
+                )
+                messages = context_result.messages
+            await self.sessions.append_message(
                 self.session_id, run_id, "user", prepared.work_item.question
             )
             result = await self.tool_loop.run(
@@ -309,9 +349,15 @@ class WorkspaceAgent:
                 governor=governor,
                 authorize_limit=authorize_limit,
                 chat_model=model_session,
+                compact_context=lambda active_messages: self.context_budget.compact_checkpoint(
+                    active_messages,
+                    session_id=self.session_id,
+                    run_id=run_id,
+                    summarizer=model_session.for_role(ModelRole.FAST),
+                ),
             )
             input_tokens, output_tokens = result.input_tokens, result.output_tokens
-            for hit in context.last_recalls:
+            for hit in context_result.recalls if context_result is not None else ():
                 result.memories[hit.memory.id] = hit.memory
             text, citations = await self.citations.resolve(
                 result.text,
@@ -320,13 +366,13 @@ class WorkspaceAgent:
                 memories=result.memories,
                 session_id=self.session_id,
             )
-            await self.repositories.sessions.append_message(
+            await self.sessions.append_message(
                 self.session_id, run_id, "assistant", text
             )
-            await self.repositories.run_journal.record_citations(
+            await self.journal.record_citations(
                 run_id, [item for item in citations if isinstance(item, Evidence)]
             )
-            pending = await self.repositories.actions.list(
+            pending = await self.action_records.list(
                 self.session_id,
                 run_id=run_id,
                 statuses={
@@ -339,7 +385,7 @@ class WorkspaceAgent:
             if self.collaboration is not None:
                 child_waiting = [
                     item
-                    for item in await self.repositories.collaboration.list_tasks(run_id)
+                    for item in await self.collaboration_records.list_tasks(run_id)
                     if item["state"] == "waiting_approval"
                 ]
             if (
@@ -375,7 +421,9 @@ class WorkspaceAgent:
                         "score": hit.score,
                         "reasons": list(hit.reasons),
                     }
-                    for hit in context.last_recalls
+                    for hit in (
+                        context_result.recalls if context_result is not None else ()
+                    )
                 ],
                 action_ids=[item.id for item in pending],
                 child_tasks=child_waiting,
@@ -386,6 +434,7 @@ class WorkspaceAgent:
                 if result.stop_reason is not None
                 else None,
             )
+            await publisher.flush()
             terminal = await self.workflow.finish(
                 run_id,
                 status=outcome.status,
@@ -399,6 +448,7 @@ class WorkspaceAgent:
             )
             await publish(terminal)
         except asyncio.CancelledError:
+            await publisher.flush()
             terminal = await self.run_finalizer.fail_if_running(
                 run_id=run_id,
                 started=started,
@@ -436,10 +486,9 @@ class WorkspaceAgent:
                     },
                 )
             duration = round((time.monotonic() - started) * 1000)
-            input_tokens, output_tokens, cost = await self.repositories.models.usage(
-                run_id
-            )
+            input_tokens, output_tokens, cost = await self.model_audit.usage(run_id)
             snapshot = await governor.current()
+            await publisher.flush()
             terminal = await self.workflow.finish(
                 run_id,
                 status=WorkItemStatus.STOPPED,
@@ -471,6 +520,7 @@ class WorkspaceAgent:
         except (ToolLoopError, SkillValidationError, ModelRoutingError) as exc:
             if isinstance(exc, ToolLoopError):
                 input_tokens, output_tokens = exc.input_tokens, exc.output_tokens
+            await publisher.flush()
             terminal = await self.run_finalizer.fail_if_running(
                 run_id=run_id,
                 started=started,
@@ -486,6 +536,7 @@ class WorkspaceAgent:
                 await publish(terminal)
             raise AgentRuntimeError(str(exc)) from exc
         except Exception as exc:
+            await publisher.flush()
             terminal = await self.run_finalizer.fail_if_running(
                 run_id=run_id,
                 started=started,
@@ -501,7 +552,10 @@ class WorkspaceAgent:
                 await publish(terminal)
             raise
         finally:
-            await asyncio.to_thread(self.skill_service.finish_run, run_id)
+            try:
+                await publisher.close()
+            finally:
+                await asyncio.to_thread(self.skill_service.finish_run, run_id)
 
     async def _instructions(self) -> str:
         catalog = await asyncio.to_thread(self.skills.catalog)
@@ -515,19 +569,20 @@ class WorkspaceAgent:
             + "\n</available-skills>"
         )
 
-    def _run_context(self, run_id: str) -> RunContext:
-        return RunContext(
+    def _run_context(self, run_id: str) -> ExecutionContext:
+        return ExecutionContext(
             session_id=self.session_id,
             run_id=run_id,
             policy=self.policy,
             event=self.events.emit,
             actions=self.action_factory(run_id),
-            tasks=self.repositories.tasks,
-            sources=self.repositories.sources,
+            tasks=self.tasks,
+            sources=self.sources,
             memory=self.memory,
             skills=self.skill_service,
             permission_mode=self.permission_mode,
             collaboration=self.collaboration,
+            artifacts=self.artifacts,
         )
 
     @staticmethod

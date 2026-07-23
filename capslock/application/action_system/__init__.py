@@ -8,6 +8,7 @@ from .core import (
     ActionProposal,
     ActionRunState,
 )
+from .credentials import CredentialActionHandler, resolve_named_credential
 from .external import McpActionHandler, WebActionHandler
 from .files import FileActionHandler
 
@@ -19,8 +20,10 @@ __all__ = [
     "ActionRunState",
     "CommandActionHandler",
     "CommandTemplate",
+    "CredentialActionHandler",
     "FileActionHandler",
     "McpActionHandler",
     "TEMPLATES",
     "WebActionHandler",
+    "resolve_named_credential",
 ]

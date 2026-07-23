@@ -314,13 +314,13 @@ class StatusBar(Static):
             value = f"{permission} · {usage.input_tokens + usage.output_tokens} tok"
         elif width < 100:
             value = (
-                f"{model} · {permission} · ctx {context_messages}/{context_limit} · "
+                f"{model} · {permission} · ctx {context_messages} msg/{context_limit} tok · "
                 f"{usage.input_tokens}/{usage.output_tokens} tok · ${usage.cost_usd:.4f}"
             )
         else:
             value = (
                 f"{workspace}  ·  {model}  ·  {permission}  ·  "
-                f"ctx {context_messages}/{context_limit}  ·  "
+                f"ctx {context_messages} msg/{context_limit} tok  ·  "
                 f"{usage.input_tokens}/{usage.output_tokens} tok  ·  "
                 f"${usage.cost_usd:.4f}"
             )

@@ -19,9 +19,13 @@ from .rules import (
 )
 from .types import (
     CommandSettings,
+    ContextSettings,
     McpSettings,
     MemorySettings,
+    ModelProfileSettings,
     ModelSettings,
+    ProviderSettings,
+    RoutingSettings,
     RuntimeSettings,
     WebSettings,
 )
@@ -37,43 +41,43 @@ def resolve_settings(
         values = document.get(name, {})
         return values if isinstance(values, dict) else {}
 
-    def value(group_name: str, name: str, default: object, *aliases: str) -> object:
-        for environment_name in (name, *aliases):
-            if environment_name in os.environ:
-                return os.environ[environment_name]
+    def value(group_name: str, name: str, default: object) -> object:
+        if name in os.environ:
+            return os.environ[name]
         config_name = name.lower().removeprefix("capslock_")
         return group(group_name).get(config_name, default)
 
-    legacy_model = ModelSettings(
-        api_key=value("model", "CAPSLOCK_API_KEY", None, "DEEPSEEK_API_KEY"),
-        base_url=str(
-            value(
-                "model",
-                "CAPSLOCK_BASE_URL",
-                "https://api.deepseek.com",
-                "DEEPSEEK_BASE_URL",
-            )
-        ),
-        model=str(
-            value(
-                "model",
-                "CAPSLOCK_MODEL",
-                "deepseek-v4-flash",
-                "DEEPSEEK_MODEL",
-            )
-        ),
-        timeout_seconds=float(value("model", "CAPSLOCK_TIMEOUT_SECONDS", 60)),
-        input_cost_per_million=float(
-            value("model", "CAPSLOCK_INPUT_COST_PER_MILLION", 0)
-        ),
-        output_cost_per_million=float(
-            value("model", "CAPSLOCK_OUTPUT_COST_PER_MILLION", 0)
-        ),
-    )
-    providers, models, routing = model_routes(document, legacy_model)
+    if document:
+        providers, models, routing = model_routes(document)
+    else:
+        provider = ProviderSettings(
+            name="default",
+            kind="openai_compatible",
+            base_url=os.environ.get("CAPSLOCK_BASE_URL", "https://api.deepseek.com"),
+            api_key=os.environ.get("CAPSLOCK_API_KEY"),
+            timeout_seconds=float(os.environ.get("CAPSLOCK_TIMEOUT_SECONDS", 60)),
+            data_policy="provider:default",
+            credential_ref="env:CAPSLOCK_API_KEY",
+        )
+        profile = ModelProfileSettings(
+            name="default",
+            provider=provider.name,
+            model=os.environ.get("CAPSLOCK_MODEL", "deepseek-v4-flash"),
+            context_window=128_000,
+            max_output_tokens=8_192,
+            input_cost_per_million=float(
+                os.environ.get("CAPSLOCK_INPUT_COST_PER_MILLION", 0)
+            ),
+            output_cost_per_million=float(
+                os.environ.get("CAPSLOCK_OUTPUT_COST_PER_MILLION", 0)
+            ),
+        )
+        providers = {provider.name: provider}
+        models = {profile.name: profile}
+        routing = RoutingSettings((profile.name,), (profile.name,), (), ())
     primary = models[routing.reasoning[0]]
     provider = providers[primary.provider]
-    compatibility_model = ModelSettings(
+    primary_model = ModelSettings(
         provider.api_key,
         provider.base_url,
         primary.model,
@@ -82,11 +86,25 @@ def resolve_settings(
         primary.output_cost_per_million,
     )
     return settings_factory(
-        model_config=compatibility_model,
+        model_config=primary_model,
         runtime=RuntimeSettings(
             max_tool_rounds=max_tool_rounds(group("runtime")),
-            max_context_messages=int(
-                value("runtime", "CAPSLOCK_MAX_CONTEXT_MESSAGES", 24)
+        ),
+        context=ContextSettings(
+            auto_compact=boolean(group("context").get("auto_compact", True)),
+            trigger_ratio=float(group("context").get("trigger_ratio", 0.80)),
+            target_ratio=float(group("context").get("target_ratio", 0.60)),
+            preserve_recent_turns=int(
+                group("context").get("preserve_recent_turns", 6)
+            ),
+            inline_tool_result_bytes=int(
+                group("context").get("inline_tool_result_bytes", 16_384)
+            ),
+            summary_max_tokens=int(
+                group("context").get("summary_max_tokens", 2_048)
+            ),
+            max_compaction_failures=int(
+                group("context").get("max_compaction_failures", 3)
             ),
         ),
         agents=agent_settings(group("agents")),
@@ -101,12 +119,7 @@ def resolve_settings(
         web=WebSettings(
             tavily_api_key=web_credential(
                 group("web"),
-                value(
-                    "web",
-                    "CAPSLOCK_TAVILY_API_KEY",
-                    None,
-                    "TAVILY_API_KEY",
-                ),
+                value("web", "CAPSLOCK_TAVILY_API_KEY", None),
             ),
             web_timeout_seconds=float(value("web", "CAPSLOCK_WEB_TIMEOUT_SECONDS", 20)),
             web_max_bytes=int(value("web", "CAPSLOCK_WEB_MAX_BYTES", 500_000)),

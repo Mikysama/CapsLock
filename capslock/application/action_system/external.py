@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from typing import Any
 from urllib.parse import urljoin
 
@@ -19,6 +20,7 @@ from ...layout import ProjectLayout
 from ...mcp import McpRegistry
 from ...policy import PolicyError, WorkspacePolicy
 from ...plugins import PluginProcessClient, PluginRegistry
+from ...plugins.broker import BrokerCallbacks
 from ...ports import SourcePort
 from .core import ActionExecution, ActionProposal
 from .executors import McpStdioExecutor, PluginActionExecutor
@@ -180,6 +182,7 @@ class McpActionHandler:
         layout: ProjectLayout,
         plugin_registry: PluginRegistry | None = None,
         plugin_client: PluginProcessClient | None = None,
+        broker_callbacks: Callable[[ActionRecord], BrokerCallbacks] | None = None,
     ) -> None:
         self.policy = policy
         self.timeout_seconds = timeout_seconds
@@ -194,6 +197,8 @@ class McpActionHandler:
             plugin_registry,
             self.plugin_client,
             output_limit_bytes=output_limit_bytes,
+            policy=policy,
+            broker_callbacks=broker_callbacks,
         )
         self.mcp_executor = McpStdioExecutor(
             policy,
@@ -214,7 +219,7 @@ class McpActionHandler:
             if self.plugin_registry is None:
                 raise ValueError("plugin support is unavailable")
             entry = await asyncio.to_thread(self.plugin_registry.get, plugin_name)
-            if not entry.manifest.permissions.issubset(entry.granted_permissions):
+            if not entry.manifest.capabilities.contains(entry.granted_capabilities):
                 raise PolicyError("plugin workspace permission grant is incomplete")
             tool, arguments = payload.get("tool"), payload.get("arguments")
             if not isinstance(tool, str) or not isinstance(arguments, dict):
@@ -231,6 +236,9 @@ class McpActionHandler:
                     "permissions": sorted(
                         item.value for item in entry.manifest.permissions
                     ),
+                    "capabilities": entry.granted_capabilities.as_dict(),
+                    "trusted_native": entry.trusted_native,
+                    "force_manual_approval": entry.trusted_native,
                 },
             )
         server_name = payload.get("server")

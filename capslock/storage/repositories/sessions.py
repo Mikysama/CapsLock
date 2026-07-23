@@ -178,20 +178,31 @@ class SessionRepository(Repository):
             for row in reversed(rows)
         ]
 
-    async def context_messages(
+    async def context_entries(
         self,
         session_id: str,
-        limit: int = 24,
         *,
         excluded_run_ids: set[str] | None = None,
-    ) -> list[dict[str, str]]:
-        excluded = excluded_run_ids or set()
-        entries = [
-            {"role": str(entry["role"]), "content": str(entry["content"])}
-            for entry in await self.transcript(session_id)
-            if entry.get("run_id") not in excluded and str(entry.get("content", ""))
+    ) -> list[dict[str, object]]:
+        query = "SELECT id,role,content,run_id FROM messages WHERE session_id=?"
+        values: list[object] = [session_id]
+        if excluded_run_ids:
+            query += (
+                " AND run_id NOT IN ("
+                + ",".join("?" for _ in excluded_run_ids)
+                + ")"
+            )
+            values.extend(sorted(excluded_run_ids))
+        query += " ORDER BY id"
+        return [
+            {
+                "id": int(row["id"]),
+                "role": str(row["role"]),
+                "content": str(row["content"]),
+                "run_id": str(row["run_id"]),
+            }
+            for row in await self.all(query, tuple(values))
         ]
-        return entries[-limit:]
 
     async def message_count(
         self, session_id: str, *, excluded_run_ids: set[str] | None = None
@@ -205,28 +216,6 @@ class SessionRepository(Repository):
             values.extend(sorted(excluded_run_ids))
         row = await self.one(query, tuple(values))
         return int(row[0]) if row else 0
-
-    async def compact_summary(
-        self, session_id: str, keep: int, *, excluded_run_ids: set[str] | None = None
-    ) -> str:
-        query = "SELECT role,content FROM messages WHERE session_id=?"
-        values: list[object] = [session_id]
-        if excluded_run_ids:
-            query += (
-                " AND run_id NOT IN (" + ",".join("?" for _ in excluded_run_ids) + ")"
-            )
-            values.extend(sorted(excluded_run_ids))
-        query += " ORDER BY id"
-        rows = await self.all(query, tuple(values))
-        older = rows[:-keep] if len(rows) > keep else []
-        if not older:
-            return ""
-        summary = "\n".join(f"{row['role']}: {row['content']}" for row in older)[-6000:]
-        await self.execute(
-            "UPDATE sessions SET summary=?,updated_at=? WHERE id=?",
-            (summary, now(), session_id),
-        )
-        return summary
 
     async def archive(self, session_id: str, *, archived: bool = True) -> SessionInfo:
         updated = await self.execute(
@@ -264,6 +253,10 @@ class SessionRepository(Repository):
             raise ValueError(
                 "active or approval-waiting sessions must be cancelled before deletion"
             )
+        artifact_rows = await self.all(
+            "SELECT relative_path FROM tool_artifacts WHERE session_id=?",
+            (session_id,),
+        )
         async with self.database.transaction() as connection:
             cursor = await connection.execute(
                 "DELETE FROM sessions WHERE id=?", (session_id,)
@@ -273,6 +266,16 @@ class SessionRepository(Repository):
             await connection.execute(
                 "DELETE FROM session_search WHERE session_id=?", (session_id,)
             )
+        artifact_root = self.workspace / ".capslock" / "state" / "artifacts"
+        for row in artifact_rows:
+            relative = str(row["relative_path"])
+            remaining = await self.one(
+                "SELECT 1 FROM tool_artifacts WHERE relative_path=? LIMIT 1",
+                (relative,),
+            )
+            target = (artifact_root / relative).resolve()
+            if remaining is None and target.is_relative_to(artifact_root.resolve()):
+                target.unlink(missing_ok=True)
 
     async def transcript(self, session_id: str) -> list[dict[str, Any]]:
         entries: list[tuple[str, int, dict[str, Any]]] = []

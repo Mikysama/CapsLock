@@ -1,3 +1,5 @@
+"""Lifecycle tests."""
+
 from __future__ import annotations
 
 import asyncio
@@ -7,6 +9,7 @@ import sqlite3
 import zipfile
 from pathlib import Path
 
+import pytest
 from rich.console import Console
 
 from capslock.cli.app import async_main
@@ -26,12 +29,13 @@ from capslock.domain import (
 from capslock.layout import ProjectLayout
 from capslock.lifecycle import LifecycleError, LifecycleService
 from capslock.storage.memory_repositories import MemoryRepositories
+from capslock.storage.async_database import IncompatibleDatabaseError
 from capslock.storage.repositories import WorkspaceRepositories
 from capslock.storage.schema import MEMORY_SCHEMA_VERSION, WORKSPACE_SCHEMA_VERSION
 from tests.helpers import workflow_service
 
 
-def test_config_v0_migrates_atomically_and_init_is_noninteractive(
+def test_non_current_config_is_rejected_and_init_is_noninteractive(
     tmp_path: Path, monkeypatch
 ) -> None:
     monkeypatch.setenv("CAPSLOCK_HOME", str(tmp_path / "home"))
@@ -41,11 +45,11 @@ def test_config_v0_migrates_atomically_and_init_is_noninteractive(
     config = workspace / ".capslock" / "config.toml"
     config.parent.mkdir()
     config.write_text("# keep me\n[model]\nmodel='old'\n", encoding="utf-8")
-    settings = Settings.load(workspace)
-    assert settings.model_config.model == "old"
-    assert read_config_document(config)["config_version"] == CONFIG_VERSION
+    with pytest.raises(ValueError, match="unsupported configuration version"):
+        Settings.load(workspace)
+    assert "config_version" not in read_config_document(config)
     assert "# keep me" in config.read_text(encoding="utf-8")
-    assert list((config.parent / "state" / "backups").glob("config.v0.*.toml"))
+    assert not (config.parent / "state" / "backups").exists()
 
     fresh = tmp_path / "fresh"
     fresh.mkdir()
@@ -83,7 +87,8 @@ def test_config_v0_migrates_atomically_and_init_is_noninteractive(
     assert result == 0
     diagnostics = json.loads(doctor_output.getvalue())["diagnostics"]
     assert any(
-        item["code"] == "config" and item["message"] == "version 2 valid"
+        item["code"] == "config"
+        and item["message"] == f"version {CONFIG_VERSION} valid"
         for item in diagnostics
     )
 
@@ -111,7 +116,7 @@ def test_environment_and_keyring_credentials_are_secret_safe(monkeypatch) -> Non
     assert not credential_status("keyring:primary").available
 
 
-def test_schema_v3_backup_verification_and_tamper_rejection(
+def test_backup_verification_and_tamper_rejection(
     tmp_path: Path, monkeypatch
 ) -> None:
     async def scenario() -> None:
@@ -125,22 +130,18 @@ def test_schema_v3_backup_verification_and_tamper_rejection(
         memory = await MemoryRepositories.open(layout.user.memory)
         await repositories.close()
         await memory.close()
-        layout.config.write_text(
-            'config_version = 1\n[model]\napi_key = "backup-secret"\n',
-            encoding="utf-8",
-        )
+        layout.config.write_text(f"config_version = {CONFIG_VERSION}\n", encoding="utf-8")
         layout.local_mcp.parent.mkdir(parents=True, exist_ok=True)
         layout.local_mcp.write_text(
             '{"servers":{"demo":{"env":{"TOKEN":"mcp-secret"}}}}',
             encoding="utf-8",
         )
-        assert _version(layout.database) == WORKSPACE_SCHEMA_VERSION == 5
+        assert _version(layout.database) == WORKSPACE_SCHEMA_VERSION == 6
         assert _version(layout.user.memory) == MEMORY_SCHEMA_VERSION == 3
         service = LifecycleService(layout)
         backup = service.backup_create(tmp_path / "state.clbackup")
         assert service.verify(backup)["format"] == "capslock-backup"
         with zipfile.ZipFile(backup) as archive:
-            assert b"backup-secret" not in archive.read("config.toml")
             assert b"mcp-secret" not in archive.read("local-mcp.json")
         with zipfile.ZipFile(backup, "a") as archive:
             archive.writestr("events.jsonl", "tampered")
@@ -154,7 +155,7 @@ def test_schema_v3_backup_verification_and_tamper_rejection(
     asyncio.run(scenario())
 
 
-def test_v18_schema_v2_is_backed_up_and_migrated_to_v3(
+def test_non_current_database_schemas_are_rejected(
     tmp_path: Path, monkeypatch
 ) -> None:
     async def scenario() -> None:
@@ -184,18 +185,13 @@ def test_v18_schema_v2_is_backed_up_and_migrated_to_v3(
         connection.execute("PRAGMA user_version=2")
         connection.commit()
         connection.close()
-        repositories = await WorkspaceRepositories.open(
-            layout.database, workspace=workspace
-        )
-        memory = await MemoryRepositories.open(layout.user.memory)
-        await repositories.close()
-        await memory.close()
-        assert _version(layout.database) == WORKSPACE_SCHEMA_VERSION
-        assert _version(layout.user.memory) == 3
-        assert list(layout.database.parent.joinpath("backups").glob("*.schema-2.*.bak"))
-        assert list(
-            layout.user.memory.parent.joinpath("backups").glob("*.schema-2.*.bak")
-        )
+        with pytest.raises(IncompatibleDatabaseError):
+            await WorkspaceRepositories.open(layout.database, workspace=workspace)
+        with pytest.raises(IncompatibleDatabaseError):
+            await MemoryRepositories.open(layout.user.memory)
+        assert _version(layout.database) == 2
+        assert _version(layout.user.memory) == 2
+        assert not layout.database.parent.joinpath("backups").exists()
 
     asyncio.run(scenario())
 

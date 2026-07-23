@@ -1,4 +1,4 @@
-"""Async facade over focused v2 memory services."""
+"""Async facade over focused memory services."""
 
 from __future__ import annotations
 

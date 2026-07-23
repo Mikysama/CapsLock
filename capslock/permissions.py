@@ -58,6 +58,12 @@ class ApprovalPolicy:
                 "Starts an external local server or invokes a third-party tool.",
                 "The stdio server is short-lived; CapsLock cannot reverse third-party side effects.",
             )
+        if action is ActionType.CREDENTIAL_ACCESS:
+            return RiskAssessment(
+                "high",
+                "Delivers a named secret to an approved plugin process.",
+                "Credential delivery cannot be reversed; rotate the secret if exposure is suspected.",
+            )
         if action in {ActionType.WEB_SEARCH, ActionType.WEB_FETCH}:
             return RiskAssessment(
                 "medium",

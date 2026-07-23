@@ -1,3 +1,5 @@
+"""Agent runtime tests."""
+
 from __future__ import annotations
 
 import asyncio
@@ -22,7 +24,7 @@ from capslock.observability import EventSink
 from capslock.interaction import RunInteraction
 from capslock.permissions import PermissionMode
 from capslock.policy import WorkspacePolicy
-from capslock.runtime import AsyncOpenAIChatModel, WorkspaceAgent
+from capslock.runtime import AgentSession, AsyncOpenAIChatModel, RunRequest
 from capslock.runtime.model import (
     ModelMessage,
     ModelResponse,
@@ -31,7 +33,12 @@ from capslock.runtime.model import (
 )
 from capslock.runtime.tool_loop import ToolLoop, ToolLoopError
 from capslock.storage.repositories import WorkspaceRepositories
-from capslock.tooling.async_core import RunContext, Tool, ToolRegistry, ToolResult
+from capslock.tooling.async_core import (
+    ExecutionContext,
+    Tool,
+    ToolRegistry,
+    ToolResult,
+)
 from capslock.tooling.async_catalog import workspace_tools
 from tests.helpers import (
     DummySkillRegistry,
@@ -45,7 +52,7 @@ from tests.helpers import (
 
 
 def context_factory(repositories: WorkspaceRepositories, session_id: str):
-    return lambda run_id: RunContext(
+    return lambda run_id: ExecutionContext(
         session_id=session_id,
         run_id=run_id,
         policy=WorkspacePolicy(repositories.sessions.workspace),
@@ -56,9 +63,9 @@ def context_factory(repositories: WorkspaceRepositories, session_id: str):
     )
 
 
-async def collect(agent: WorkspaceAgent, question: str, **kwargs):
+async def collect(agent: AgentSession, question: str, **kwargs):
     events = []
-    async for event in agent.ask_stream(question, **kwargs):
+    async for event in agent.run_stream(RunRequest(question=question, **kwargs)):
         events.append(event)
     return events
 
@@ -70,12 +77,23 @@ def make_agent(
     model: FakeChatModel,
     *,
     tools: ToolRegistry | None = None,
-) -> WorkspaceAgent:
-    return WorkspaceAgent(
+) -> AgentSession:
+    return AgentSession(
         workspace=tmp_path,
         model_name="test-model",
         chat_model=model,
-        repositories=repositories,
+        sessions=repositories.sessions,
+        work_items=repositories.work_items,
+        runs=repositories.runs,
+        journal=repositories.run_journal,
+        action_records=repositories.actions,
+        tasks=repositories.tasks,
+        sources=repositories.sources,
+        settings_store=repositories.settings,
+        model_audit=repositories.models,
+        governance=repositories.governance,
+        collaboration_records=repositories.collaboration,
+        compactions=repositories.compactions,
         workflow=workflow_service(repositories),
         session_id=session_id,
         policy=WorkspacePolicy(tmp_path),
@@ -164,11 +182,22 @@ def test_interactive_approval_executes_action_inside_same_run(tmp_path: Path) ->
                     interaction=interaction,
                 )
 
-            agent = WorkspaceAgent(
+            agent = AgentSession(
                 workspace=tmp_path,
                 model_name="test-model",
                 chat_model=model,
-                repositories=repositories,
+                sessions=repositories.sessions,
+                work_items=repositories.work_items,
+                runs=repositories.runs,
+                journal=repositories.run_journal,
+                action_records=repositories.actions,
+                tasks=repositories.tasks,
+                sources=repositories.sources,
+                settings_store=repositories.settings,
+                model_audit=repositories.models,
+                governance=repositories.governance,
+                collaboration_records=repositories.collaboration,
+                compactions=repositories.compactions,
                 workflow=workflow_service(repositories),
                 session_id=session.id,
                 policy=WorkspacePolicy(tmp_path),
@@ -505,7 +534,7 @@ def test_agent_failure_has_one_terminal_event_and_no_running_step(
             )
             events = []
             with pytest.raises(Exception, match="empty answer"):
-                async for event in agent.ask_stream("question"):
+                async for event in agent.run_stream(RunRequest(question="question")):
                     events.append(event)
             assert [event.kind for event in events if event.terminal] == [
                 AgentEventKind.FAILED
@@ -565,7 +594,7 @@ def test_checkpoint_resume_uses_last_stable_async_step(tmp_path: Path) -> None:
             )
             first_events = []
             with pytest.raises(RuntimeError, match="transport failed"):
-                async for event in first.ask_stream("question"):
+                async for event in first.run_stream(RunRequest(question="question")):
                     first_events.append(event)
             failed = next(
                 event for event in first_events if event.kind is AgentEventKind.FAILED
@@ -636,14 +665,14 @@ def test_cancelling_stream_closes_run_action_and_running_step(tmp_path: Path) ->
             )
 
             async def consume() -> None:
-                async for _ in agent.ask_stream("cancel me"):
+                async for _ in agent.run_stream(RunRequest(question="cancel me")):
                     pass
 
             task = asyncio.create_task(consume())
             # Full-suite CI may have several aiosqlite workers draining when this
             # scenario starts; the assertion is about cancellation cleanup, not
             # sub-two-second startup latency.
-            await asyncio.wait_for(started.wait(), timeout=5)
+            await asyncio.wait_for(started.wait(), timeout=30)
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task

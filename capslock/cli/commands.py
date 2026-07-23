@@ -1,4 +1,4 @@
-"""CapsLock v2 slash-command catalog."""
+"""CapsLock slash-command catalog."""
 
 from __future__ import annotations
 

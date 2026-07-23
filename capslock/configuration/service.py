@@ -1,14 +1,17 @@
-"""Stable public configuration facade over focused implementation modules."""
+"""Public configuration facade over focused implementation modules."""
+
+import os
+import tempfile
+from pathlib import Path
 
 from .loader import load_config_document, read_config_document
-from .migration import atomic_write as _atomic_write
-from .migration import migrate_config
 from .rules import DEFAULT_MAX_TOOL_ROUNDS
 from .settings import Settings
 from .types import (
     AgentSettings,
     BudgetSettings,
     CommandSettings,
+    ContextSettings,
     ConfigIssue,
     McpSettings,
     MemorySettings,
@@ -27,6 +30,7 @@ __all__ = [
     "AgentSettings",
     "BudgetSettings",
     "CommandSettings",
+    "ContextSettings",
     "ConfigIssue",
     "McpSettings",
     "MemorySettings",
@@ -37,9 +41,25 @@ __all__ = [
     "RuntimeSettings",
     "Settings",
     "WebSettings",
-    "_atomic_write",
     "load_config_document",
-    "migrate_config",
     "read_config_document",
     "validate_config_document",
+    "write_config",
 ]
+
+
+def write_config(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", dir=path.parent, prefix=".config-", delete=False
+        ) as handle:
+            temporary = handle.name
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary and Path(temporary).exists():
+            Path(temporary).unlink()

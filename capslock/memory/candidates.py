@@ -19,7 +19,7 @@ from ..storage.memory_repositories import MemoryRepositories
 from .embeddings import EmbeddingService
 from .validation import confidence, validated_text
 
-EXTRACTION_PROMPT_VERSION = "v2"
+EXTRACTION_PROMPT_ID = "memory-candidate-extraction"
 
 
 @dataclass(frozen=True)
@@ -63,7 +63,7 @@ class CandidateService:
             session_id=self.session_id,
             source_run_id=run_id,
             model=model,
-            prompt_version=EXTRACTION_PROMPT_VERSION,
+            prompt_version=EXTRACTION_PROMPT_ID,
             policy=policy,
         )
         input_tokens = output_tokens = adopted = 0

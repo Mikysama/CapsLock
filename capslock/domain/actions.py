@@ -15,6 +15,7 @@ class ActionType(StrEnum):
     WEB_FETCH = "web_fetch"
     MCP_CONNECT = "mcp_connect"
     MCP_CALL = "mcp_call"
+    CREDENTIAL_ACCESS = "credential_access"
 
 
 class ActionStatus(StrEnum):

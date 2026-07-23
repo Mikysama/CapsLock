@@ -1,21 +1,26 @@
+"""Public boundary tests."""
+
 from __future__ import annotations
 
 import asyncio
 import inspect
+import io
+import re
+import tokenize
 from pathlib import Path
 
 import pytest
 
 from capslock.bootstrap import WorkspaceApplication
-from capslock.cli.app import create_client
+from capslock.cli.providers import create_client
 from capslock.configuration import Settings
 from capslock.external import is_suspicious, validate_public_url
-from capslock.layout import LayoutConflict, ProjectLayout, UserLayout
+from capslock.layout import ProjectLayout
 from capslock.permissions import PermissionMode
-from capslock.runtime import ModelRouter, WorkspaceAgent
+from capslock.runtime import AgentSession, ModelRouter
 from capslock.runtime.tool_loop import ToolLoop
 from capslock.skills import SkillValidationError, load_skill_package
-from capslock.tooling import RunContext
+from capslock.tooling import ExecutionContext
 from capslock.tooling.async_catalog import workspace_tools
 
 
@@ -29,7 +34,32 @@ def production_text() -> str:
     )
 
 
-def test_v1_facades_and_sync_clients_are_absent() -> None:
+def test_python_names_do_not_encode_protocol_generations() -> None:
+    project = Path(__file__).parents[1]
+    generation_pattern = re.compile(r"(?i)(?:^|_)v\d+(?:_|$)")
+    historical_pattern = re.compile(r"(?i)(?:^|_)legacy(?:_|$)")
+    failures: list[str] = []
+    for directory_name in ("capslock", "tests", "scripts"):
+        for path in (project / directory_name).rglob("*.py"):
+            if "__pycache__" in path.parts:
+                continue
+            relative = path.relative_to(project)
+            if generation_pattern.search(path.stem) or historical_pattern.search(
+                path.stem
+            ):
+                failures.append(str(relative))
+            source = path.read_bytes()
+            for token in tokenize.tokenize(io.BytesIO(source).readline):
+                if token.type != tokenize.NAME:
+                    continue
+                if generation_pattern.search(token.string) or historical_pattern.search(
+                    token.string
+                ):
+                    failures.append(f"{relative}:{token.start[0]}:{token.string}")
+    assert failures == []
+
+
+def test_removed_facades_and_sync_clients_are_absent() -> None:
     root = Path(__file__).parents[1] / "capslock"
     for removed in (
         "domain.py",
@@ -58,14 +88,28 @@ def test_v1_facades_and_sync_clients_are_absent() -> None:
         assert forbidden not in text
 
 
-def test_v1101_deprecated_python_interfaces_are_removed() -> None:
-    assert "repositories" not in inspect.signature(RunContext).parameters
+def test_removed_python_interfaces_are_absent() -> None:
+    assert "repositories" not in inspect.signature(AgentSession).parameters
+    assert "repositories" not in inspect.signature(ExecutionContext).parameters
     assert "repositories" not in inspect.signature(ToolLoop).parameters
     assert "max_turns" not in inspect.signature(ToolLoop).parameters
     assert "repositories" not in inspect.signature(ModelRouter).parameters
-    assert "max_turns" not in inspect.signature(WorkspaceAgent).parameters
+    assert "max_turns" not in inspect.signature(AgentSession).parameters
     for name in ("bind_run", "use_role", "summary"):
         assert not hasattr(ModelRouter, name)
+
+
+def test_removed_migration_and_compatibility_modules_are_absent() -> None:
+    root = Path(__file__).parents[1] / "capslock"
+    for removed in (
+        "configuration/migration.py",
+        "storage/migrations.py",
+        "upgrade.py",
+        "cli/jsonl.py",
+        "runtime/execution.py",
+        "ports/services.py",
+    ):
+        assert not (root / removed).exists(), removed
 
 
 def test_runtime_and_tooling_depend_only_on_neutral_ports() -> None:
@@ -95,6 +139,12 @@ def test_runtime_and_tooling_depend_only_on_neutral_ports() -> None:
         assert forbidden not in neutral
 
 
+def test_interactive_cli_does_not_reach_through_session_repositories() -> None:
+    root = Path(__file__).parents[1] / "capslock" / "cli"
+    source = "\n".join(path.read_text(encoding="utf-8") for path in root.rglob("*.py"))
+    assert re.search(r"\b(?:context|agent|session)\.repositories\b", source) is None
+
+
 def test_bootstrap_has_no_agent_backfill_cycle() -> None:
     source = (Path(__file__).parents[1] / "capslock" / "bootstrap.py").read_text(
         encoding="utf-8"
@@ -104,20 +154,38 @@ def test_bootstrap_has_no_agent_backfill_cycle() -> None:
 
 
 def test_workspace_application_retains_client_ownership_flag() -> None:
+    repositories = type(
+        "Repositories",
+        (),
+        {
+            name: object()
+            for name in (
+                "sessions",
+                "runs",
+                "work_items",
+                "run_journal",
+                "actions",
+                "tasks",
+                "sources",
+                "governance",
+                "collaboration",
+            )
+        },
+    )()
     application = WorkspaceApplication(
         workspace=Path("."),
         layout=object(),
         settings=object(),
         client=object(),
-        repositories=object(),
+        repositories=repositories,
         memory_repositories=object(),
-        agent=object(),
+        session=object(),
         close_client=False,
     )
     assert application.close_client is False
 
 
-def test_legacy_facades_are_removed() -> None:
+def test_removed_facades_are_absent() -> None:
     root = Path(__file__).parents[1] / "capslock"
     for removed in (
         "config.py",
@@ -129,8 +197,6 @@ def test_legacy_facades_are_removed() -> None:
 
 def test_storage_uses_canonical_module_paths() -> None:
     storage = Path(__file__).parents[1] / "capslock" / "storage"
-    for removed in ("repositories_v2", "memory_v2", "schema_v2.py"):
-        assert not (storage / removed).exists(), removed
     for current in ("repositories", "memory_repositories", "schema.py"):
         assert (storage / current).exists(), current
 
@@ -185,8 +251,20 @@ def test_toml_settings_are_read_from_their_explicit_groups(
     root = tmp_path / ".capslock"
     root.mkdir()
     (root / "config.toml").write_text(
-        """[model]
+        """config_version = 3
+[providers.primary]
+kind = "openai_compatible"
+base_url = "https://models.example.test"
+credential = "env:CAPSLOCK_API_KEY"
+data_policy = "provider:primary"
+[models.primary]
+provider = "primary"
 model = "configured-model"
+context_window = 128000
+max_output_tokens = 8192
+[routing]
+reasoning = ["primary"]
+fast = ["primary"]
 [runtime]
 max_tool_rounds = 7
 permission_mode = "full_access"
@@ -219,15 +297,6 @@ enabled = false
     assert settings.memory.project_write_enabled is False
 
 
-def test_removed_max_turns_environment_is_rejected(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("CAPSLOCK_API_KEY", "secret")
-    monkeypatch.setenv("CAPSLOCK_MAX_TURNS", "9")
-    with pytest.raises(ValueError, match="CAPSLOCK_MAX_TURNS.*MAX_TOOL_ROUNDS"):
-        Settings.load(tmp_path)
-
-
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
@@ -238,21 +307,6 @@ def test_removed_max_turns_environment_is_rejected(
 )
 def test_permission_modes(value: str, expected: PermissionMode) -> None:
     assert PermissionMode.parse(value) is expected
-
-
-def test_legacy_user_memory_path_is_reported_without_migration(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.delenv("CAPSLOCK_MEMORY_DATABASE", raising=False)
-    monkeypatch.delenv("CAPSLOCK_HOME", raising=False)
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
-    legacy = tmp_path / "xdg" / "capslock" / "memory.sqlite3"
-    legacy.parent.mkdir(parents=True)
-    legacy.write_bytes(b"legacy")
-    with pytest.raises(LayoutConflict, match=str(legacy)):
-        UserLayout.from_environment()
-    assert legacy.read_bytes() == b"legacy"
 
 
 def test_skill_manifest_validation_and_resource_boundary(tmp_path: Path) -> None:

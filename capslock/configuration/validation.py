@@ -11,20 +11,21 @@ from .rules import (
     loop_detection_settings,
     model_routes,
 )
-from .types import ConfigIssue, ModelSettings
+from .types import ConfigIssue
 
 
-CONFIG_VERSION = 2
+CONFIG_VERSION = 3
 _GROUP_FIELDS = {
-    "model": {
-        "api_key",
-        "base_url",
-        "model",
-        "timeout_seconds",
-        "input_cost_per_million",
-        "output_cost_per_million",
+    "runtime": {"max_tool_rounds", "permission_mode"},
+    "context": {
+        "auto_compact",
+        "trigger_ratio",
+        "target_ratio",
+        "preserve_recent_turns",
+        "inline_tool_result_bytes",
+        "summary_max_tokens",
+        "max_compaction_failures",
     },
-    "runtime": {"max_tool_rounds", "max_context_messages", "permission_mode"},
     "agents": {
         "enabled",
         "max_children",
@@ -55,7 +56,6 @@ _TOP_LEVEL = {"config_version", "providers", "models", *_GROUP_FIELDS}
 _PROVIDER_FIELDS = {
     "kind",
     "base_url",
-    "api_key_env",
     "credential",
     "timeout_seconds",
     "data_policy",
@@ -79,22 +79,13 @@ def validate_config_document(document: dict[str, object]) -> tuple[ConfigIssue, 
                 "error", "config_version_type", "config_version", "must be an integer"
             )
         )
-    elif version not in {0, 1, CONFIG_VERSION}:
+    elif version != CONFIG_VERSION:
         issues.append(
             ConfigIssue(
                 "error",
                 "config_version_unsupported",
                 "config_version",
                 f"unsupported configuration version {version}",
-            )
-        )
-    if version in {0, 1}:
-        issues.append(
-            ConfigIssue(
-                "warning",
-                "config_deprecated",
-                "config_version",
-                f"v{'1.8' if version == 0 else '1.9'} configuration requires migration",
             )
         )
     for name in sorted(set(document) - _TOP_LEVEL):
@@ -111,31 +102,15 @@ def validate_config_document(document: dict[str, object]) -> tuple[ConfigIssue, 
             )
             continue
         for field in sorted(set(raw) - allowed):
-            if group_name == "runtime" and field == "max_turns":
-                issues.append(
-                    ConfigIssue(
-                        "error",
-                        "max_turns_removed",
-                        "runtime.max_turns",
-                        "removed in 2.0.0; use runtime.max_tool_rounds",
-                    )
+            issues.append(
+                ConfigIssue(
+                    "error",
+                    "unknown_field",
+                    f"{group_name}.{field}",
+                    "unknown field",
                 )
-            else:
-                issues.append(
-                    ConfigIssue(
-                        "error",
-                        "unknown_field",
-                        f"{group_name}.{field}",
-                        "unknown field",
-                    )
-                )
-        secret_fields = (
-            {"api_key"}
-            if group_name == "model"
-            else {"tavily_api_key"}
-            if group_name == "web"
-            else set()
-        )
+            )
+        secret_fields = {"tavily_api_key"} if group_name == "web" else set()
         for field in secret_fields:
             if raw.get(field):
                 issues.append(
@@ -171,15 +146,6 @@ def validate_config_document(document: dict[str, object]) -> tuple[ConfigIssue, 
                         "error", "unknown_field", f"{path}.{field}", "unknown field"
                     )
                 )
-            if group_name == "providers" and "api_key_env" in item:
-                issues.append(
-                    ConfigIssue(
-                        "warning",
-                        "api_key_env_deprecated",
-                        f"{path}.api_key_env",
-                        'use credential = "env:NAME"',
-                    )
-                )
             if group_name == "providers" and "credential" in item:
                 try:
                     parse_reference(str(item["credential"]))
@@ -201,17 +167,7 @@ def validate_config_document(document: dict[str, object]) -> tuple[ConfigIssue, 
 
 
 def validate_semantics(document: dict[str, object]) -> None:
-    model = document.get("model", {})
-    model = model if isinstance(model, dict) else {}
-    legacy = ModelSettings(
-        None,
-        str(model.get("base_url", "https://api.deepseek.com")),
-        str(model.get("model", "deepseek-v4-flash")),
-        float(model.get("timeout_seconds", 60)),
-        float(model.get("input_cost_per_million", 0)),
-        float(model.get("output_cost_per_million", 0)),
-    )
-    model_routes(document, legacy, resolve_credentials=False)
+    model_routes(document, resolve_credentials=False)
     budget_settings(
         document.get("budget", {}) if isinstance(document.get("budget"), dict) else {}
     )
@@ -222,8 +178,6 @@ def validate_semantics(document: dict[str, object]) -> None:
     if isinstance(runtime, dict):
         if int(runtime.get("max_tool_rounds", DEFAULT_MAX_TOOL_ROUNDS)) <= 0:
             raise ValueError("runtime.max_tool_rounds must be positive")
-        if int(runtime.get("max_context_messages", 24)) <= 0:
-            raise ValueError("runtime.max_context_messages must be positive")
         if str(runtime.get("permission_mode", "approve_for_me")) not in {
             "full_access",
             "approve_for_me",
@@ -236,6 +190,23 @@ def validate_semantics(document: dict[str, object]) -> None:
     memory = document.get("memory", {})
     if isinstance(memory, dict):
         boolean(memory.get("enabled", True))
+    context = document.get("context", {})
+    if isinstance(context, dict):
+        boolean(context.get("auto_compact", True))
+        trigger = float(context.get("trigger_ratio", 0.80))
+        target = float(context.get("target_ratio", 0.60))
+        if not 0 < target < trigger <= 1:
+            raise ValueError(
+                "context ratios must satisfy 0 < target_ratio < trigger_ratio <= 1"
+            )
+        for field, default in (
+            ("preserve_recent_turns", 6),
+            ("inline_tool_result_bytes", 16_384),
+            ("summary_max_tokens", 2_048),
+            ("max_compaction_failures", 3),
+        ):
+            if int(context.get(field, default)) <= 0:
+                raise ValueError(f"context.{field} must be positive")
     loop_detection = document.get("loop_detection", {})
     if isinstance(loop_detection, dict):
         loop_detection_settings(loop_detection)

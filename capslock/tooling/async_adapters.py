@@ -10,7 +10,7 @@ from typing import Any
 from ..domain import ActionRecord, ActionType
 from ..evidence import Evidence
 from ..security import TEXT_SUFFIXES
-from .async_core import RunContext, ToolResult
+from .async_core import ExecutionContext, ToolResult
 
 
 def _path(arguments: dict[str, Any]) -> str:
@@ -20,7 +20,9 @@ def _path(arguments: dict[str, Any]) -> str:
     return path
 
 
-async def list_files(context: RunContext, arguments: dict[str, Any]) -> ToolResult:
+async def list_files(
+    context: ExecutionContext, arguments: dict[str, Any]
+) -> ToolResult:
     def read() -> list[str]:
         directory = context.policy.readable_directory(_path(arguments))
         pattern = arguments.get("pattern", "*")
@@ -40,7 +42,9 @@ async def list_files(context: RunContext, arguments: dict[str, Any]) -> ToolResu
     )
 
 
-async def read_file(context: RunContext, arguments: dict[str, Any]) -> ToolResult:
+async def read_file(
+    context: ExecutionContext, arguments: dict[str, Any]
+) -> ToolResult:
     def read() -> tuple[Path, Evidence]:
         path = context.policy.readable_file(_path(arguments))
         if path.suffix.lower() not in TEXT_SUFFIXES:
@@ -69,7 +73,49 @@ async def read_file(context: RunContext, arguments: dict[str, Any]) -> ToolResul
     )
 
 
-async def search_files(context: RunContext, arguments: dict[str, Any]) -> ToolResult:
+async def read_tool_artifact(
+    context: ExecutionContext, arguments: dict[str, Any]
+) -> ToolResult:
+    if context.artifacts is None:
+        raise ValueError("tool artifact storage is unavailable")
+    artifact_id = arguments.get("artifact_id")
+    offset, limit = arguments.get("offset", 0), arguments.get("limit", 16_384)
+    if (
+        not isinstance(artifact_id, str)
+        or not isinstance(offset, int)
+        or isinstance(offset, bool)
+        or not isinstance(limit, int)
+        or isinstance(limit, bool)
+    ):
+        raise ValueError("invalid artifact read request")
+    artifact, content, has_more = await context.artifacts.read(
+        artifact_id,
+        session_id=context.session_id,
+        offset=offset,
+        limit=limit,
+    )
+    return ToolResult(
+        True,
+        {
+            "artifact_id": artifact.id,
+            "offset": offset,
+            "bytes": len(content),
+            "content": content.decode("utf-8", errors="replace"),
+            "next_offset": offset + len(content) if has_more else None,
+            "has_more": has_more,
+            "sha256": artifact.sha256,
+        },
+        audit_data={
+            "artifact_id": artifact.id,
+            "offset": offset,
+            "bytes": len(content),
+        },
+    )
+
+
+async def search_files(
+    context: ExecutionContext, arguments: dict[str, Any]
+) -> ToolResult:
     def search() -> list[Evidence]:
         requested, query = _path(arguments), arguments.get("query")
         if not isinstance(query, str) or not query.strip():
@@ -116,7 +162,7 @@ async def search_files(context: RunContext, arguments: dict[str, Any]) -> ToolRe
     )
 
 
-async def _git(context: RunContext, *args: str) -> ToolResult:
+async def _git(context: ExecutionContext, *args: str) -> ToolResult:
     if not (context.policy.root / ".git").exists():
         return ToolResult(False, {}, "workspace is not a Git repository")
     process = await asyncio.create_subprocess_exec(
@@ -141,11 +187,15 @@ async def _git(context: RunContext, *args: str) -> ToolResult:
     return ToolResult(True, {"output": stdout[:100000].decode("utf-8", "replace")})
 
 
-async def git_status(context: RunContext, arguments: dict[str, Any]) -> ToolResult:
+async def git_status(
+    context: ExecutionContext, arguments: dict[str, Any]
+) -> ToolResult:
     return await _git(context, "status", "--short")
 
 
-async def git_diff(context: RunContext, arguments: dict[str, Any]) -> ToolResult:
+async def git_diff(
+    context: ExecutionContext, arguments: dict[str, Any]
+) -> ToolResult:
     path = arguments.get("path")
     if path is not None:
         if not isinstance(path, str):
@@ -169,7 +219,7 @@ def action_data(action: ActionRecord) -> dict[str, object]:
 
 
 async def propose_action(
-    context: RunContext, action_type: ActionType, arguments: dict[str, Any]
+    context: ExecutionContext, action_type: ActionType, arguments: dict[str, Any]
 ) -> ToolResult:
     return ToolResult(
         True, action_data(await context.actions.propose(action_type, **arguments))
@@ -177,47 +227,49 @@ async def propose_action(
 
 
 async def propose_web_search(
-    context: RunContext, arguments: dict[str, Any]
+    context: ExecutionContext, arguments: dict[str, Any]
 ) -> ToolResult:
     return await propose_action(context, ActionType.WEB_SEARCH, arguments)
 
 
 async def propose_web_fetch(
-    context: RunContext, arguments: dict[str, Any]
+    context: ExecutionContext, arguments: dict[str, Any]
 ) -> ToolResult:
     return await propose_action(context, ActionType.WEB_FETCH, arguments)
 
 
 async def propose_mcp_connect(
-    context: RunContext, arguments: dict[str, Any]
+    context: ExecutionContext, arguments: dict[str, Any]
 ) -> ToolResult:
     return await propose_action(context, ActionType.MCP_CONNECT, arguments)
 
 
 async def propose_mcp_call(
-    context: RunContext, arguments: dict[str, Any]
+    context: ExecutionContext, arguments: dict[str, Any]
 ) -> ToolResult:
     return await propose_action(context, ActionType.MCP_CALL, arguments)
 
 
-async def propose_command(context: RunContext, arguments: dict[str, Any]) -> ToolResult:
+async def propose_command(
+    context: ExecutionContext, arguments: dict[str, Any]
+) -> ToolResult:
     return await propose_action(context, ActionType.COMMAND, arguments)
 
 
 async def propose_file_edit(
-    context: RunContext, arguments: dict[str, Any]
+    context: ExecutionContext, arguments: dict[str, Any]
 ) -> ToolResult:
     return await propose_action(context, ActionType.FILE_EDIT, arguments)
 
 
 async def propose_file_create(
-    context: RunContext, arguments: dict[str, Any]
+    context: ExecutionContext, arguments: dict[str, Any]
 ) -> ToolResult:
     return await propose_action(context, ActionType.FILE_CREATE, arguments)
 
 
 async def task_list_update(
-    context: RunContext, arguments: dict[str, Any]
+    context: ExecutionContext, arguments: dict[str, Any]
 ) -> ToolResult:
     items = arguments.get("items")
     if not isinstance(items, list) or not all(
@@ -241,7 +293,7 @@ async def task_list_update(
 
 
 async def task_status_update(
-    context: RunContext, arguments: dict[str, Any]
+    context: ExecutionContext, arguments: dict[str, Any]
 ) -> ToolResult:
     task_id, status = arguments.get("task_id"), arguments.get("status")
     if not isinstance(task_id, str) or not isinstance(status, str):
@@ -253,7 +305,7 @@ async def task_status_update(
 
 
 async def list_external_sources(
-    context: RunContext, arguments: dict[str, Any]
+    context: ExecutionContext, arguments: dict[str, Any]
 ) -> ToolResult:
     if context.sources is None:
         raise ValueError("source storage is unavailable")
@@ -276,7 +328,9 @@ async def list_external_sources(
     )
 
 
-async def search_memories(context: RunContext, arguments: dict[str, Any]) -> ToolResult:
+async def search_memories(
+    context: ExecutionContext, arguments: dict[str, Any]
+) -> ToolResult:
     if context.memory is None:
         raise ValueError("memory storage is unavailable")
     query, limit = arguments.get("query"), arguments.get("limit", 10)
@@ -292,7 +346,9 @@ async def search_memories(context: RunContext, arguments: dict[str, Any]) -> Too
     )
 
 
-async def get_memory(context: RunContext, arguments: dict[str, Any]) -> ToolResult:
+async def get_memory(
+    context: ExecutionContext, arguments: dict[str, Any]
+) -> ToolResult:
     if context.memory is None:
         raise ValueError("memory storage is unavailable")
     identifier = arguments.get("memory_id")
@@ -322,7 +378,9 @@ def _memory_data(item: Any) -> dict[str, object]:
     }
 
 
-async def load_skill(context: RunContext, arguments: dict[str, Any]) -> ToolResult:
+async def load_skill(
+    context: ExecutionContext, arguments: dict[str, Any]
+) -> ToolResult:
     name = arguments.get("name")
     if not isinstance(name, str) or context.skills is None:
         raise ValueError("Skill name or loader is unavailable")
@@ -333,7 +391,7 @@ async def load_skill(context: RunContext, arguments: dict[str, Any]) -> ToolResu
 
 
 async def read_skill_resource(
-    context: RunContext, arguments: dict[str, Any]
+    context: ExecutionContext, arguments: dict[str, Any]
 ) -> ToolResult:
     name, path = arguments.get("name"), arguments.get("path")
     start_line, end_line = arguments.get("start_line", 1), arguments.get("end_line")

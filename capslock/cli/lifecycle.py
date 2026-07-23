@@ -49,10 +49,14 @@ async def export_lifecycle(
     destination: Path,
     *,
     include_global_memory: bool,
+    include_artifacts: bool = False,
 ) -> int:
     service = LifecycleService(layout)
     path = await asyncio.to_thread(
-        service.export, destination, include_global_memory=include_global_memory
+        service.export,
+        destination,
+        include_global_memory=include_global_memory,
+        include_artifacts=include_artifacts,
     )
     console.print(f"[success]Portable export created:[/] {path}")
     return 0
@@ -68,7 +72,6 @@ async def import_lifecycle(
         )
         if answer.strip().casefold() not in {"y", "yes"}:
             return 0
-    # Opening through the repository layer applies the supported v1.8 schema migration first.
     workspace = await WorkspaceRepositories.open(
         layout.database, workspace=layout.workspace
     )

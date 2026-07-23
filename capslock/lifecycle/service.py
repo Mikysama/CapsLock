@@ -1,9 +1,10 @@
-"""Lifecycle service orchestration and compatibility facade implementation."""
+"""Lifecycle service orchestration."""
 
 from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import sqlite3
 import tempfile
 import uuid
@@ -37,8 +38,8 @@ from .specs import (
 
 
 EXPORT_FORMAT = "capslock-lifecycle-export"
-ARCHIVE_VERSION = 2
-SUPPORTED_ARCHIVE_VERSIONS = frozenset({1, ARCHIVE_VERSION})
+ARCHIVE_VERSION = 3
+SUPPORTED_ARCHIVE_VERSIONS = frozenset({ARCHIVE_VERSION})
 MAX_ARCHIVE_RECORDS = 100_000
 
 
@@ -59,7 +60,13 @@ class PortableArchiveService:
         self.backup = backup
         self.io = io
 
-    def export(self, destination: Path, *, include_global_memory: bool = False) -> Path:
+    def export(
+        self,
+        destination: Path,
+        *,
+        include_global_memory: bool = False,
+        include_artifacts: bool = False,
+    ) -> Path:
         target = destination.expanduser().resolve()
         if target.exists():
             raise FileExistsError(f"export already exists: {target}")
@@ -94,6 +101,8 @@ class PortableArchiveService:
                 else {},
             }
             _write_json(stage / "mcp.json", _redact_portable(mcp))
+            if include_artifacts and self.layout.artifacts.is_dir():
+                shutil.copytree(self.layout.artifacts, stage / "artifacts")
             manifest = build_manifest(
                 EXPORT_FORMAT,
                 stage,
@@ -102,6 +111,7 @@ class PortableArchiveService:
                 extra={
                     "archive_id": archive_id,
                     "include_global_memory": include_global_memory,
+                    "include_artifacts": include_artifacts,
                 },
             )
             _write_json(stage / "manifest.json", manifest)
@@ -111,10 +121,6 @@ class PortableArchiveService:
 
     def import_archive(self, archive: Path) -> dict[str, Any]:
         archive = archive.expanduser().resolve()
-        if archive.is_dir():
-            return self._import_legacy_session(archive / "session.json")
-        if archive.suffix.casefold() == ".json":
-            return self._import_legacy_memory(archive)
         manifest = verify_archive(
             archive,
             supported_versions=SUPPORTED_ARCHIVE_VERSIONS,
@@ -152,6 +158,10 @@ class PortableArchiveService:
                 data_workspace,
                 data_memory,
             )
+            if (stage / "artifacts").is_dir():
+                shutil.copytree(
+                    stage / "artifacts", self.layout.artifacts, dirs_exist_ok=True
+                )
             self._merge_mcp(_read_json(stage / "mcp.json"), archive_id, report)
             self._persist_import_report(archive_id, report)
             return report
@@ -303,79 +313,8 @@ class PortableArchiveService:
             finally:
                 connection.close()
 
-    def _import_legacy_session(self, path: Path) -> dict[str, Any]:
-        document = _read_json(path)
-        if (
-            document.get("format") != "capslock-session-export"
-            or document.get("version") != 2
-        ):
-            raise LifecycleError("only session export version 2 is supported")
-        tables = {table: document.get(table, []) for table in WORKSPACE_TABLES}
-        archive_id = hashlib.sha256(path.read_bytes()).hexdigest()[:32]
-        return self._merge(
-            archive_id,
-            hashlib.sha256(path.read_bytes()).hexdigest(),
-            "1.8.0",
-            tables,
-            {},
-        )
-
-    def _import_legacy_memory(self, path: Path) -> dict[str, Any]:
-        document = _read_json(path)
-        if (
-            document.get("format") != "capslock-memory-export"
-            or document.get("version") != 3
-        ):
-            raise LifecycleError("only memory export version 3 is supported")
-        now = utc_now()
-        memories, revisions = [], []
-        target_key = workspace_key(self.workspace)
-        for index, record in enumerate(document.get("records", [])):
-            identifier = uuid.uuid5(
-                uuid.NAMESPACE_URL,
-                f"{hashlib.sha256(path.read_bytes()).hexdigest()}:{index}",
-            ).hex
-            memories.append(
-                {
-                    "id": identifier,
-                    "scope": "workspace",
-                    "workspace_key": target_key,
-                    "session_id": None,
-                    "status": "active",
-                    "current_revision": 1,
-                    "origin": "imported",
-                    "source_valid": 1,
-                    "created_at": now,
-                    "updated_at": now,
-                    "purged_at": None,
-                }
-            )
-            revisions.append(
-                {
-                    "memory_id": identifier,
-                    "revision": 1,
-                    "operation": "import",
-                    "content": record.get("content", ""),
-                    "memory_type": record.get("type", "note"),
-                    "source_kind": "import",
-                    "source_ref": None,
-                    "confidence": record.get("confidence", 1),
-                    "expires_at": record.get("expires_at"),
-                    "created_at": now,
-                }
-            )
-        archive_hash = hashlib.sha256(path.read_bytes()).hexdigest()
-        return self._merge(
-            archive_hash[:32],
-            archive_hash,
-            "1.8.0",
-            {},
-            {"memories": memories, "memory_revisions": revisions},
-        )
-
-
 class LifecycleService:
-    """Stable synchronous facade over backup and portable archive services."""
+    """Synchronous facade over backup and portable archive services."""
 
     def __init__(self, layout: ProjectLayout) -> None:
         self.layout = layout
@@ -407,10 +346,17 @@ class LifecycleService:
             expected_format=expected_format,
         )
 
-    def export(self, destination: Path, *, include_global_memory: bool = False) -> Path:
+    def export(
+        self,
+        destination: Path,
+        *,
+        include_global_memory: bool = False,
+        include_artifacts: bool = False,
+    ) -> Path:
         return self.portable.export(
             destination,
             include_global_memory=include_global_memory,
+            include_artifacts=include_artifacts,
         )
 
     def import_archive(self, archive: Path) -> dict[str, Any]:

@@ -183,6 +183,8 @@ class AgentEvent:
     work_item_id: str
     kind: AgentEventKind
     data: dict[str, Any]
+    event_id: str = ""
+    trace_id: str = ""
 
     @property
     def terminal(self) -> bool:

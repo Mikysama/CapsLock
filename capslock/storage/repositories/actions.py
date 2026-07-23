@@ -1,4 +1,4 @@
-"""Unified v2 action persistence and state transitions."""
+"""Unified action persistence and state transitions."""
 
 from __future__ import annotations
 

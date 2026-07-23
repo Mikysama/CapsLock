@@ -1,3 +1,5 @@
+"""Memory subsystem tests."""
+
 from __future__ import annotations
 
 import asyncio
@@ -282,7 +284,7 @@ def test_candidate_extraction_review_and_adoption(
     asyncio.run(scenario())
 
 
-def test_memory_export_v3_round_trip_and_old_versions_rejected(
+def test_memory_export_round_trip(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     async def scenario() -> None:
@@ -312,14 +314,6 @@ def test_memory_export_v3_round_trip_and_old_versions_rejected(
             )
             assert len(imported) == 1
             assert imported[0].scope is MemoryScope.SESSION
-
-            old = tmp_path / "exports" / "old.json"
-            old.write_text(
-                json.dumps({"format": EXPORT_FORMAT, "version": 2, "records": []}),
-                encoding="utf-8",
-            )
-            with pytest.raises(ValueError, match="version 3"):
-                await service.import_json(MemoryScope.WORKSPACE, "exports/old.json")
         finally:
             await repositories.close()
 

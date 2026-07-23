@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from collections.abc import Callable
 
 from ...domain import ActionRecord
 from ...mcp import McpRegistry
 from ...policy import PolicyError, WorkspacePolicy
 from ...plugins import PluginProcessClient, PluginRegistry
+from ...plugins.broker import BrokerCallbacks, HostCapabilityBroker
 
 
 class PluginActionExecutor:
@@ -19,25 +21,43 @@ class PluginActionExecutor:
         client: PluginProcessClient,
         *,
         output_limit_bytes: int,
+        policy: WorkspacePolicy,
+        broker_callbacks: Callable[[ActionRecord], BrokerCallbacks] | None = None,
     ) -> None:
         self.registry = registry
         self.client = client
         self.output_limit_bytes = output_limit_bytes
+        self.policy = policy
+        self.broker_callbacks = broker_callbacks
 
     async def execute(self, action: ActionRecord) -> dict[str, object]:
         plugin_name = action.request.get("plugin")
         if not isinstance(plugin_name, str) or self.registry is None:
             raise ValueError("plugin support is unavailable")
         entry = await asyncio.to_thread(self.registry.get, plugin_name)
-        if not entry.manifest.permissions.issubset(entry.granted_permissions):
+        if not entry.manifest.capabilities.contains(entry.granted_capabilities):
             raise PolicyError("plugin workspace permission grant is incomplete")
         if action.request.get("digest") != entry.manifest.digest:
             raise PolicyError(
                 "plugin package or workspace grant changed after approval"
             )
-        response = await self.client.call(
-            entry.manifest, str(action.request["tool"]), action.request["arguments"]
+        broker = HostCapabilityBroker(
+            self.policy,
+            entry.granted_capabilities,
+            callbacks=(
+                self.broker_callbacks(action)
+                if self.broker_callbacks is not None
+                else BrokerCallbacks()
+            ),
         )
+        response = await self.client.call(
+            entry.manifest,
+            str(action.request["tool"]),
+            action.request["arguments"],
+            trusted_native=entry.trusted_native,
+            broker=broker,
+        )
+        response = broker.sanitize(response)
         result: dict[str, object] = {
             "plugin": plugin_name,
             "tool": action.request["tool"],

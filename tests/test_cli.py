@@ -1,3 +1,5 @@
+"""Command-line interface tests."""
+
 from __future__ import annotations
 
 import asyncio
@@ -56,13 +58,13 @@ class EventAgent:
     def __init__(self, events: list[AgentEvent]) -> None:
         self.events = events
 
-    async def ask_stream(self, question: str):
+    async def run_stream(self, request):
         for event in self.events:
             yield event
 
 
 class TerminalThenErrorAgent(EventAgent):
-    async def ask_stream(self, question: str):
+    async def run_stream(self, request):
         for event in self.events:
             yield event
         raise RuntimeError("already represented by terminal event")
@@ -95,7 +97,7 @@ def console_buffer(*, width: int = 120) -> tuple[Console, io.StringIO]:
     )
 
 
-def test_parser_exposes_only_v2_top_level_commands() -> None:
+def test_parser_exposes_only_current_top_level_commands() -> None:
     parser = build_parser()
     choices = next(
         action.choices for action in parser._actions if getattr(action, "choices", None)
@@ -124,7 +126,7 @@ def test_parser_exposes_only_v2_top_level_commands() -> None:
             parser.parse_args([removed])
 
 
-def test_slash_command_catalog_has_no_v1_aliases() -> None:
+def test_slash_command_catalog_has_no_removed_aliases() -> None:
     expected = {
         "/help",
         "/status",
@@ -183,7 +185,7 @@ def test_slash_command_catalog_has_no_v1_aliases() -> None:
         ),
     ],
 )
-def test_jsonl_v2_terminal_contract_and_exit_codes(
+def test_jsonl_terminal_contract_and_exit_codes(
     kind: AgentEventKind, data: dict[str, object], expected: int
 ) -> None:
     async def scenario() -> None:
@@ -194,6 +196,8 @@ def test_jsonl_v2_terminal_contract_and_exit_codes(
         assert list(record) == [
             "schema_version",
             "sequence",
+            "event_id",
+            "trace_id",
             "timestamp",
             "session_id",
             "work_item_id",
@@ -203,7 +207,7 @@ def test_jsonl_v2_terminal_contract_and_exit_codes(
             "terminal",
             "data",
         ]
-        assert record["schema_version"] == 2
+        assert record["schema_version"] == 3
         assert record["event"] == kind.value
         assert record["terminal"] is True
         assert record["status"] == data["status"]
@@ -441,14 +445,14 @@ def test_action_selector_defaults_to_reject() -> None:
 def test_bare_permissions_opens_selector(monkeypatch: pytest.MonkeyPatch) -> None:
     selected: list[str] = []
 
-    class Settings:
-        async def set_workspace(self, key: str, value: str) -> None:
-            selected.extend((key, value))
+    class Agent:
+        permission_mode = PermissionMode.APPROVE_FOR_ME
 
-    agent = SimpleNamespace(
-        permission_mode=PermissionMode.APPROVE_FOR_ME,
-        repositories=SimpleNamespace(settings=Settings()),
-    )
+        async def persist_permission_mode(self, mode: PermissionMode) -> None:
+            self.permission_mode = mode
+            selected.extend(("permission_mode", mode.value))
+
+    agent = Agent()
     monkeypatch.setattr(
         "capslock.cli.actions.select_permission_mode",
         lambda current: PermissionMode.ASK_FOR_APPROVAL,

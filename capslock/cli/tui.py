@@ -52,7 +52,7 @@ from .views.workflow import render_history, result_status
 
 
 async def run_tui(context: CliContext, *, status_enabled: bool = True) -> int:
-    agent, console = context.agent, context.console
+    agent, console = context.session, context.console
     startup(
         console,
         workspace=str(agent.workspace),
@@ -60,9 +60,10 @@ async def run_tui(context: CliContext, *, status_enabled: bool = True) -> int:
         session_id=agent.session_id,
         permission_mode=agent.permission_mode,
     )
-    session = await agent.repositories.sessions.require(agent.session_id)
+    queries = context.require_queries()
+    session = await queries.session(agent.session_id)
     render_history(
-        console, session, await agent.repositories.sessions.transcript(agent.session_id)
+        console, session, await queries.transcript(agent.session_id)
     )
     state: dict[str, object] = {
         "task": None,

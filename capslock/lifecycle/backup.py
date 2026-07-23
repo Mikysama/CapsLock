@@ -23,8 +23,8 @@ from .sanitization import sanitize_config, sanitize_mcp
 
 
 BACKUP_FORMAT = "capslock-backup"
-ARCHIVE_VERSION = 2
-SUPPORTED_ARCHIVE_VERSIONS = frozenset({1, ARCHIVE_VERSION})
+ARCHIVE_VERSION = 3
+SUPPORTED_ARCHIVE_VERSIONS = frozenset({ARCHIVE_VERSION})
 
 
 class BackupService:
@@ -84,6 +84,7 @@ class BackupService:
                     shutil.copy2(source, stage / name)
             self.io.copy_tree(self.layout.skills, stage / "project-skills")
             self.io.copy_tree(self.layout.user.skills, stage / "user-skills")
+            self.io.copy_tree(self.layout.artifacts, stage / "artifacts")
             manifest = build_manifest(
                 BACKUP_FORMAT,
                 stage,
@@ -132,6 +133,7 @@ class BackupService:
                 for source, destination in (
                     (stage / "project-skills", self.layout.skills),
                     (stage / "user-skills", self.layout.user.skills),
+                    (stage / "artifacts", self.layout.artifacts),
                 ):
                     if source.is_dir():
                         self.io.replace_tree(source, destination)

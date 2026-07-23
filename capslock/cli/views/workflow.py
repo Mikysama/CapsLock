@@ -25,7 +25,7 @@ class StatusView:
     output_tokens: int
     cost_usd: float
     context_messages: int
-    context_limit: int
+    context_budget_tokens: int
     budget: dict[str, Any] | None = None
 
 
@@ -43,7 +43,10 @@ def render_status(console: Console, view: StatusView) -> None:
             ("permission=", "text.muted"),
             (f"{view.permission_mode}\n", "waiting"),
             ("context=", "text.muted"),
-            (f"{view.context_messages}/{view.context_limit}\n", "text.secondary"),
+            (
+                f"{view.context_messages} messages · {view.context_budget_tokens} token budget\n",
+                "text.secondary",
+            ),
             ("usage=", "text.muted"),
             (
                 f"{view.input_tokens} input / {view.output_tokens} output / ${view.cost_usd:.6f}",

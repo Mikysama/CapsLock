@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Any
@@ -10,12 +11,16 @@ from .application.action_system import (
     ActionCoordinator,
     ActionRunState,
     CommandActionHandler,
+    CredentialActionHandler,
     FileActionHandler,
     McpActionHandler,
     WebActionHandler,
+    resolve_named_credential,
 )
 from .application.workflow import WorkflowService
+from .application.queries import WorkspaceQueries
 from .configuration import Settings
+from .domain import ActionRecord, ActionStatus, ActionType
 from .collaboration import (
     AgentOutputVerifier,
     ChildAgentRunner,
@@ -30,10 +35,13 @@ from .observability import EventSink
 from .permissions import PermissionMode
 from .policy import WorkspacePolicy
 from .plugins import PluginProcessClient, PluginRegistry
-from .runtime import AsyncOpenAIChatModel, ModelRouter, WorkspaceAgent
+from .plugins.broker import BrokerCallbacks
+from .policy import PolicyError
+from .runtime import AgentSession, AsyncOpenAIChatModel, ModelRouter
 from .skills import SkillRegistry, SkillService
 from .storage.memory_repositories import MemoryRepositories
 from .storage.repositories import WorkspaceRepositories
+from .storage.artifacts import ToolArtifactStore
 from .tooling.async_catalog import workspace_tools
 from .tooling.plugins import plugin_tools
 
@@ -48,16 +56,27 @@ class WorkspaceApplication:
         client: Any,
         repositories: WorkspaceRepositories,
         memory_repositories: MemoryRepositories,
-        agent: WorkspaceAgent,
+        session: AgentSession,
         close_client: bool = True,
     ) -> None:
         self.workspace = workspace
         self.layout = layout
         self.settings = settings
         self.client = client
-        self.repositories = repositories
-        self.memory_repositories = memory_repositories
-        self.agent = agent
+        self._repositories = repositories
+        self._memory_repositories = memory_repositories
+        self.session = session
+        self.queries = WorkspaceQueries(
+            repositories.sessions,
+            repositories.runs,
+            repositories.work_items,
+            repositories.run_journal,
+            repositories.actions,
+            repositories.tasks,
+            repositories.sources,
+            repositories.governance,
+            repositories.collaboration,
+        )
         self.close_client = close_client
 
     @classmethod
@@ -83,13 +102,14 @@ class WorkspaceApplication:
         if close_client:
             resources.push_async_callback(_close_clients, client)
         try:
-            repositories = await WorkspaceRepositories.open(
-                layout.database, workspace=root
+            memory_path = settings.memory.database or layout.user.canonical_memory
+            repositories, memory_repositories = await asyncio.gather(
+                WorkspaceRepositories.open(layout.database, workspace=root),
+                MemoryRepositories.open(memory_path),
             )
             resources.push_async_callback(repositories.close)
-            memory_path = settings.memory.database or layout.user.canonical_memory
-            memory_repositories = await MemoryRepositories.open(memory_path)
             resources.push_async_callback(memory_repositories.close)
+            artifacts = ToolArtifactStore(layout.artifacts, repositories.database)
             if session_id is None:
                 session = await repositories.sessions.create(
                     settings.model_config.model
@@ -154,6 +174,9 @@ class WorkspaceApplication:
                 audit=repositories.models,
                 budget=settings.budget,
             )
+            primary_profile = (settings.models or {})[
+                settings.routing.reasoning[0]
+            ]
             external_embedding_profiles = {}
             for profile_name in settings.routing.embedding if settings.routing else ():
                 profile = (settings.models or {})[profile_name]
@@ -179,6 +202,74 @@ class WorkspaceApplication:
             )
 
             def actions(run_id: str) -> ActionCoordinator:
+                coordinator: ActionCoordinator | None = None
+
+                def broker_callbacks(parent: ActionRecord) -> BrokerCallbacks:
+                    async def execute_capability(
+                        action_type: ActionType, payload: dict[str, object]
+                    ) -> dict[str, object]:
+                        if coordinator is None:
+                            raise PolicyError("plugin capability approval is unavailable")
+                        action = await coordinator.propose(action_type, **payload)
+                        if action.status is not ActionStatus.COMPLETED:
+                            raise PolicyError(
+                                "plugin capability request was not approved and completed"
+                            )
+                        return dict(action.result or {})
+
+                    async def workspace_write(
+                        params: dict[str, Any],
+                    ) -> dict[str, object]:
+                        path, content = params.get("path"), params.get("content")
+                        if not isinstance(path, str) or not isinstance(content, str):
+                            raise PolicyError(
+                                "workspace write requires string path and content"
+                            )
+                        target = policy.writable_file(path, create=True)
+                        payload: dict[str, object] = {
+                            "path": path,
+                            "summary": f"Plugin {parent.request.get('plugin')} writes {path}",
+                        }
+                        if target.exists():
+                            payload["replace_content"] = content
+                            action_type = ActionType.FILE_EDIT
+                        else:
+                            payload["content"] = content
+                            action_type = ActionType.FILE_CREATE
+                        return await execute_capability(action_type, payload)
+
+                    async def network(params: dict[str, Any]) -> dict[str, object]:
+                        return await execute_capability(
+                            ActionType.WEB_FETCH, {"url": params.get("url")}
+                        )
+
+                    async def process(params: dict[str, Any]) -> dict[str, object]:
+                        return await execute_capability(
+                            ActionType.COMMAND,
+                            {
+                                "template": params.get("template"),
+                                "target": params.get("target"),
+                                "cwd": params.get("cwd", "."),
+                            },
+                        )
+
+                    async def credential(params: dict[str, Any]) -> dict[str, object]:
+                        name = params.get("name")
+                        if not isinstance(name, str):
+                            raise PolicyError("credential capability requires a name")
+                        await execute_capability(
+                            ActionType.CREDENTIAL_ACCESS, {"name": name}
+                        )
+                        secret = await asyncio.to_thread(resolve_named_credential, name)
+                        return {"name": name, "value": secret}
+
+                    return BrokerCallbacks(
+                        workspace_write=workspace_write,
+                        network=network,
+                        process=process,
+                        credential=credential,
+                    )
+
                 handlers = [
                     FileActionHandler(policy),
                     CommandActionHandler(
@@ -200,9 +291,11 @@ class WorkspaceApplication:
                         layout=layout,
                         plugin_registry=plugin_registry,
                         plugin_client=plugin_client,
+                        broker_callbacks=broker_callbacks,
                     ),
+                    CredentialActionHandler(),
                 ]
-                return ActionCoordinator(
+                coordinator = ActionCoordinator(
                     repositories.actions,
                     ActionRunState(repositories.runs, repositories.workflow),
                     session_id=session.id,
@@ -211,6 +304,7 @@ class WorkspaceApplication:
                     event=events.emit,
                     interaction=interaction,
                 )
+                return coordinator
 
             collaboration = None
             if not child_mode and settings.agents.enabled:
@@ -234,11 +328,22 @@ class WorkspaceApplication:
                 )
                 child_runner.collaboration = collaboration
 
-            agent = WorkspaceAgent(
+            agent_session = AgentSession(
                 workspace=root,
                 model_name=session.model,
                 chat_model=router,
-                repositories=repositories,
+                sessions=repositories.sessions,
+                work_items=repositories.work_items,
+                runs=repositories.runs,
+                journal=repositories.run_journal,
+                action_records=repositories.actions,
+                tasks=repositories.tasks,
+                sources=repositories.sources,
+                settings_store=repositories.settings,
+                model_audit=repositories.models,
+                governance=repositories.governance,
+                collaboration_records=repositories.collaboration,
+                compactions=repositories.compactions,
                 workflow=workflow,
                 session_id=session.id,
                 policy=policy,
@@ -250,7 +355,11 @@ class WorkspaceApplication:
                 memory=memory,
                 permission_mode=permission_mode,
                 max_tool_rounds=settings.runtime.max_tool_rounds,
-                max_context_messages=settings.runtime.max_context_messages,
+                context_settings=settings.context,
+                context_window=primary_profile.context_window,
+                max_output_tokens=primary_profile.max_output_tokens,
+                model_profile=primary_profile.name,
+                artifacts=artifacts,
                 input_cost_per_million=settings.model_config.input_cost_per_million,
                 output_cost_per_million=settings.model_config.output_cost_per_million,
                 max_run_tokens=settings.budget.max_run_tokens,
@@ -266,7 +375,7 @@ class WorkspaceApplication:
                 client=client,
                 repositories=repositories,
                 memory_repositories=memory_repositories,
-                agent=agent,
+                session=agent_session,
                 close_client=close_client,
             )
             resources.pop_all()
@@ -276,14 +385,15 @@ class WorkspaceApplication:
             raise
 
     async def close(self) -> None:
+        self.session.events.flush()
         try:
             if self.close_client:
                 await _close_clients(self.client)
         finally:
             try:
-                await self.repositories.close()
+                await self._repositories.close()
             finally:
-                await self.memory_repositories.close()
+                await self._memory_repositories.close()
 
     async def __aenter__(self) -> "WorkspaceApplication":
         return self
