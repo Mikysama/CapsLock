@@ -16,7 +16,7 @@ from urllib.parse import urlparse
 import httpx
 
 from ..domain import EmbeddingBackend, MemoryInfo
-from ..storage.memory_v2 import MemoryRepositories
+from ..storage.memory_repositories import MemoryRepositories
 
 DEFAULT_FASTEMBED_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 MAX_EMBEDDING_TEXT_BYTES = 8 * 1024

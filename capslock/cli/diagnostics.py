@@ -6,18 +6,22 @@ import asyncio
 import json
 import os
 import sqlite3
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from pathlib import Path
 
 from rich.console import Console
 
-from ..config import migrate_config, read_config_document, validate_config_document
+from ..configuration import (
+    migrate_config,
+    read_config_document,
+    validate_config_document,
+)
 from ..credentials import credential_status
 from ..layout import ProjectLayout
 from ..lifecycle import LifecycleService
 from ..mcp import McpRegistry
 from ..policy import WorkspacePolicy
-from ..storage.schema_v2 import (
+from ..storage.schema import (
     MEMORY_APPLICATION_ID,
     MEMORY_SCHEMA_VERSION,
     WORKSPACE_APPLICATION_ID,
@@ -26,8 +30,9 @@ from ..storage.schema_v2 import (
 from ..skills import SkillRegistry
 from ..plugins import PluginRegistry, PluginValidationError
 from ..session_management import SessionManager
-from ..storage.repositories_v2 import WorkspaceRepositories
+from ..storage.repositories import WorkspaceRepositories
 from .prompt import select_session as choose_session
+from .diagnostic_core import Diagnostic
 from .views.diagnostics import render_doctor, render_sessions
 
 
@@ -153,15 +158,6 @@ async def select_session(
         console.width,
         title=prompt_title,
     )
-
-
-@dataclass(frozen=True)
-class Diagnostic:
-    severity: str
-    code: str
-    subject: str
-    message: str
-    fixable: bool = False
 
 
 async def doctor(
@@ -306,7 +302,7 @@ async def doctor(
         return await doctor(console, workspace, layout=layout, args=clone)
     if config_valid:
         try:
-            from ..config import Settings
+            from ..configuration import Settings
 
             settings = Settings.load(workspace, layout=layout)
             for name, provider in sorted((settings.providers or {}).items()):
@@ -319,7 +315,7 @@ async def doctor(
                     )
                 )
             if args.network and settings.model_config.api_key:
-                from .app import create_client
+                from .providers import create_client
 
                 client = create_client(settings)
                 try:
@@ -462,7 +458,7 @@ async def _apply_fixes(
                     layout.database, workspace=layout.workspace
                 )
             else:
-                from ..storage.memory_v2 import MemoryRepositories
+                from ..storage.memory_repositories import MemoryRepositories
 
                 repositories = await MemoryRepositories.open(layout.user.memory)
             await repositories.close()

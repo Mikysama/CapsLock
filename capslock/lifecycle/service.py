@@ -4,43 +4,38 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
-import shutil
 import sqlite3
 import tempfile
 import uuid
-import zipfile
-from contextlib import ExitStack, contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
-from .. import __version__
 from ..layout import ProjectLayout
-from ..storage.memory_v2 import workspace_key
+from ..storage.memory_repositories import workspace_key
 from .archive import (
     MAX_ARCHIVE_BYTES,
+    build_manifest,
     extract_zip as _extract_zip,
     read_json as _read_json,
-    validate_zip as _validate_zip,
+    verify_archive,
     write_json as _write_json,
     write_zip as _write_zip,
 )
 from .errors import LifecycleError
 from .coordinator import ImportCoordinator
+from .backup import BackupService
+from .io import LifecycleIO
 from .sanitization import (
     redact_portable as _redact_portable,
-    sanitize_config as _sanitize_config,
     sanitize_mcp as _sanitize_mcp,
 )
 from .specs import (
     MEMORY_TABLES,
-    REFERENCE_FIELDS,
     WORKSPACE_TABLES,
 )
 
 
-BACKUP_FORMAT = "capslock-backup"
 EXPORT_FORMAT = "capslock-lifecycle-export"
 ARCHIVE_VERSION = 2
 SUPPORTED_ARCHIVE_VERSIONS = frozenset({1, ARCHIVE_VERSION})
@@ -51,139 +46,25 @@ def utc_now() -> str:
     return datetime.now(UTC).isoformat()
 
 
-class LifecycleService:
-    def __init__(self, layout: ProjectLayout) -> None:
+class PortableArchiveService:
+    def __init__(
+        self,
+        layout: ProjectLayout,
+        backup: BackupService,
+        io: LifecycleIO,
+    ) -> None:
         self.layout = layout
         self.workspace = layout.workspace
         self.memory_path = layout.user.memory
-
-    @property
-    def backup_directory(self) -> Path:
-        identity = workspace_key(self.workspace)[:16]
-        return self.layout.user.home / "backups" / identity
-
-    def backup_create(self, destination: Path | None = None) -> Path:
-        self.backup_directory.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
-        target = destination or self.backup_directory / f"capslock-{stamp}.clbackup"
-        target = target.expanduser().resolve()
-        if target.exists():
-            raise FileExistsError(f"backup already exists: {target}")
-        with (
-            self._locks(),
-            tempfile.TemporaryDirectory(prefix="capslock-backup-") as raw,
-        ):
-            stage = Path(raw)
-            missing: list[str] = []
-            self._snapshot_database(
-                self.layout.database, stage / "workspace.sqlite3", missing
-            )
-            self._snapshot_database(self.memory_path, stage / "memory.sqlite3", missing)
-            for source, name in (
-                (self.layout.config, "config.toml"),
-                (self.layout.project_mcp, "mcp.json"),
-                (self.layout.local_mcp, "local-mcp.json"),
-                (self.layout.events, "events.jsonl"),
-            ):
-                if not source.is_file():
-                    continue
-                if name == "config.toml":
-                    if _sanitize_config(source, stage / name):
-                        missing.append("plaintext configuration credentials")
-                elif name == "local-mcp.json":
-                    _write_json(stage / name, _sanitize_mcp(_read_json(source)))
-                    missing.append("MCP environment values")
-                else:
-                    shutil.copy2(source, stage / name)
-            _copy_tree(self.layout.skills, stage / "project-skills")
-            _copy_tree(self.layout.user.skills, stage / "user-skills")
-            manifest = self._manifest(
-                BACKUP_FORMAT, stage, extra={"missing_secrets": sorted(set(missing))}
-            )
-            _write_json(stage / "manifest.json", manifest)
-            _write_zip(stage, target)
-        target.chmod(0o600)
-        return target
-
-    def backup_list(self) -> list[Path]:
-        if not self.backup_directory.is_dir():
-            return []
-        return sorted(self.backup_directory.glob("*.clbackup"), reverse=True)
-
-    def verify(
-        self, archive: Path, *, expected_format: str | None = None
-    ) -> dict[str, Any]:
-        archive = archive.expanduser().resolve()
-        if archive.stat().st_size > MAX_ARCHIVE_BYTES:
-            raise LifecycleError("archive exceeds the size limit")
-        with zipfile.ZipFile(archive) as bundle:
-            _validate_zip(bundle)
-            try:
-                manifest = json.loads(bundle.read("manifest.json"))
-            except (KeyError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-                raise LifecycleError("archive has no valid manifest") from exc
-            if manifest.get("version") not in SUPPORTED_ARCHIVE_VERSIONS:
-                raise LifecycleError("unsupported archive version")
-            if expected_format and manifest.get("format") != expected_format:
-                raise LifecycleError(f"expected {expected_format} archive")
-            expected = manifest.get("files")
-            if not isinstance(expected, dict):
-                raise LifecycleError("archive manifest has no file checksums")
-            actual_names = {item.filename for item in bundle.infolist()} - {
-                "manifest.json"
-            }
-            if actual_names != set(expected):
-                raise LifecycleError("archive file list does not match its manifest")
-            for name, digest in expected.items():
-                if hashlib.sha256(bundle.read(name)).hexdigest() != digest:
-                    raise LifecycleError(f"archive checksum mismatch: {name}")
-            return manifest
-
-    def backup_restore(self, archive: Path) -> Path:
-        self.verify(archive, expected_format=BACKUP_FORMAT)
-        safety = self.backup_create()
-        journal = self._journal("restore", str(archive), str(safety))
-        try:
-            with (
-                self._locks(),
-                tempfile.TemporaryDirectory(prefix="capslock-restore-") as raw,
-            ):
-                stage = Path(raw)
-                _extract_zip(archive, stage)
-                replacements = (
-                    (stage / "workspace.sqlite3", self.layout.database),
-                    (stage / "memory.sqlite3", self.memory_path),
-                    (stage / "config.toml", self.layout.config),
-                    (stage / "mcp.json", self.layout.project_mcp),
-                    (stage / "local-mcp.json", self.layout.local_mcp),
-                    (stage / "events.jsonl", self.layout.events),
-                )
-                for source, destination in replacements:
-                    if source.exists():
-                        _atomic_replace(source, destination)
-                    elif destination.exists():
-                        destination.unlink()
-                for source, destination in (
-                    (stage / "project-skills", self.layout.skills),
-                    (stage / "user-skills", self.layout.user.skills),
-                ):
-                    if source.is_dir():
-                        _replace_tree(source, destination)
-                    elif destination.exists():
-                        shutil.rmtree(destination)
-            journal.unlink(missing_ok=True)
-            return safety
-        except Exception:
-            raise LifecycleError(
-                f"restore failed; recovery backup: {safety}; journal: {journal}"
-            )
+        self.backup = backup
+        self.io = io
 
     def export(self, destination: Path, *, include_global_memory: bool = False) -> Path:
         target = destination.expanduser().resolve()
         if target.exists():
             raise FileExistsError(f"export already exists: {target}")
         with (
-            self._locks(),
+            self.io.locks(),
             tempfile.TemporaryDirectory(prefix="capslock-export-") as raw,
         ):
             stage = Path(raw)
@@ -213,9 +94,11 @@ class LifecycleService:
                 else {},
             }
             _write_json(stage / "mcp.json", _redact_portable(mcp))
-            manifest = self._manifest(
+            manifest = build_manifest(
                 EXPORT_FORMAT,
                 stage,
+                workspace=self.workspace,
+                version=ARCHIVE_VERSION,
                 extra={
                     "archive_id": archive_id,
                     "include_global_memory": include_global_memory,
@@ -232,7 +115,11 @@ class LifecycleService:
             return self._import_legacy_session(archive / "session.json")
         if archive.suffix.casefold() == ".json":
             return self._import_legacy_memory(archive)
-        manifest = self.verify(archive, expected_format=EXPORT_FORMAT)
+        manifest = verify_archive(
+            archive,
+            supported_versions=SUPPORTED_ARCHIVE_VERSIONS,
+            expected_format=EXPORT_FORMAT,
+        )
         with tempfile.TemporaryDirectory(prefix="capslock-import-") as raw:
             stage = Path(raw)
             _extract_zip(archive, stage)
@@ -277,7 +164,14 @@ class LifecycleService:
         workspace_rows: dict[str, Any],
         memory_rows: dict[str, Any],
     ) -> dict[str, Any]:
-        return ImportCoordinator(self).merge(
+        return ImportCoordinator(
+            layout=self.layout,
+            memory_path=self.memory_path,
+            workspace=self.workspace,
+            backup_create=self.backup.create,
+            locks=self.io.locks,
+            journal=self.io.journal,
+        ).merge(
             archive_id,
             archive_hash,
             source_version,
@@ -329,65 +223,6 @@ class LifecycleService:
             return rows
         finally:
             connection.close()
-
-    def _manifest(
-        self, archive_format: str, stage: Path, *, extra: dict[str, Any]
-    ) -> dict[str, Any]:
-        files = {
-            path.relative_to(stage).as_posix(): hashlib.sha256(
-                path.read_bytes()
-            ).hexdigest()
-            for path in sorted(stage.rglob("*"))
-            if path.is_file() and path.name != "manifest.json"
-        }
-        return {
-            "format": archive_format,
-            "version": ARCHIVE_VERSION,
-            "source_version": __version__,
-            "created_at": utc_now(),
-            "workspace_fingerprint": workspace_key(self.workspace),
-            "files": files,
-            **extra,
-        }
-
-    def _snapshot_database(
-        self, source: Path, target: Path, missing: list[str]
-    ) -> None:
-        if source.is_file():
-            _sqlite_backup(source, target)
-        else:
-            missing.append(str(source))
-
-    def _journal(self, operation: str, source: str, recovery: str) -> Path:
-        path = self.layout.root / "state" / "lifecycle-journal.json"
-        _write_json(
-            path,
-            {
-                "operation": operation,
-                "source": source,
-                "recovery": recovery,
-                "started_at": utc_now(),
-            },
-        )
-        path.chmod(0o600)
-        return path
-
-    @contextmanager
-    def _locks(self) -> Iterator[None]:
-        import fcntl
-
-        paths = sorted(
-            (
-                self.layout.root / "state" / "lifecycle.lock",
-                self.layout.user.home / "state" / "lifecycle.lock",
-            )
-        )
-        with ExitStack() as stack:
-            for path in paths:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                handle = stack.enter_context(path.open("a+"))
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            yield
 
     def _merge_mcp(
         self, document: dict[str, Any], archive_id: str, report: dict[str, Any]
@@ -539,216 +374,47 @@ class LifecycleService:
         )
 
 
-def _merge_tables(
-    connection: sqlite3.Connection,
-    payload: dict[str, Any],
-    tables: tuple[str, ...],
-    primary: dict[str, str | tuple[str, ...]],
-    import_id: str,
-    archive_id: str,
-    report: dict[str, Any],
-    *,
-    domain: str,
-    external_maps: dict[str, dict[str, str]] | None = None,
-    target_workspace_key: str | None = None,
-) -> dict[str, dict[str, str]]:
-    maps: dict[str, dict[str, str]] = {}
-    all_maps = external_maps or {}
-    for table in tables:
-        records = payload.get(table, [])
-        if not isinstance(records, list):
-            raise LifecycleError(f"{table} must be a list")
-        columns = {
-            str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})")
-        }
-        if not columns:
-            continue
-        key_spec = primary[table]
-        keys = (key_spec,) if isinstance(key_spec, str) else key_spec
-        table_map: dict[str, str] = {}
-        for source in records:
-            if not isinstance(source, dict) or any(key not in source for key in keys):
-                raise LifecycleError(f"invalid {table} record")
-            record = {name: value for name, value in source.items() if name in columns}
-            source_id = json.dumps(
-                [source[key] for key in keys], separators=(",", ":"), default=str
-            )
-            _rewrite_references(
-                table, record, {**all_maps, **maps}, target_workspace_key
-            )
-            fingerprint = _fingerprint(record)
-            target_values = tuple(record[key] for key in keys)
-            where = " AND ".join(f"{key}=?" for key in keys)
-            existing = connection.execute(
-                f"SELECT * FROM {table} WHERE {where}", target_values
-            ).fetchone()
-            disposition = "imported"
-            if existing is not None:
-                existing_value = {name: existing[name] for name in record}
-                if _fingerprint(existing_value) == fingerprint:
-                    disposition = "skipped"
-                elif len(keys) > 1 or table in {
-                    "workspace_settings",
-                    "skill_settings",
-                    "memory_workspace_settings",
-                }:
-                    disposition = "blocked"
-                else:
-                    key = keys[0]
-                    target_values = (
-                        _remapped_id(
-                            connection,
-                            table,
-                            key,
-                            archive_id,
-                            source_id,
-                            target_values[0],
-                        ),
-                    )
-                    record[key] = target_values[0]
-                    disposition = "remapped"
-            target_id = json.dumps(target_values, separators=(",", ":"), default=str)
-            if len(keys) == 1:
-                table_map[str(source[keys[0]])] = str(target_values[0])
-                target_id = str(target_values[0])
-            if disposition not in {"skipped", "blocked"}:
-                if table == "actions":
-                    record["import_id"] = import_id
-                _insert_record(connection, table, record)
-            report[disposition] += 1
-            connection.execute(
-                """INSERT OR REPLACE INTO lifecycle_import_items(
-                   import_id,entity_type,source_id,target_id,fingerprint,disposition) VALUES(?,?,?,?,?,?)""",
-                (
-                    import_id,
-                    f"{domain}:{table}",
-                    source_id,
-                    target_id,
-                    fingerprint,
-                    disposition,
-                ),
-            )
-        maps[table] = table_map
-    return maps
+class LifecycleService:
+    """Stable synchronous facade over backup and portable archive services."""
 
+    def __init__(self, layout: ProjectLayout) -> None:
+        self.layout = layout
+        self.workspace = layout.workspace
+        self.memory_path = layout.user.memory
+        self.io = LifecycleIO(layout)
+        self.backup = BackupService(layout, self.memory_path, self.io)
+        self.portable = PortableArchiveService(layout, self.backup, self.io)
 
-def _rewrite_references(
-    table_name: str,
-    record: dict[str, Any],
-    maps: dict[str, dict[str, str]],
-    target_workspace_key: str | None,
-) -> None:
-    references = dict(REFERENCE_FIELDS)
-    if table_name in {"memory_recalls", "memory_recall_items"}:
-        references["run_id"] = (
-            "memory_recalls" if table_name == "memory_recall_items" else "runs"
-        )
-    for field, table in references.items():
-        value = record.get(field)
-        if value is not None and str(value) in maps.get(table, {}):
-            record[field] = maps[table][str(value)]
-    if (
-        target_workspace_key
-        and "workspace_key" in record
-        and not (table_name == "memories" and record.get("scope") == "global")
-    ):
-        record["workspace_key"] = target_workspace_key
+    @property
+    def backup_directory(self) -> Path:
+        return self.backup.directory
 
+    def backup_create(self, destination: Path | None = None) -> Path:
+        return self.backup.create(destination)
 
-def _normalize_imported_workflow(
-    connection: sqlite3.Connection, import_id: str
-) -> None:
-    def imported(table: str) -> str:
-        return f"id IN (SELECT target_id FROM lifecycle_import_items WHERE import_id=? AND entity_type='workspace:{table}' AND disposition IN ('imported','remapped'))"
+    def backup_list(self) -> list[Path]:
+        return self.backup.list()
 
-    connection.execute(
-        f"UPDATE work_items SET status='interrupted',error='interrupted during export' WHERE status='running' AND {imported('work_items')}",
-        (import_id,),
-    )
-    connection.execute(
-        f"UPDATE runs SET status='interrupted',finished_at=coalesce(finished_at,?),error_code='imported_interrupted',error_message='interrupted during export' WHERE status='running' AND {imported('runs')}",
-        (utc_now(), import_id),
-    )
-    connection.execute(
-        f"""INSERT OR IGNORE INTO run_governance(
-               run_id,root_run_id,mode,limits_json,tool_rounds,tool_calls,
-               elapsed_ms,input_tokens,output_tokens,cost_usd,updated_at)
-            SELECT r.id,r.id,'interactive',
-                   '{{"max_tool_rounds":32,"max_tool_calls":null,"max_duration_seconds":null,"max_tokens":null,"max_budget_usd":null}}',
-                   (SELECT count(*) FROM run_steps s WHERE s.run_id=r.id AND s.kind='model' AND s.status='completed' AND instr(coalesce(s.checkpoint_json,''),'tool_calls')>0),
-                   (SELECT count(*) FROM tool_calls t WHERE t.run_id=r.id),
-                   coalesce(r.duration_ms,0),r.input_tokens,r.output_tokens,r.cost_usd,?
-              FROM runs r WHERE {imported("runs")}""",
-        (utc_now(), import_id),
-    )
-    connection.execute(
-        f"UPDATE run_steps SET status='cancelled',finished_at=coalesce(finished_at,?),error='interrupted during export' WHERE status='running' AND {imported('run_steps')}",
-        (utc_now(), import_id),
-    )
-    connection.execute(
-        f"UPDATE model_calls SET status='failed',finished_at=coalesce(finished_at,?),error_code='imported_interrupted',error_message='interrupted during export' WHERE status='running' AND {imported('model_calls')}",
-        (utc_now(), import_id),
-    )
-    connection.execute(
-        f"UPDATE agent_tasks SET state='interrupted',finished_at=coalesce(finished_at,?),error='interrupted during export',child_workspace=NULL WHERE state IN ('created','running','waiting_approval') AND {imported('agent_tasks')}",
-        (utc_now(), import_id),
-    )
-    connection.execute(
-        """UPDATE actions SET historical_only=1,requires_reapproval=0
-                          WHERE import_id=? AND status IN ('completed','failed','rejected','cancelled')""",
-        (import_id,),
-    )
-    connection.execute(
-        """UPDATE actions SET status='pending',approved_at=NULL,started_at=NULL,
-                          finished_at=NULL,decided_at=NULL,result_json=NULL,result_kind=NULL,
-                          error_code=NULL,error_message=NULL,historical_only=0,requires_reapproval=1
-                          WHERE import_id=? AND status IN ('pending','approved','running')""",
-        (import_id,),
-    )
+    def backup_restore(self, archive: Path) -> Path:
+        return self.backup.restore(archive)
 
-
-def _rebuild_session_search(
-    connection: sqlite3.Connection, session_ids: set[str]
-) -> None:
-    for session_id in session_ids:
-        connection.execute(
-            "DELETE FROM session_search WHERE session_id=?", (session_id,)
-        )
-        session = connection.execute(
-            "SELECT title,created_at FROM sessions WHERE id=?", (session_id,)
-        ).fetchone()
-        if session is None:
-            continue
-        connection.execute(
-            "INSERT INTO session_search(session_id,kind,content,created_at) VALUES(?,?,?,?)",
-            (session_id, "title", session["title"], session["created_at"]),
-        )
-        connection.executemany(
-            "INSERT INTO session_search(session_id,kind,content,created_at) VALUES(?,?,?,?)",
-            [
-                (session_id, "message", row["content"], row["created_at"])
-                for row in connection.execute(
-                    "SELECT content,created_at FROM messages WHERE session_id=? ORDER BY id",
-                    (session_id,),
-                )
-            ],
+    def verify(
+        self, archive: Path, *, expected_format: str | None = None
+    ) -> dict[str, Any]:
+        return verify_archive(
+            archive,
+            supported_versions=SUPPORTED_ARCHIVE_VERSIONS,
+            expected_format=expected_format,
         )
 
+    def export(self, destination: Path, *, include_global_memory: bool = False) -> Path:
+        return self.portable.export(
+            destination,
+            include_global_memory=include_global_memory,
+        )
 
-def _rebuild_memory_fts(connection: sqlite3.Connection, memory_ids: set[str]) -> None:
-    for memory_id in memory_ids:
-        connection.execute("DELETE FROM memory_fts WHERE memory_id=?", (memory_id,))
-        row = connection.execute(
-            """SELECT m.current_revision,r.content FROM memories m
-               LEFT JOIN memory_revisions r ON r.memory_id=m.id AND r.revision=m.current_revision
-               WHERE m.id=? AND m.status='active'""",
-            (memory_id,),
-        ).fetchone()
-        if row is not None and row[0] is not None and row[1] is not None:
-            connection.execute(
-                "INSERT INTO memory_fts(memory_id,revision,content) VALUES(?,?,?)",
-                (memory_id, row[0], row[1]),
-            )
+    def import_archive(self, archive: Path) -> dict[str, Any]:
+        return self.portable.import_archive(archive)
 
 
 def _database_rows(
@@ -779,83 +445,3 @@ def _select_in(
             f"SELECT * FROM {table} WHERE {field} IN ({marks})", tuple(values)
         )
     ]
-
-
-def _insert_record(
-    connection: sqlite3.Connection, table: str, record: dict[str, Any]
-) -> None:
-    columns = tuple(record)
-    marks = ",".join("?" for _ in columns)
-    connection.execute(
-        f"INSERT INTO {table}({','.join(columns)}) VALUES({marks})",
-        tuple(record[name] for name in columns),
-    )
-
-
-def _remapped_id(
-    connection: sqlite3.Connection,
-    table: str,
-    key: str,
-    archive_id: str,
-    source_id: str,
-    current: object,
-) -> object:
-    integer = isinstance(current, int)
-    for attempt in range(1000):
-        seed = f"{archive_id}:{table}:{source_id}:{attempt}"
-        candidate: object = (
-            int(hashlib.sha256(seed.encode()).hexdigest()[:14], 16)
-            if integer
-            else uuid.uuid5(uuid.NAMESPACE_URL, seed).hex
-        )
-        if (
-            connection.execute(
-                f"SELECT 1 FROM {table} WHERE {key}=?", (candidate,)
-            ).fetchone()
-            is None
-        ):
-            return candidate
-    raise LifecycleError(f"could not remap {table} id")
-
-
-def _fingerprint(value: Any) -> str:
-    encoded = json.dumps(
-        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str
-    ).encode()
-    return hashlib.sha256(encoded).hexdigest()
-
-
-def _sqlite_backup(source: Path, target: Path) -> None:
-    target.parent.mkdir(parents=True, exist_ok=True)
-    original = sqlite3.connect(f"file:{source}?mode=ro", uri=True)
-    copy = sqlite3.connect(target)
-    try:
-        original.backup(copy)
-    finally:
-        original.close()
-        copy.close()
-    target.chmod(0o600)
-
-
-def _copy_tree(source: Path, target: Path) -> None:
-    if source.is_dir():
-        symlink = next((path for path in source.rglob("*") if path.is_symlink()), None)
-        if symlink is not None:
-            raise LifecycleError(f"backup does not follow symbolic links: {symlink}")
-        shutil.copytree(source, target, symlinks=False, ignore_dangling_symlinks=True)
-
-
-def _replace_tree(source: Path, target: Path) -> None:
-    temporary = target.with_name(f".{target.name}.restore-{uuid.uuid4().hex}")
-    temporary.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(source, temporary)
-    if target.exists():
-        shutil.rmtree(target)
-    os.replace(temporary, target)
-
-
-def _atomic_replace(source: Path, target: Path) -> None:
-    target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_name(f".{target.name}.restore-{uuid.uuid4().hex}")
-    shutil.copy2(source, temporary)
-    os.replace(temporary, target)

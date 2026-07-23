@@ -16,7 +16,7 @@ from capslock.domain import (
 )
 from capslock.memory import MemoryService
 from capslock.memory.transfer import EXPORT_FORMAT, EXPORT_VERSION
-from capslock.storage.memory_v2 import MemoryRepositories
+from capslock.storage.memory_repositories import MemoryRepositories
 from tests.helpers import FakeChatModel, answer
 
 
@@ -29,7 +29,7 @@ async def create_memory(
     session_id: str = "session",
     expires_at: str | None = None,
 ):
-    return await repositories.memories.create(
+    return await repositories.lifecycle.create(
         content=content,
         memory_type=MemoryType.FACT,
         scope=scope,
@@ -52,7 +52,7 @@ def test_immutable_revisions_expiry_clear_forget_and_undo(tmp_path: Path) -> Non
                 content="first",
                 expires_at="2030-01-01T00:00:00+00:00",
             )
-            edited = await repositories.memories.edit(
+            edited = await repositories.lifecycle.edit(
                 item.id,
                 content="second",
                 memory_type=MemoryType.DECISION,
@@ -63,10 +63,10 @@ def test_immutable_revisions_expiry_clear_forget_and_undo(tmp_path: Path) -> Non
             )
             assert edited.revision == 2
             assert edited.expires_at is None
-            forgotten = await repositories.memories.forget(item.id)
+            forgotten = await repositories.lifecycle.forget(item.id)
             assert forgotten.status is MemoryStatus.FORGOTTEN
             assert forgotten.revision == 3
-            restored = await repositories.memories.undo(item.id)
+            restored = await repositories.lifecycle.undo(item.id)
             assert restored.status is MemoryStatus.ACTIVE
             assert restored.content == "second"
             assert restored.type is MemoryType.DECISION
@@ -102,7 +102,7 @@ def test_purge_removes_content_sources_fts_and_vectors_but_retains_identity_audi
                 vector=b"1234",
                 content_hash="hash",
             )
-            purged = await repositories.memories.purge(item.id)
+            purged = await repositories.lifecycle.purge(item.id)
             assert purged.status is MemoryStatus.PURGED
             assert purged.content is None and purged.revision == 0
             for table in (
@@ -149,7 +149,7 @@ def test_scope_visibility_isolated_by_workspace_and_session(tmp_path: Path) -> N
                 workspace="a",
                 session_id="one",
             )
-            visible = await repositories.memories.list_visible(
+            visible = await repositories.query.list_visible(
                 workspace="a", session_id="one"
             )
             assert {item.id for item in visible} == {
@@ -157,14 +157,14 @@ def test_scope_visibility_isolated_by_workspace_and_session(tmp_path: Path) -> N
                 workspace_item.id,
                 session_item.id,
             }
-            other_session = await repositories.memories.list_visible(
+            other_session = await repositories.query.list_visible(
                 workspace="a", session_id="two"
             )
             assert {item.id for item in other_session} == {
                 global_item.id,
                 workspace_item.id,
             }
-            other_workspace = await repositories.memories.list_visible(
+            other_workspace = await repositories.query.list_visible(
                 workspace="b", session_id="one"
             )
             assert {item.id for item in other_workspace} == {global_item.id}
@@ -190,7 +190,7 @@ def test_fts_query_normalization_handles_natural_language_and_chinese_fallback(
         )
         try:
             item = await create_memory(repositories, content=content)
-            matches = await repositories.memories.search(
+            matches = await repositories.query.search(
                 query, workspace="workspace", session_id="session"
             )
             assert [match.id for match in matches] == [item.id]

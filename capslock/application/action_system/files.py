@@ -82,6 +82,23 @@ class FileActionHandler:
             ActionResultKind.APPLIED,
         )
 
+    async def revalidate(self, action: ActionRecord) -> ActionProposal:
+        request = action.request
+        if action.type is ActionType.FILE_CREATE:
+            payload = {
+                "path": request.get("path"),
+                "content": request.get("after_content"),
+                "summary": action.summary,
+            }
+        else:
+            payload = {
+                "path": request.get("path"),
+                "old_text": request.get("before_content"),
+                "new_text": request.get("after_content"),
+                "summary": action.summary,
+            }
+        return await self.propose(action.type, payload)
+
     def _apply(self, action: ActionRecord) -> None:
         request = action.request
         path = self.policy.writable_file(

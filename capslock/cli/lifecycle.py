@@ -10,8 +10,8 @@ from rich.console import Console
 
 from ..layout import ProjectLayout
 from ..lifecycle import BACKUP_FORMAT, LifecycleService
-from ..storage.memory_v2 import MemoryRepositories
-from ..storage.repositories_v2 import WorkspaceRepositories
+from ..storage.memory_repositories import MemoryRepositories
+from ..storage.repositories import WorkspaceRepositories
 
 
 async def backup_command(console: Console, layout: ProjectLayout, args) -> int:

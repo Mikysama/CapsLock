@@ -1,6 +1,6 @@
 """Run CapsLock with ``python -m capslock``."""
 
-from .cli import main
+from .cli.app import main
 
 
 if __name__ == "__main__":

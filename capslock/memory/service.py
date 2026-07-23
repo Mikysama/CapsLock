@@ -16,7 +16,7 @@ from ..domain import (
     MemoryType,
 )
 from ..layout import UserLayout
-from ..storage.memory_v2 import MemoryRepositories, workspace_key
+from ..storage.memory_repositories import MemoryRepositories, workspace_key
 from .candidates import CandidateService, MemoryExtractionResult
 from .embeddings import (
     EmbeddingService,

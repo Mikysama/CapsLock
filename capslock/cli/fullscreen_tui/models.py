@@ -109,7 +109,9 @@ def add_system_message(state: TuiState, text: str, *, status: str = "info") -> T
     return replace(state, messages=(*state.messages, message), notification=None)
 
 
-def set_queue_running(state: TuiState, item_id: str, run_id: str | None = None) -> TuiState:
+def set_queue_running(
+    state: TuiState, item_id: str, run_id: str | None = None
+) -> TuiState:
     queue = tuple(
         replace(item, status="running") if item.id == item_id else item
         for item in state.queue
@@ -256,8 +258,16 @@ def _tool_completed(state: TuiState, event: AgentEvent) -> TuiState:
             else tool
             for tool in message.tools
         )
-        important_failure = not ok and any(tool.id == identifier for tool in message.tools)
-        messages.append(replace(message, tools=tools, collapsed=False if important_failure else message.collapsed))
+        important_failure = not ok and any(
+            tool.id == identifier for tool in message.tools
+        )
+        messages.append(
+            replace(
+                message,
+                tools=tools,
+                collapsed=False if important_failure else message.collapsed,
+            )
+        )
     return replace(state, messages=tuple(messages), activity="Thinking")
 
 

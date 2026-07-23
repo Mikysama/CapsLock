@@ -2,7 +2,7 @@
 
 CapsLock 是一个本机工作区 Agent，用于读取代码、检索证据、检查 Git、提出受控文件修改、执行固定命令，以及按审批策略访问 Web 和本地 MCP。v2 内核完全异步，运行、动作、审批、记忆和审计分别通过强类型领域接口与 SQLite repository 管理。
 
-当前源码版本为 `2.2.1`。v2.2.1 将组件化 TUI 设计完整映射到默认 inline 界面，同时保留可通过 `--ui fullscreen` 启用的 Textual 全屏界面；架构、协议和安全边界见 [v2 开发者文档](docs/development/v2/README.md)，升级摘要见 [v2.2.1 发布说明](docs/releases/v2.2.1.md)。
+当前源码版本为 `2.2.2`。v2.2.2 完成配置、Memory、Lifecycle、Action、Workflow、runtime 与 CLI/TUI 的分层解耦，并修复 inline 命令树的即时刷新；架构、协议和安全边界见 [v2 开发者文档](docs/development/v2/README.md)，升级摘要见 [v2.2.2 发布说明](docs/releases/v2.2.2.md)。
 
 正式支持矩阵：Linux/macOS，Python 3.12。发布 CI 会在两个操作系统组合中执行测试、构建、依赖审计和安装冒烟。
 
@@ -79,10 +79,12 @@ TUI 保留以下命令：
 
 ```text
 /help /status /permissions /approvals /queue /memory /skills /agents
-/sources /mcp /diff /undo /rename /exit /quit
+/model /sources /mcp /diff /undo /rename /exit /quit
 ```
 
 队列、任务、上下文和费用汇总到 `/status`。动作越过当前权限边界时，TUI 会在同一个 run 内阻塞，显示动作类型、风险、目标及最多 40 行/4 KiB 的脱敏命令或 diff 预览，然后给出默认拒绝的选择框；原始参数、完整文件内容和凭据不会进入预览。批准或拒绝的最终状态会返回模型继续推理，不再先结束为 `waiting_approval`。取消选择、EOF 和 Ctrl-C 均按拒绝处理。`/approvals` 仅处理非交互 `exec`、portable import 或旧数据留下的待审批动作。裸 `/permissions` 使用方向键选择权限模式，显式 `/permissions approve|ask|full` 仍可快捷切换。portable import 恢复的 queued work 只会在 `/queue start <id>` 后进入前台 worker，旧批准必须重新确认。旧的 `/cost`、`/context`、`/tasks`、`/changes`、`/commands`、`/web`、`/approve` 和 `/reject` 不再解析。`/exit` 与 `/quit` 均可退出 TUI。
+
+输入 `/model` 可用方向键在 `deepseek-v4-flash` 与 `deepseek-v4-pro` 之间选择，也可直接执行 `/model <name>`。选择仅作用于当前 session 并随 session 恢复；新 session 仍采用配置默认模型。活跃 run 期间不能切换，队列中尚未开始的请求会使用切换后的模型。
 
 inline TUI 将原 full-screen 设计系统映射到终端主缓冲区：用户、回答和系统消息保留语义化左边框，Queue、Activity、会话元数据、用量和 Composer 组成一个带完整边框的普通 inline prompt block。该输入块不锚定窗口底部，而是始终出现在最新上下文之后，并随新输出向下移动。reasoning 默认折叠成一行摘要，`Ctrl-O` 可切换当前及后续活动的详细显示；`◆ CapsLock` 下的回答使用透明背景的 Rich Markdown、代码高亮、表格和终端链接。连续读取/搜索工具合并为一条 `Explored` 摘要，编辑、命令和失败结果单独突出。状态信息按 `>=100`、`72–99`、`<72` 三档隐藏次要元数据；模型思考、读取文件和工具执行期间显示动态状态，回答开始流出后不再重复显示 Thinking。`Ctrl-J` 插入换行，`Enter` 提交，`Ctrl-C` 取消当前 run 或在空闲时退出。可通过 `--no-spinner`、`--quiet`、`CAPSLOCK_NO_SPINNER=1` 或 `CI=true` 禁用动态状态。启动 banner 保留 v1.7.1 的 `Welcome back`、CapsLock 字符画和 Tips 布局。
 
@@ -324,8 +326,9 @@ v2 只接受 canonical 布局：
 v2 内核以 `capslock.bootstrap` 为组合根，以 `capslock.ports` 隔离 runtime/tooling 与具体应用、SQLite 实现。每次运行使用显式模型会话和共享审批交互状态；workflow 状态策略、生命周期导入协调、记忆 repository 与配置迁移均保持独立边界。详细说明和 2.0 接口清理见 [v2 开发过程与迁移](docs/development/v2/v2.0.md)。
 
 - `domain/`：session、workflow、action 和 memory 领域类型。
-- `storage/async_database.py`、`storage/schema_v2.py`：数据库所有权与两套 v2 schema。
-- `storage/repositories_v2/`、`storage/memory_v2/`：组合式异步 repositories。
+- `configuration/`：配置文档读取、迁移、校验与 typed settings；不再保留历史顶层转发层。
+- `storage/async_database.py`、`storage/schema.py`：数据库所有权与两套 v2 schema。
+- `storage/repositories/`、`storage/memory_repositories/`：组合式异步 repositories。
 - `application/workflow.py`：原子 workflow 转换与审批结算。
 - `application/action_system/`：动作协调器和四类 async handler。
 - `runtime/`：异步模型协议、context、ToolLoop、event stream 与 Agent。
@@ -346,4 +349,4 @@ python -m pytest -q
 python scripts/check_repository.py
 ```
 
-测试使用模拟模型、HTTP、MCP 和本地子进程，不需要真实 API 密钥。完整工具与 TUI 参考见 [Agent reference](docs/agent-reference.md)。
+测试使用模拟模型、HTTP、MCP 和本地子进程，不需要真实 API 密钥。完整工具与 TUI 参考见 [Agent reference](docs/reference.md)。

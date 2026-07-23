@@ -95,13 +95,21 @@ def _detail(name: str, arguments: dict[str, Any]) -> str | None:
         value = arguments.get("template")
     elif name == "propose_mcp_call":
         server, tool = arguments.get("server"), arguments.get("tool")
-        value = f"{server}/{tool}" if isinstance(server, str) and isinstance(tool, str) else None
+        value = (
+            f"{server}/{tool}"
+            if isinstance(server, str) and isinstance(tool, str)
+            else None
+        )
     elif name == "delegate_agents":
         tasks = arguments.get("tasks")
         value = f"{len(tasks)} task(s)" if isinstance(tasks, list) else None
     elif name == "task_status_update":
         task, status = arguments.get("task_id"), arguments.get("status")
-        value = f"{task}: {status}" if isinstance(task, str) and isinstance(status, str) else None
+        value = (
+            f"{task}: {status}"
+            if isinstance(task, str) and isinstance(status, str)
+            else None
+        )
     else:
         value = None
     return str(redact(value)) if isinstance(value, str) else None

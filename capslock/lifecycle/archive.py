@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import stat
 import uuid
@@ -10,10 +11,71 @@ import zipfile
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from .. import __version__
+from ..storage.memory_repositories import workspace_key
 from .errors import LifecycleError
 
 MAX_ARCHIVE_BYTES = 100 * 1024 * 1024
 MAX_ARCHIVE_FILES = 10_000
+
+
+def build_manifest(
+    archive_format: str,
+    stage: Path,
+    *,
+    workspace: Path,
+    version: int,
+    extra: dict[str, Any],
+) -> dict[str, Any]:
+    from datetime import UTC, datetime
+
+    files = {
+        path.relative_to(stage).as_posix(): hashlib.sha256(
+            path.read_bytes()
+        ).hexdigest()
+        for path in sorted(stage.rglob("*"))
+        if path.is_file() and path.name != "manifest.json"
+    }
+    return {
+        "format": archive_format,
+        "version": version,
+        "source_version": __version__,
+        "created_at": datetime.now(UTC).isoformat(),
+        "workspace_fingerprint": workspace_key(workspace),
+        "files": files,
+        **extra,
+    }
+
+
+def verify_archive(
+    archive: Path,
+    *,
+    supported_versions: frozenset[int],
+    expected_format: str | None = None,
+) -> dict[str, Any]:
+    archive = archive.expanduser().resolve()
+    if archive.stat().st_size > MAX_ARCHIVE_BYTES:
+        raise LifecycleError("archive exceeds the size limit")
+    with zipfile.ZipFile(archive) as bundle:
+        validate_zip(bundle)
+        try:
+            manifest = json.loads(bundle.read("manifest.json"))
+        except (KeyError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise LifecycleError("archive has no valid manifest") from exc
+        if manifest.get("version") not in supported_versions:
+            raise LifecycleError("unsupported archive version")
+        if expected_format and manifest.get("format") != expected_format:
+            raise LifecycleError(f"expected {expected_format} archive")
+        expected = manifest.get("files")
+        if not isinstance(expected, dict):
+            raise LifecycleError("archive manifest has no file checksums")
+        actual_names = {item.filename for item in bundle.infolist()} - {"manifest.json"}
+        if actual_names != set(expected):
+            raise LifecycleError("archive file list does not match its manifest")
+        for name, digest in expected.items():
+            if hashlib.sha256(bundle.read(name)).hexdigest() != digest:
+                raise LifecycleError(f"archive checksum mismatch: {name}")
+        return manifest
 
 
 def read_json(path: Path) -> dict[str, Any]:

@@ -69,8 +69,7 @@ def test_no_color_convention_and_prompt_style_use_only_terminal_default_backgrou
         "bg:" not in style or "bg:default" in style for _, style in colored.style_rules
     )
     assert all(
-        "bg:" not in style or "noreverse" in style
-        for _, style in colored.style_rules
+        "bg:" not in style or "noreverse" in style for _, style in colored.style_rules
     )
     assert all("#" not in style for _, style in plain.style_rules)
 

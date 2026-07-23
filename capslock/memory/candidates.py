@@ -15,7 +15,7 @@ from ..domain import (
     MemoryScope,
     MemoryType,
 )
-from ..storage.memory_v2 import MemoryRepositories
+from ..storage.memory_repositories import MemoryRepositories
 from .embeddings import EmbeddingService
 from .validation import confidence, validated_text
 

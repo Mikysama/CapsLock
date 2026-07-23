@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pytest
 
-from capslock.application.workflow import WorkflowService
 from capslock.domain import (
     ActionResultKind,
     ActionStatus,
@@ -16,8 +15,8 @@ from capslock.domain import (
     interrupted_step_status,
     validate_work_item_transition,
 )
-from capslock.storage.repositories_v2 import WorkspaceRepositories
-from tests.helpers import workspace_run
+from capslock.storage.repositories import WorkspaceRepositories
+from tests.helpers import workflow_service, workspace_run
 
 
 @pytest.mark.parametrize(
@@ -60,14 +59,14 @@ def test_enqueue_start_and_compare_and_set_guards(tmp_path: Path) -> None:
         )
         try:
             session = await repositories.sessions.create("model")
-            workflow = WorkflowService(repositories)
+            workflow = workflow_service(repositories)
             first = await workflow.enqueue(session.id, "first")
             second = await workflow.enqueue(session.id, "second")
             assert (first.position, second.position) == (0, 1)
             prepared = await workflow.prepare(
                 session.id, first.question, work_item_id=first.id
             )
-            running = await repositories.workflow.require_work_item(first.id)
+            running = await repositories.work_items.require(first.id)
             assert running.status is WorkItemStatus.RUNNING
             assert running.current_run_id == prepared.run.id
             with pytest.raises(ValueError, match="not queued"):
@@ -75,7 +74,7 @@ def test_enqueue_start_and_compare_and_set_guards(tmp_path: Path) -> None:
                     session.id, first.question, work_item_id=first.id
                 )
             with pytest.raises(ValueError, match="only queued"):
-                await repositories.workflow.reorder(first.id, 9)
+                await repositories.work_items.reorder(first.id, 9)
         finally:
             await repositories.close()
 
@@ -100,22 +99,23 @@ def test_atomic_terminal_transitions(
         )
         try:
             _, prepared = await workspace_run(repositories)
-            event = await WorkflowService(repositories).finish(
+            event = await workflow_service(repositories).finish(
                 prepared.run.id,
                 status=status,
                 event_kind=event_kind,
                 payload={"status": status.value},
                 duration_ms=7,
             )
-            run = await repositories.workflow.require_run(prepared.run.id)
-            item = await repositories.workflow.require_work_item(prepared.work_item.id)
+            run = await repositories.runs.require(prepared.run.id)
+            item = await repositories.work_items.require(prepared.work_item.id)
             assert run.status == item.status.value == status.value
             assert event.terminal
             assert [
-                entry.sequence for entry in await repositories.workflow.events(run.id)
+                entry.sequence
+                for entry in await repositories.run_journal.events(run.id)
             ] == [1]
             with pytest.raises(ValueError, match="not running"):
-                await WorkflowService(repositories).finish(
+                await workflow_service(repositories).finish(
                     run.id,
                     status=status,
                     event_kind=event_kind,
@@ -151,10 +151,10 @@ def test_finalization_rolls_back_run_and_work_item_when_event_insert_fails(
                     duration_ms=1,
                 )
             assert (
-                await repositories.workflow.require_run(prepared.run.id)
+                await repositories.runs.require(prepared.run.id)
             ).status == "running"
             assert (
-                await repositories.workflow.require_work_item(prepared.work_item.id)
+                await repositories.work_items.require(prepared.work_item.id)
             ).status is WorkItemStatus.RUNNING
         finally:
             await repositories.close()
@@ -196,7 +196,7 @@ def test_approval_settlement_is_atomic_and_idempotent(tmp_path: Path) -> None:
                 await repositories.workflow.settle_approval(session.id, prepared.run.id)
                 is None
             )
-            assert len(await repositories.workflow.events(prepared.run.id)) == 2
+            assert len(await repositories.run_journal.events(prepared.run.id)) == 2
         finally:
             await repositories.close()
 
@@ -235,10 +235,10 @@ def test_approval_settlement_rolls_back_when_terminal_event_fails(
             with pytest.raises(RuntimeError, match="injected settlement"):
                 await repositories.workflow.settle_approval(session.id, prepared.run.id)
             assert (
-                await repositories.workflow.require_run(prepared.run.id)
+                await repositories.runs.require(prepared.run.id)
             ).status == "waiting_approval"
             assert (
-                await repositories.workflow.require_work_item(prepared.work_item.id)
+                await repositories.work_items.require(prepared.work_item.id)
             ).status is WorkItemStatus.WAITING_APPROVAL
         finally:
             await repositories.close()
@@ -280,9 +280,7 @@ def test_failed_action_settles_workflow_as_failed(tmp_path: Path) -> None:
                 session.id, prepared.run.id
             )
             assert event is not None and event.kind is AgentEventKind.FAILED
-            assert (
-                await repositories.workflow.require_run(prepared.run.id)
-            ).status == "failed"
+            assert (await repositories.runs.require(prepared.run.id)).status == "failed"
             assert event.data["error"]["code"] == "nonzero_exit"
         finally:
             await repositories.close()
@@ -326,10 +324,10 @@ def test_waiting_action_cancellation_updates_action_run_and_work_item(
                 await repositories.actions.require(action.id)
             ).status is ActionStatus.CANCELLED
             assert (
-                await repositories.workflow.require_run(prepared.run.id)
+                await repositories.runs.require(prepared.run.id)
             ).status == "cancelled"
             assert (
-                await repositories.workflow.require_work_item(prepared.work_item.id)
+                await repositories.work_items.require(prepared.work_item.id)
             ).status is WorkItemStatus.CANCELLED
         finally:
             await repositories.close()

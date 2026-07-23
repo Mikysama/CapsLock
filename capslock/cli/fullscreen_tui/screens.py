@@ -14,6 +14,7 @@ from textual.widgets import Button, Input, OptionList, Static
 from textual.widgets.option_list import Option
 
 from ...domain import ActionRecord, ApprovalDecision, SessionInfo
+from ...models import SELECTABLE_MODELS
 from ...permissions import PermissionMode
 from .presentation import present_action
 
@@ -111,18 +112,35 @@ class ApprovalScreen(ModalScreen[ApprovalDecision]):
     def compose(self) -> ComposeResult:
         view = self.presentation
         with Vertical(id="dialog", classes="approval-dialog"):
-            yield Static("Allow CapsLock to execute this action?", classes="dialog-title permission-title")
-            yield Static(Text.assemble((view.title, "bold"), (f"\n{view.subtitle}", "dim")))
+            yield Static(
+                "Allow CapsLock to execute this action?",
+                classes="dialog-title permission-title",
+            )
+            yield Static(
+                Text.assemble((view.title, "bold"), (f"\n{view.subtitle}", "dim"))
+            )
             if view.target:
-                yield Static(Text.assemble(("Target  ", "dim"), (view.target, "#89AFC8")))
+                yield Static(
+                    Text.assemble(("Target  ", "dim"), (view.target, "#89AFC8"))
+                )
             if view.preview:
-                lexer = "diff" if view.preview_kind == "diff" else "bash" if view.preview_kind == "command" else "text"
+                lexer = (
+                    "diff"
+                    if view.preview_kind == "diff"
+                    else "bash"
+                    if view.preview_kind == "command"
+                    else "text"
+                )
                 with VerticalScroll(classes="approval-preview"):
-                    yield Static(Syntax(view.preview, lexer, word_wrap=True, theme="ansi_dark"))
+                    yield Static(
+                        Syntax(view.preview, lexer, word_wrap=True, theme="ansi_dark")
+                    )
             with Horizontal(classes="dialog-actions"):
                 yield Button("No, reject", id="reject", variant="default")
                 yield Button("Yes, execute", id="approve", variant="warning")
-            yield Static("Default: reject · Enter confirm · Esc reject", classes="input-guide")
+            yield Static(
+                "Default: reject · Enter confirm · Esc reject", classes="input-guide"
+            )
 
     def on_mount(self) -> None:
         self.query_one("#reject", Button).focus()
@@ -150,12 +168,23 @@ class PermissionScreen(ModalScreen[PermissionMode | None]):
 
     def compose(self) -> ComposeResult:
         options = [
-            Option("Approve high-risk actions — files, commands and MCP ask first", id=PermissionMode.APPROVE_FOR_ME.value),
-            Option("Approve every action — every proposal asks first", id=PermissionMode.ASK_FOR_APPROVAL.value),
-            Option("Full access — safe actions run automatically", id=PermissionMode.FULL_ACCESS.value),
+            Option(
+                "Approve high-risk actions — files, commands and MCP ask first",
+                id=PermissionMode.APPROVE_FOR_ME.value,
+            ),
+            Option(
+                "Approve every action — every proposal asks first",
+                id=PermissionMode.ASK_FOR_APPROVAL.value,
+            ),
+            Option(
+                "Full access — safe actions run automatically",
+                id=PermissionMode.FULL_ACCESS.value,
+            ),
         ]
         with Vertical(id="dialog", classes="select-dialog"):
-            yield Static("Select permission mode", classes="dialog-title permission-title")
+            yield Static(
+                "Select permission mode", classes="dialog-title permission-title"
+            )
             yield OptionList(*options, id="permission-options")
             yield Static("↑/↓ choose · Enter apply · Esc cancel", classes="input-guide")
 
@@ -167,6 +196,47 @@ class PermissionScreen(ModalScreen[PermissionMode | None]):
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         if event.option.id:
             self.dismiss(PermissionMode(event.option.id))
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class ModelScreen(ModalScreen[str | None]):
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    def __init__(self, current: str) -> None:
+        super().__init__()
+        self.current = current
+
+    def compose(self) -> ComposeResult:
+        descriptions = {
+            "deepseek-v4-flash": "Fast model for everyday tasks",
+            "deepseek-v4-pro": "More capable model for complex tasks",
+        }
+        options = [
+            Option(
+                Text.assemble(
+                    (model, "bold"),
+                    (f"\n{descriptions[model]}", "dim"),
+                ),
+                id=model,
+            )
+            for model in SELECTABLE_MODELS
+        ]
+        with Vertical(id="dialog", classes="select-dialog"):
+            yield Static("Select model", classes="dialog-title")
+            yield OptionList(*options, id="model-options")
+            yield Static("↑/↓ choose · Enter apply · Esc cancel", classes="input-guide")
+
+    def on_mount(self) -> None:
+        options = self.query_one(OptionList)
+        values = [option.id for option in options.options]
+        options.highlighted = (
+            values.index(self.current) if self.current in values else 0
+        )
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss(event.option.id)
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -193,7 +263,9 @@ class SessionPickerScreen(ModalScreen[str | None]):
         with Vertical(id="dialog", classes="session-dialog"):
             yield Static("Resume a session", classes="dialog-title")
             yield OptionList(*options, id="session-options")
-            yield Static("↑/↓ choose · Enter resume · Esc cancel", classes="input-guide")
+            yield Static(
+                "↑/↓ choose · Enter resume · Esc cancel", classes="input-guide"
+            )
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         self.dismiss(event.option.id)
@@ -228,7 +300,9 @@ class HistorySearchScreen(ModalScreen[str | None]):
         matches = [item for item in self.history if value in item.casefold()][:50]
         options = self.query_one(OptionList)
         options.clear_options()
-        options.add_options(Option(item, id=str(index)) for index, item in enumerate(matches))
+        options.add_options(
+            Option(item, id=str(index)) for index, item in enumerate(matches)
+        )
         options._capslock_matches = matches
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:

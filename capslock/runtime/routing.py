@@ -9,10 +9,10 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
-from ..config import (
+from ..configuration import (
     BudgetSettings,
     ModelProfileSettings,
     ProviderSettings,
@@ -28,6 +28,7 @@ from ..domain import (
     RunLimits,
 )
 from ..ports import ModelAuditPort
+from ..models import SELECTABLE_MODELS
 from .model import (
     ChatModel,
     ModelDelta,
@@ -51,8 +52,8 @@ class RoutePlan:
     baseline_policy: str
 
 
-class RouteAttemptDriver:
-    """Shared candidate selection and exhausted-route handling."""
+class RoutePlanner:
+    """Build and advance a deterministic model route plan."""
 
     def __init__(self, router: "ModelRouter") -> None:
         self.router = router
@@ -117,6 +118,56 @@ class RouteAttemptDriver:
         )
 
 
+class ModelBudgetGate:
+    """Apply configured run/session reservation limits before each attempt."""
+
+    def __init__(self, router: "ModelRouter") -> None:
+        self.router = router
+
+    async def check(
+        self,
+        run_id: str,
+        profile: ModelProfileSettings,
+        messages: list[dict[str, object]],
+        tools: list[dict[str, object]],
+    ) -> None:
+        await self.router._budget_gate(run_id, profile, messages, tools)
+
+
+class RouteAttemptExecutor:
+    """Own model-call audit lifecycle shared by stream and complete paths."""
+
+    def __init__(self, router: "ModelRouter") -> None:
+        self.router = router
+
+    async def start(
+        self,
+        run_id: str,
+        decision_id: int,
+        role: ModelRole,
+        profile: ModelProfileSettings,
+        attempt: int,
+        previous: str | None,
+    ) -> tuple[int, float]:
+        return await self.router._start_call(
+            run_id,
+            decision_id,
+            role,
+            profile,
+            attempt,
+            previous,
+        )
+
+    async def finish_success(
+        self,
+        call_id: int,
+        started: float,
+        profile: ModelProfileSettings,
+        usage: ModelUsage,
+    ) -> None:
+        await self.router._finish_success(call_id, started, profile, usage)
+
+
 class ModelRouter:
     """A ChatModel that selects configured provider/model profiles per call."""
 
@@ -138,7 +189,9 @@ class ModelRouter:
         self.audit = audit
         self.budget = budget
         self.retries = max(0, retries)
-        self.attempts = RouteAttemptDriver(self)
+        self.planner = RoutePlanner(self)
+        self.budget_gate = ModelBudgetGate(self)
+        self.attempt_executor = RouteAttemptExecutor(self)
         self._run_id: ContextVar[str | None] = ContextVar("model_run_id", default=None)
         self._role: ContextVar[ModelRole] = ContextVar(
             "model_role", default=ModelRole.REASONING
@@ -183,13 +236,13 @@ class ModelRouter:
         messages: list[dict[str, object]],
         tools: list[dict[str, object]],
     ) -> ModelResponse:
-        del model
-        plan = await self.attempts.plan(messages, tools)
+        plan = await self.planner.plan(messages, tools)
         run_id, role = plan.run_id, plan.role
         previous: str | None = None
         last_error: Exception | None = None
-        for profile in plan.candidates:
-            selection = await self.attempts.select(plan, profile, previous)
+        for configured_profile in plan.candidates:
+            profile = _model_override(configured_profile, model, role)
+            selection = await self.planner.select(plan, profile, previous)
             if selection is None:
                 last_error = ModelRoutingError(
                     f"provider client is unavailable: {profile.provider}"
@@ -198,8 +251,8 @@ class ModelRouter:
                 continue
             decision_id, client = selection
             for attempt in range(1, self.retries + 2):
-                await self._budget_gate(run_id, profile, messages, tools)
-                call_id, started = await self._start_call(
+                await self.budget_gate.check(run_id, profile, messages, tools)
+                call_id, started = await self.attempt_executor.start(
                     run_id, decision_id, role, profile, attempt, previous
                 )
                 try:
@@ -225,10 +278,12 @@ class ModelRouter:
                         error.code = code
                         raise error from exc
                     break
-                await self._finish_success(call_id, started, profile, response.usage)
+                await self.attempt_executor.finish_success(
+                    call_id, started, profile, response.usage
+                )
                 return response
             previous = profile.name
-        await self.attempts.exhausted(plan, previous, last_error)
+        await self.planner.exhausted(plan, previous, last_error)
         raise AssertionError("unreachable")
 
     async def stream_complete(
@@ -238,13 +293,13 @@ class ModelRouter:
         messages: list[dict[str, object]],
         tools: list[dict[str, object]],
     ) -> AsyncIterator[ModelDelta]:
-        del model
-        plan = await self.attempts.plan(messages, tools)
+        plan = await self.planner.plan(messages, tools)
         run_id, role = plan.run_id, plan.role
         previous: str | None = None
         last_error: Exception | None = None
-        for profile in plan.candidates:
-            selection = await self.attempts.select(plan, profile, previous)
+        for configured_profile in plan.candidates:
+            profile = _model_override(configured_profile, model, role)
+            selection = await self.planner.select(plan, profile, previous)
             if selection is None:
                 client = None
                 decision_id = 0
@@ -257,8 +312,8 @@ class ModelRouter:
                 previous = profile.name
                 continue
             for attempt in range(1, self.retries + 2):
-                await self._budget_gate(run_id, profile, messages, tools)
-                call_id, started = await self._start_call(
+                await self.budget_gate.check(run_id, profile, messages, tools)
+                call_id, started = await self.attempt_executor.start(
                     run_id, decision_id, role, profile, attempt, previous
                 )
                 emitted, usage = False, ModelUsage()
@@ -300,10 +355,12 @@ class ModelRouter:
                         error.code = code
                         raise error from exc
                     break
-                await self._finish_success(call_id, started, profile, usage)
+                await self.attempt_executor.finish_success(
+                    call_id, started, profile, usage
+                )
                 return
             previous = profile.name
-        await self.attempts.exhausted(plan, previous, last_error)
+        await self.planner.exhausted(plan, previous, last_error)
 
     def _required_run(self) -> str:
         run_id = self._run_id.get()
@@ -569,6 +626,20 @@ class _RouterModelRunSession(ModelRunSession):
 def _estimate_tokens(value: object) -> int:
     payload = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
     return max(1, math.ceil(len(payload.encode("utf-8")) / 4))
+
+
+def _model_override(
+    profile: ModelProfileSettings, requested: str, role: ModelRole
+) -> ModelProfileSettings:
+    """Apply only the small interactive model allowlist to an existing route."""
+
+    if (
+        role is ModelRole.REASONING
+        and requested in SELECTABLE_MODELS
+        and requested != profile.model
+    ):
+        return replace(profile, model=requested)
+    return profile
 
 
 def _tighter(configured, requested):

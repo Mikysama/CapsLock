@@ -13,6 +13,8 @@ from .models import (
 from .verifier import AgentOutputVerifier, VerificationError
 from .workspace import AgentWorkspaceManager, ScopedWorkspacePolicy, WorkspaceSnapshot
 from .service import ChildApprovalPending, CollaborationService
+from .capabilities import ChildCapabilityPolicy
+from .runner import ChildAgentRunner
 
 __all__ = [
     "AgentMessage",
@@ -25,6 +27,8 @@ __all__ = [
     "CapabilityGrant",
     "CapabilityKind",
     "ChildApprovalPending",
+    "ChildCapabilityPolicy",
+    "ChildAgentRunner",
     "ValidatedAgentOutput",
     "VerificationError",
     "VerificationRequirement",

@@ -13,18 +13,24 @@ from .misc import (
     SourceRepository,
     TaskRepository,
 )
-from .sessions import SessionRepository
-from .models import ModelRepository
-from .governance import GovernanceRepository
 from .collaboration import CollaborationRepository
-from .workflow import WorkflowRepository
+from .governance import GovernanceRepository
+from .models import ModelRepository
+from .run_journal import RunJournalRepository
+from .runs import RunRepository
+from .sessions import SessionRepository
+from .work_items import WorkItemRepository
+from .workflow_uow import WorkflowUnitOfWork
 
 
 @dataclass(frozen=True)
 class WorkspaceRepositories:
     database: WorkspaceDatabase
     sessions: SessionRepository
-    workflow: WorkflowRepository
+    work_items: WorkItemRepository
+    runs: RunRepository
+    run_journal: RunJournalRepository
+    workflow: WorkflowUnitOfWork
     actions: ActionRepository
     tasks: TaskRepository
     sources: SourceRepository
@@ -45,10 +51,15 @@ class WorkspaceRepositories:
         )
         collaboration = CollaborationRepository(database)
         await collaboration.interrupt_active()
+        journal = RunJournalRepository(database)
+        runs = RunRepository(database, journal)
         return cls(
             database,
             SessionRepository(database, workspace),
-            WorkflowRepository(database),
+            WorkItemRepository(database),
+            runs,
+            journal,
+            WorkflowUnitOfWork(database, runs, journal),
             ActionRepository(database),
             TaskRepository(database),
             SourceRepository(database),
@@ -73,6 +84,9 @@ __all__ = [
     "SnapshotRepository",
     "SourceRepository",
     "TaskRepository",
-    "WorkflowRepository",
+    "WorkItemRepository",
+    "RunRepository",
+    "RunJournalRepository",
+    "WorkflowUnitOfWork",
     "WorkspaceRepositories",
 ]

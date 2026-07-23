@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import io
 import shlex
-from contextlib import suppress
 from typing import Any, TypeVar
 
 from textual.app import App, ComposeResult
@@ -14,16 +13,19 @@ from textual.containers import Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Static, TextArea
 
+from ...application.foreground import (
+    AuthorizerBindings,
+    ControllerEvent,
+    ControllerEventKind,
+    ForegroundRunController,
+)
 from ...domain import (
     ActionRecord,
     ActionStatus,
     ApprovalDecision,
     BudgetRequest,
     BudgetSnapshot,
-    MemoryScope,
-    RunMode,
     SessionInfo,
-    WorkItemStatus,
 )
 from ...permissions import PermissionMode
 from ...theme import make_console
@@ -47,6 +49,7 @@ from .screens import (
     ConfirmScreen,
     ContentScreen,
     HistorySearchScreen,
+    ModelScreen,
     PermissionScreen,
     SessionPickerScreen,
     TextPromptScreen,
@@ -239,9 +242,16 @@ class CapsLockApp(App[int]):
         self.status_enabled = status_enabled
         self.state = TuiState()
         self.session: SessionInfo | None = None
-        self._request_queue: asyncio.Queue[tuple[str, str, str | None] | None] = asyncio.Queue()
-        self._worker_task: asyncio.Task[None] | None = None
-        self._active_task: asyncio.Task[None] | None = None
+        self.controller = ForegroundRunController(
+            self.agent,
+            consumer=self._controller_event,
+            authorize_limit=self._authorize_limit,
+        )
+        self._authorizers = AuthorizerBindings(
+            self.agent,
+            action_authorizer=self._authorize_action,
+            budget_authorizer=self._authorize_budget,
+        )
         self._input_history: list[str] = []
         self._history_index = 0
         self._completion_values: list[str] = []
@@ -262,8 +272,12 @@ class CapsLockApp(App[int]):
         )
 
     async def on_mount(self) -> None:
-        self.session = await self.agent.repositories.sessions.require(self.agent.session_id)
-        transcript = await self.agent.repositories.sessions.transcript(self.agent.session_id)
+        self.session = await self.agent.repositories.sessions.require(
+            self.agent.session_id
+        )
+        transcript = await self.agent.repositories.sessions.transcript(
+            self.agent.session_id
+        )
         self.state = history_state(transcript)
         if not transcript:
             self.state = add_system_message(
@@ -276,8 +290,8 @@ class CapsLockApp(App[int]):
             if item.get("role") == "user" and item.get("content")
         ]
         self._history_index = len(self._input_history)
-        self._install_authorizers()
-        self._worker_task = asyncio.create_task(self._worker(), name="capslock-tui-worker")
+        await self._authorizers.__aenter__()
+        await self.controller.start()
         self._activity_timer = self.set_interval(1 / 30, self._refresh_activity)
         await self._sync()
         self.query_one(Composer).focus()
@@ -285,16 +299,8 @@ class CapsLockApp(App[int]):
     async def on_unmount(self) -> None:
         if self._activity_timer is not None:
             self._activity_timer.stop()
-        self._remove_authorizers()
-        await self._request_queue.put(None)
-        for task in (self._active_task, self._worker_task):
-            if task is not None and not task.done():
-                task.cancel()
-        for task in (self._active_task, self._worker_task):
-            if task is not None:
-                with suppress(asyncio.CancelledError):
-                    await task
-        await self._delete_empty_session()
+        await self._authorizers.__aexit__(None, None, None)
+        await self.controller.shutdown()
 
     async def on_resize(self, event: Any) -> None:
         self._too_small = event.size.width < 48 or event.size.height < 14
@@ -324,17 +330,23 @@ class CapsLockApp(App[int]):
         self._input_history.append(text)
         self._history_index = len(self._input_history)
         self.state = add_user_message(self.state, item.id, text)
-        await self._request_queue.put((item.id, item.question, None))
+        await self.controller.enqueue_item(item.id, item.question)
         await self._sync()
 
-    async def on_composer_history_requested(self, event: Composer.HistoryRequested) -> None:
+    async def on_composer_history_requested(
+        self, event: Composer.HistoryRequested
+    ) -> None:
         if not self._input_history:
             return
         self._history_index = max(
             0,
             min(len(self._input_history), self._history_index + event.direction),
         )
-        value = "" if self._history_index == len(self._input_history) else self._input_history[self._history_index]
+        value = (
+            ""
+            if self._history_index == len(self._input_history)
+            else self._input_history[self._history_index]
+        )
         self.query_one(Composer).load_text(value)
 
     def on_composer_completion_requested(
@@ -342,9 +354,9 @@ class CapsLockApp(App[int]):
     ) -> None:
         if not self._completion_values:
             return
-        self._completion_index = (
-            self._completion_index + event.direction
-        ) % len(self._completion_values)
+        self._completion_index = (self._completion_index + event.direction) % len(
+            self._completion_values
+        )
         self.query_one(CompletionBar).update_candidates(
             self._completion_items, selected=self._completion_index
         )
@@ -360,9 +372,10 @@ class CapsLockApp(App[int]):
         await self.query_one(TranscriptView).sync_messages(self.state.messages)
 
     async def action_interrupt(self) -> None:
-        if self._active_task is not None and not self._active_task.done():
-            self._active_task.cancel()
-            self.state = add_system_message(self.state, "Cancelling the active run…", status="cancelled")
+        if await self.controller.cancel():
+            self.state = add_system_message(
+                self.state, "Cancelling the active run…", status="cancelled"
+            )
             await self._sync()
             return
         self.exit(0)
@@ -383,59 +396,22 @@ class CapsLockApp(App[int]):
         value = self._completion_values[self._completion_index]
         self.query_one(Composer).load_text(value + " ")
 
-    async def _worker(self) -> None:
-        while True:
-            request = await self._request_queue.get()
-            if request is None:
-                return
-            item_id, question, resume_from = request
-            self.state = set_queue_running(self.state, item_id)
-            await self._sync()
-            task = asyncio.create_task(self._run_request(item_id, question, resume_from))
-            self._active_task = task
-            try:
-                await task
-            except asyncio.CancelledError:
-                self.state = add_system_message(self.state, "Cancelled", status="cancelled")
-            except Exception as exc:
-                self.state = add_system_message(self.state, f"Run failed: {exc}", status="failed")
-            finally:
-                self.state = remove_queue_item(self.state, item_id)
-                self._active_task = None
-                await self._sync()
-
-    async def _run_request(self, item_id: str, question: str, resume_from: str | None) -> None:
-        last_render = 0.0
-        loop = asyncio.get_running_loop()
-        async for event in self.agent.ask_stream(
-            question,
-            work_item_id=item_id,
-            resume_from_run_id=resume_from,
-            mode=RunMode.INTERACTIVE,
-            authorize_limit=self._authorize_limit,
-        ):
-            self.state = reduce_event(self.state, event)
-            now = loop.time()
-            if event.terminal or now - last_render >= 1 / 30:
-                await self._sync()
-                last_render = now
-
-    def _install_authorizers(self) -> None:
-        router = self.agent.chat_model
-        setter = getattr(router, "set_budget_authorizer", None)
-        if callable(setter):
-            setter(self._authorize_budget)
-        action_setter = getattr(self.agent, "set_action_authorizer", None)
-        if callable(action_setter):
-            action_setter(self._authorize_action)
-
-    def _remove_authorizers(self) -> None:
-        setter = getattr(self.agent.chat_model, "set_budget_authorizer", None)
-        if callable(setter):
-            setter(None)
-        action_setter = getattr(self.agent, "set_action_authorizer", None)
-        if callable(action_setter):
-            action_setter(None)
+    async def _controller_event(self, item: ControllerEvent) -> None:
+        if item.kind is ControllerEventKind.STARTED and item.work_item_id:
+            self.state = set_queue_running(self.state, item.work_item_id)
+        elif item.kind is ControllerEventKind.RUN_EVENT and item.event is not None:
+            self.state = reduce_event(self.state, item.event)
+        elif item.kind is ControllerEventKind.CANCELLED:
+            self.state = add_system_message(self.state, "Cancelled", status="cancelled")
+        elif item.kind is ControllerEventKind.FAILED:
+            self.state = add_system_message(
+                self.state,
+                f"Run failed: {item.error}",
+                status="failed",
+            )
+        elif item.kind is ControllerEventKind.FINISHED and item.work_item_id:
+            self.state = remove_queue_item(self.state, item.work_item_id)
+        await self._sync()
 
     async def _authorize_action(self, action: ActionRecord) -> ApprovalDecision:
         if self._too_small:
@@ -449,7 +425,9 @@ class CapsLockApp(App[int]):
             f"{request.current_value:.6g} + {request.reserved_value:.6g} "
             f"> {request.limit_value:.6g} using {request.profile}"
         )
-        return bool(await self._modal_wait(ConfirmScreen("Allow this model call?", detail)))
+        return bool(
+            await self._modal_wait(ConfirmScreen("Allow this model call?", detail))
+        )
 
     async def _authorize_limit(self, snapshot: BudgetSnapshot) -> bool:
         used = snapshot.as_dict()["used"]
@@ -477,13 +455,24 @@ class CapsLockApp(App[int]):
             self.exit(0)
             return
         if name == "/help":
-            content = "\n".join(f"{item.path:<14} {item.description}" for item in COMMANDS)
+            content = "\n".join(
+                f"{item.path:<14} {item.description}" for item in COMMANDS
+            )
             self.push_screen(ContentScreen("CapsLock commands", content))
             return
         if name == "/permissions" and len(parts) == 1:
-            selected = await self._modal_wait(PermissionScreen(self.agent.permission_mode))
+            selected = await self._modal_wait(
+                PermissionScreen(self.agent.permission_mode)
+            )
             if selected is not None:
-                await self._capture_controller(actions.set_permission_mode, selected.value)
+                await self._capture_controller(
+                    actions.set_permission_mode, selected.value
+                )
+            return
+        if name == "/model" and len(parts) == 1:
+            selected = await self._modal_wait(ModelScreen(self.agent.model))
+            if selected is not None:
+                await self._capture_controller(actions.set_model, selected)
             return
         if name == "/approvals":
             await self._approvals(parts)
@@ -569,11 +558,17 @@ class CapsLockApp(App[int]):
     async def _approvals(self, parts: list[str]) -> None:
         items = await self.agent.repositories.actions.list(
             self.agent.session_id,
-            statuses={ActionStatus.PENDING, ActionStatus.APPROVED, ActionStatus.RUNNING},
+            statuses={
+                ActionStatus.PENDING,
+                ActionStatus.APPROVED,
+                ActionStatus.RUNNING,
+            },
         )
         if len(parts) == 1:
             if not items:
-                self.push_screen(ContentScreen("Pending approvals", "No pending approvals."))
+                self.push_screen(
+                    ContentScreen("Pending approvals", "No pending approvals.")
+                )
                 return
             lines = []
             for item in items:
@@ -582,38 +577,38 @@ class CapsLockApp(App[int]):
             self.push_screen(ContentScreen("Pending approvals", "\n".join(lines)))
             return
         if len(parts) != 3 or parts[1] not in {"approve", "reject"}:
-            self.state = add_system_message(self.state, "Usage: /approvals [approve|reject <id>]", status="failed")
+            self.state = add_system_message(
+                self.state, "Usage: /approvals [approve|reject <id>]", status="failed"
+            )
             await self._sync()
             return
         action = await self.agent.action_factory("cli").resolve(parts[2])
         decision = ApprovalDecision.REJECT
         if parts[1] == "approve":
             decision = await self._authorize_action(action)
-        await self._capture_controller(actions.apply_action_decision, action, decision.value)
+        await self._capture_controller(
+            actions.apply_action_decision, action, decision.value
+        )
 
     async def _queue_command(self, operation: str, prefix: str) -> None:
-        repository = self.agent.repositories.workflow
         try:
             if operation == "retry":
-                run = await repository.retryable_run(self.agent.session_id, prefix)
-                item = await self.agent.enqueue(run.question, parent_work_item_id=run.work_item_id)
+                item, run = await self.controller.retry(prefix)
                 self.state = add_user_message(self.state, item.id, item.question)
-                await self._request_queue.put((item.id, item.question, run.id))
             else:
-                item = await repository.require_work_item(prefix)
-                if item.session_id != self.agent.session_id:
-                    raise ValueError("work item does not belong to this session")
-                if item.status is not WorkItemStatus.QUEUED:
-                    raise ValueError("only queued work can be started")
-                await self._request_queue.put((item.id, item.question, None))
+                await self.controller.start_queued(prefix)
             await self._sync()
         except (ValueError, OSError) as exc:
-            self.state = add_system_message(self.state, f"Error: {exc}", status="failed")
+            self.state = add_system_message(
+                self.state, f"Error: {exc}", status="failed"
+            )
             await self._sync()
 
     async def _capture_command(self, text: str) -> None:
         buffer = io.StringIO()
-        console = make_console(file=buffer, width=max(48, self.size.width - 6), force_terminal=False)
+        console = make_console(
+            file=buffer, width=max(48, self.size.width - 6), force_terminal=False
+        )
         try:
             result = await dispatch_slash_command(CliContext(console, self.agent), text)
             if result == "exit":
@@ -627,7 +622,9 @@ class CapsLockApp(App[int]):
 
     async def _capture_controller(self, function: Any, *args: object) -> None:
         buffer = io.StringIO()
-        console = make_console(file=buffer, width=max(48, self.size.width - 6), force_terminal=False)
+        console = make_console(
+            file=buffer, width=max(48, self.size.width - 6), force_terminal=False
+        )
         await function(CliContext(console, self.agent), *args)
         content = buffer.getvalue().rstrip()
         if content:
@@ -644,7 +641,12 @@ class CapsLockApp(App[int]):
         elif text.startswith("$") and " " not in text:
             prefix = text[1:].casefold()
             for entry in self.agent.skills.entries():
-                if entry.enabled and entry.error is None and entry.package is not None and entry.name.casefold().startswith(prefix):
+                if (
+                    entry.enabled
+                    and entry.error is None
+                    and entry.package is not None
+                    and entry.name.casefold().startswith(prefix)
+                ):
                     values.append(f"${entry.name}")
                     candidates.append((f"${entry.name}", entry.package.description))
         self._completion_values = values
@@ -687,17 +689,9 @@ class CapsLockApp(App[int]):
             width=width,
             context_limit=self.agent.max_context_messages,
         )
-        self.query_one(ActivityBar).update_state(self.state, enabled=self.status_enabled)
-
-    async def _delete_empty_session(self) -> None:
-        memory = self.agent.memory
-        if memory is not None:
-            try:
-                if await memory.list(scope=MemoryScope.SESSION, include_inactive=True, limit=1):
-                    return
-            except Exception:
-                return
-        await self.agent.repositories.sessions.delete_if_empty(self.agent.session_id)
+        self.query_one(ActivityBar).update_state(
+            self.state, enabled=self.status_enabled
+        )
 
 
 class _SessionPickerApp(App[str | None]):
@@ -720,7 +714,7 @@ async def select_session_fullscreen(sessions: list[SessionInfo]) -> str | None:
 async def run_fullscreen_tui(
     context: CliContext, *, status_enabled: bool = True
 ) -> int:
-    result = await CapsLockApp(
-        context, status_enabled=status_enabled
-    ).run_async(mouse=True)
+    result = await CapsLockApp(context, status_enabled=status_enabled).run_async(
+        mouse=True
+    )
     return int(result or 0)

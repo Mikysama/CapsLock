@@ -7,19 +7,43 @@ import shutil
 import sqlite3
 import tempfile
 import uuid
+from collections.abc import Callable
+from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Any
 
-from ..storage.memory_v2 import workspace_key
+from ..storage.memory_repositories import workspace_key
 from .errors import LifecycleError
+from .import_merge import (
+    merge_tables,
+    normalize_imported_workflow,
+    rebuild_memory_fts,
+    rebuild_session_search,
+    utc_now,
+)
+from .io import sqlite_backup
 from .specs import MEMORY_PRIMARY, MEMORY_TABLES, WORKSPACE_PRIMARY, WORKSPACE_TABLES
 
 
 class ImportCoordinator:
     """Own locks, recovery snapshots, journals, and two-database commit order."""
 
-    def __init__(self, service: Any) -> None:
-        self.service = service
+    def __init__(
+        self,
+        *,
+        layout: Any,
+        memory_path: Path,
+        workspace: Path,
+        backup_create: Callable[[], Path],
+        locks: Callable[[], AbstractContextManager[None]],
+        journal: Callable[[str, str, str], Path],
+    ) -> None:
+        self.layout = layout
+        self.memory_path = memory_path
+        self.workspace = workspace
+        self.backup_create = backup_create
+        self.locks = locks
+        self.journal = journal
 
     def merge(
         self,
@@ -29,16 +53,7 @@ class ImportCoordinator:
         workspace_rows: dict[str, Any],
         memory_rows: dict[str, Any],
     ) -> dict[str, Any]:
-        from .service import (
-            _merge_tables,
-            _normalize_imported_workflow,
-            _rebuild_memory_fts,
-            _rebuild_session_search,
-            _sqlite_backup,
-            utc_now,
-        )
-
-        layout, memory_path = self.service.layout, self.service.memory_path
+        layout, memory_path = self.layout, self.memory_path
         if not layout.database.exists() or not memory_path.exists():
             raise LifecycleError("initialize both databases before importing")
         report: dict[str, Any] = {
@@ -49,15 +64,15 @@ class ImportCoordinator:
             "blocked": 0,
             "mappings": {},
         }
-        recovery = self.service.backup_create()
-        journal = self.service._journal("import", archive_id, str(recovery))
+        recovery = self.backup_create()
+        journal = self.journal("import", archive_id, str(recovery))
         with (
-            self.service._locks(),
+            self.locks(),
             tempfile.TemporaryDirectory(prefix="capslock-import-rollback-") as raw,
         ):
             rollback = Path(raw)
-            _sqlite_backup(layout.database, rollback / "workspace.sqlite3")
-            _sqlite_backup(memory_path, rollback / "memory.sqlite3")
+            sqlite_backup(layout.database, rollback / "workspace.sqlite3")
+            sqlite_backup(memory_path, rollback / "memory.sqlite3")
             workspace_connection = sqlite3.connect(layout.database)
             memory_connection = sqlite3.connect(memory_path)
             workspace_connection.row_factory = sqlite3.Row
@@ -86,7 +101,7 @@ class ImportCoordinator:
                             utc_now(),
                         ),
                     )
-                workspace_maps = _merge_tables(
+                workspace_maps = merge_tables(
                     workspace_connection,
                     workspace_rows,
                     WORKSPACE_TABLES,
@@ -96,12 +111,12 @@ class ImportCoordinator:
                     report,
                     domain="workspace",
                 )
-                _normalize_imported_workflow(workspace_connection, import_id)
-                _rebuild_session_search(
+                normalize_imported_workflow(workspace_connection, import_id)
+                rebuild_session_search(
                     workspace_connection,
                     set(workspace_maps.get("sessions", {}).values()),
                 )
-                memory_maps = _merge_tables(
+                memory_maps = merge_tables(
                     memory_connection,
                     memory_rows,
                     MEMORY_TABLES,
@@ -111,9 +126,9 @@ class ImportCoordinator:
                     report,
                     domain="memory",
                     external_maps=workspace_maps,
-                    target_workspace_key=workspace_key(self.service.workspace),
+                    target_workspace_key=workspace_key(self.workspace),
                 )
-                _rebuild_memory_fts(
+                rebuild_memory_fts(
                     memory_connection,
                     set(memory_maps.get("memories", {}).values()),
                 )

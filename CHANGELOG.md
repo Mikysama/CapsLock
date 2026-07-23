@@ -4,6 +4,33 @@
 
 ## [Unreleased]
 
+## [2.2.2] - 2026-07-23
+
+### Added
+
+- 新增 `/model` 会话级模型选择器，可在 `deepseek-v4-flash` 与 `deepseek-v4-pro` 之间切换；inline 与 fullscreen 均支持交互选择，恢复会话时保留选择。
+- 新增共享 `ForegroundRunController`、`AuthorizerBindings`、分组端口包、workflow unit of work、子 Agent runner/capability policy，以及模型路由 planner、budget gate 和 attempt executor。
+
+### Security
+
+- 模型切换使用固定 allowlist，并拒绝在活跃 run 中途切换，避免同一工具循环混用模型。
+
+### Removed
+
+- 删除无内部引用的历史兼容 facade：`capslock.config`、`capslock.embeddings` 和 `capslock.application.app`；内部代码和测试统一使用正式分层包。
+
+### Changed
+
+- 将当前存储实现路径整理为 `storage.repositories`、`storage.memory_repositories` 和 `storage.schema`，移除容易被误解为历史实现的 `_v2` 路径后缀；数据库格式与迁移行为不变。
+- 配置读取、迁移、纯验证、类型和路由解析改为单向依赖；Memory、workflow、lifecycle、action、runtime 与 CLI/TUI 改用窄 repository 和显式端口。
+- inline `/` 命令树在普通输入、快速连续输入、完整命令、退格和删除时统一即时刷新，不再等待旧 completion state。
+- console script 直接指向 `capslock.cli.app:main`，provider client factory 独立于 CLI app；`capslock.cli` 不再保留旧入口转发。
+- `LifecycleService` 保留同步公共门面，备份、portable archive、导入 merge 与生命周期 I/O 分别由独立组件负责。
+
+### Compatibility
+
+- workspace schema v5、memory schema v3、config v2、portable archive v2、JSONL v2、CLI 退出码和审批语义均保持不变。
+
 ## [2.2.1] - 2026-07-22
 
 ### Added

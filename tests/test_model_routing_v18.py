@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from capslock.config import (
+from capslock.configuration import (
     BudgetSettings,
     ModelProfileSettings,
     ProviderSettings,
@@ -20,15 +20,16 @@ from capslock.domain import (
     ModelBudgetExceeded,
     ModelDataPolicyMismatch,
     ModelRoutingError,
+    ModelRole,
 )
 from capslock.memory import MemoryService
 from capslock.memory.embeddings import ExternalEmbeddingConfig
 from capslock.runtime.model import ModelDelta, ModelMessage, ModelResponse, ModelUsage
 from capslock.runtime.model import ModelRunContext
 from capslock.runtime.routing import ModelRouter, _retry_delay
-from capslock.storage.memory_v2 import MemoryRepositories
+from capslock.storage.memory_repositories import MemoryRepositories
 from capslock.storage.async_database import IncompatibleDatabaseError, WorkspaceDatabase
-from capslock.storage.repositories_v2 import WorkspaceRepositories
+from capslock.storage.repositories import WorkspaceRepositories
 
 from .helpers import workspace_run
 
@@ -41,9 +42,11 @@ class ScriptedClient:
     def __init__(self, *responses) -> None:
         self.responses = list(responses)
         self.calls = 0
+        self.requests = []
 
     async def complete(self, **request):
         self.calls += 1
+        self.requests.append(request)
         response = self.responses.pop(0)
         if isinstance(response, Exception):
             raise response
@@ -54,9 +57,11 @@ class StreamingClient:
     def __init__(self, *scripts) -> None:
         self.scripts = list(scripts)
         self.calls = 0
+        self.requests = []
 
     async def stream_complete(self, **request):
         self.calls += 1
+        self.requests.append(request)
         for item in self.scripts.pop(0):
             if isinstance(item, Exception):
                 raise item
@@ -192,6 +197,62 @@ def test_router_explicit_run_session_records_usage_without_ambient_binding(
             assert response.message.content == "ok"
             assert model_session.metered is True
             assert (await model_session.summary())[0]["role"] == "reasoning"
+        finally:
+            await repositories.close()
+
+    asyncio.run(scenario())
+
+
+def test_router_applies_allowlisted_interactive_model_override(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        repositories = await WorkspaceRepositories.open(
+            tmp_path / "model-switch.sqlite3", workspace=tmp_path
+        )
+        try:
+            _, prepared = await workspace_run(repositories)
+            client = ScriptedClient(
+                ModelResponse(ModelMessage("ok"), ModelUsage(2, 1)),
+                ModelResponse(ModelMessage("fast"), ModelUsage(1, 1)),
+            )
+            router = ModelRouter(
+                providers={"provider": provider("provider")},
+                profiles={"reasoning": profile("reasoning", "provider")},
+                routing=RoutingSettings(("reasoning",), ("reasoning",), (), ()),
+                clients={"provider": client},
+                audit=repositories.models,
+            )
+            model_session = router.open_session(ModelRunContext(prepared.run.id))
+            await model_session.complete(model="deepseek-v4-pro", messages=[], tools=[])
+            assert client.requests[0]["model"] == "deepseek-v4-pro"
+            summary = await repositories.models.summary(prepared.run.id)
+            assert summary[0]["model"] == "deepseek-v4-pro"
+            await model_session.for_role(ModelRole.FAST).complete(
+                model="deepseek-v4-pro", messages=[], tools=[]
+            )
+            assert client.requests[1]["model"] == "reasoning"
+
+            _, streamed_run = await workspace_run(repositories, "stream override")
+            streaming = StreamingClient(
+                [ModelDelta(content="ok"), ModelDelta(usage=ModelUsage(1, 1))]
+            )
+            streaming_router = ModelRouter(
+                providers={"provider": provider("provider")},
+                profiles={"reasoning": profile("reasoning", "provider")},
+                routing=RoutingSettings(("reasoning",), ("reasoning",), (), ()),
+                clients={"provider": streaming},
+                audit=repositories.models,
+            )
+            session = streaming_router.open_session(
+                ModelRunContext(streamed_run.run.id)
+            )
+            assert [
+                delta.content
+                async for delta in session.stream_complete(
+                    model="deepseek-v4-pro", messages=[], tools=[]
+                )
+                if delta.content
+            ] == ["ok"]
+            assert streaming.requests[0]["model"] == "deepseek-v4-pro"
         finally:
             await repositories.close()
 

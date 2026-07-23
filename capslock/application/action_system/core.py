@@ -12,11 +12,17 @@ from ...domain import (
     ActionResultKind,
     ActionStatus,
     ActionType,
+    AgentEvent,
     ApprovalDecision,
 )
 from ...interaction import RunInteraction
 from ...permissions import ApprovalPolicy, PermissionMode
-from ...storage.repositories_v2 import WorkspaceRepositories
+from ...ports import (
+    ActionRepositoryPort,
+    RunRepositoryPort,
+    RunStatePort,
+    WaitingActionPort,
+)
 
 
 @dataclass(frozen=True)
@@ -31,6 +37,33 @@ class ActionExecution:
     result_kind: ActionResultKind
 
 
+class ActionRunState:
+    """Adapt workflow query and transition ports for action cancellation."""
+
+    def __init__(
+        self,
+        runs: RunRepositoryPort,
+        waiting_actions: WaitingActionPort,
+    ) -> None:
+        self.runs = runs
+        self.waiting_actions = waiting_actions
+
+    async def require(self, run_id: str, **values: Any):
+        return await self.runs.require(run_id, **values)
+
+    async def cancel_waiting_action(
+        self,
+        session_id: str,
+        run_id: str,
+        action_id: str,
+        *,
+        message: str,
+    ) -> AgentEvent:
+        return await self.waiting_actions.cancel_waiting_action(
+            session_id, run_id, action_id, message=message
+        )
+
+
 class ActionHandler(Protocol):
     types: frozenset[ActionType]
 
@@ -40,13 +73,16 @@ class ActionHandler(Protocol):
 
     async def execute(self, action: ActionRecord) -> ActionExecution: ...
 
+    async def revalidate(self, action: ActionRecord) -> ActionProposal: ...
+
     async def reverse(self, action: ActionRecord) -> dict[str, Any]: ...
 
 
 class ActionCoordinator:
     def __init__(
         self,
-        repositories: WorkspaceRepositories,
+        action_repository: ActionRepositoryPort,
+        run_state: RunStatePort,
         *,
         session_id: str,
         run_id: str,
@@ -58,7 +94,8 @@ class ActionCoordinator:
         ) = None,
         interaction: RunInteraction | None = None,
     ) -> None:
-        self.repositories = repositories
+        self.action_repository = action_repository
+        self.run_state = run_state
         self.session_id = session_id
         self.run_id = run_id
         self.event = event
@@ -80,7 +117,8 @@ class ActionCoordinator:
 
     def for_run(self, run_id: str) -> "ActionCoordinator":
         return ActionCoordinator(
-            self.repositories,
+            self.action_repository,
+            self.run_state,
             session_id=self.session_id,
             run_id=run_id,
             handlers=list(dict.fromkeys(self.handlers.values())),
@@ -111,7 +149,7 @@ class ActionCoordinator:
 
     async def propose(self, action_type: ActionType, **payload: Any) -> ActionRecord:
         proposal = await self.handlers[action_type].propose(action_type, payload)
-        record = await self.repositories.actions.create(
+        record = await self.action_repository.create(
             session_id=self.session_id,
             run_id=self.run_id,
             action_type=action_type,
@@ -119,7 +157,7 @@ class ActionCoordinator:
             request=proposal.request,
         )
         assessment = self.approvals.assess(action_type)
-        record = await self.repositories.actions.set_risk(
+        record = await self.action_repository.set_risk(
             record.id,
             level=assessment.level,
             reason=assessment.reason,
@@ -157,22 +195,20 @@ class ActionCoordinator:
     async def resolve(
         self, prefix: str, *, types: set[ActionType] | None = None
     ) -> ActionRecord:
-        return await self.repositories.actions.resolve(
+        return await self.action_repository.resolve(
             self.session_id, prefix, types=types
         )
 
     async def approve_and_execute(self, action_id: str) -> ActionRecord:
-        action = await self.repositories.actions.require(
+        action = await self.action_repository.require(
             action_id, session_id=self.session_id
         )
         if action.historical_only:
             raise ValueError("historical imported actions cannot be executed")
         if action.status is ActionStatus.PENDING and action.requires_reapproval:
-            proposal = await self.handlers[action.type].propose(
-                action.type, _reapproval_payload(action)
-            )
+            proposal = await self.handlers[action.type].revalidate(action)
             assessment = self.approvals.assess(action.type)
-            action = await self.repositories.actions.mark_revalidated(
+            action = await self.action_repository.mark_revalidated(
                 action.id,
                 summary=proposal.summary,
                 request=proposal.request,
@@ -181,7 +217,7 @@ class ActionCoordinator:
                 rollback=assessment.rollback,
             )
         if action.status is ActionStatus.PENDING:
-            action = await self.repositories.actions.transition(
+            action = await self.action_repository.transition(
                 action.id, ActionStatus.APPROVED
             )
         if action.status is not ActionStatus.APPROVED:
@@ -190,7 +226,7 @@ class ActionCoordinator:
 
     async def execute_approved(self, action_id: str) -> ActionRecord:
         try:
-            action = await self.repositories.actions.require(
+            action = await self.action_repository.require(
                 action_id, session_id=self.session_id
             )
         except asyncio.CancelledError:
@@ -200,7 +236,7 @@ class ActionCoordinator:
         if action.status is not ActionStatus.APPROVED:
             raise ValueError("action requires explicit approval before execution")
         try:
-            action = await self.repositories.actions.transition(
+            action = await self.action_repository.transition(
                 action.id, ActionStatus.RUNNING
             )
             execution = await self.handlers[action.type].execute(action)
@@ -215,7 +251,7 @@ class ActionCoordinator:
                 action=action.type.value,
                 status="failed",
             )
-            return await self.repositories.actions.transition(
+            return await self.action_repository.transition(
                 action.id,
                 ActionStatus.FAILED,
                 result_kind=ActionResultKind.EXECUTION_ERROR,
@@ -239,7 +275,7 @@ class ActionCoordinator:
             in {ActionResultKind.NONZERO_EXIT, ActionResultKind.TIMEOUT}
             else ActionStatus.COMPLETED
         )
-        return await self.repositories.actions.transition(
+        return await self.action_repository.transition(
             action.id,
             target,
             result=execution.result,
@@ -257,7 +293,7 @@ class ActionCoordinator:
         )
 
     async def _record_cancellation(self, action_id: str) -> None:
-        action = await self.repositories.actions.require(
+        action = await self.action_repository.require(
             action_id, session_id=self.session_id
         )
         if action.status in {
@@ -267,16 +303,16 @@ class ActionCoordinator:
             ActionStatus.REJECTED,
         }:
             return
-        run = await self.repositories.workflow.require_run(action.run_id)
+        run = await self.run_state.require(action.run_id)
         if run.status == "waiting_approval":
-            await self.repositories.workflow.cancel_waiting_action(
+            await self.run_state.cancel_waiting_action(
                 self.session_id,
                 action.run_id,
                 action.id,
                 message="cancelled by user",
             )
         else:
-            await self.repositories.actions.transition(
+            await self.action_repository.transition(
                 action.id,
                 ActionStatus.CANCELLED,
                 result_kind=ActionResultKind.USER_CANCELLED,
@@ -291,21 +327,19 @@ class ActionCoordinator:
         )
 
     async def reject(self, action_id: str) -> ActionRecord:
-        action = await self.repositories.actions.require(
+        action = await self.action_repository.require(
             action_id, session_id=self.session_id
         )
-        return await self.repositories.actions.transition(
-            action.id, ActionStatus.REJECTED
-        )
+        return await self.action_repository.transition(action.id, ActionStatus.REJECTED)
 
     async def reverse_last_file_action(self) -> ActionRecord:
-        action = await self.repositories.actions.last_completed_file_action(
+        action = await self.action_repository.last_completed_file_action(
             self.session_id
         )
         if action is None:
             raise ValueError("no applied change is available to undo")
         await self.handlers[action.type].reverse(action)
-        return await self.repositories.actions.mark_reversed(action.id)
+        return await self.action_repository.mark_reversed(action.id)
 
     @staticmethod
     def _skill_change(action: ActionRecord) -> bool:
@@ -314,44 +348,6 @@ class ActionCoordinator:
         path = str(action.request.get("path", ""))
         parts = path.split("/")
         return len(parts) >= 3 and tuple(parts[:2]) == (".capslock", "skills")
-
-
-def _reapproval_payload(action: ActionRecord) -> dict[str, Any]:
-    request = action.request
-    payload = {**request, "summary": action.summary}
-    if action.type is ActionType.FILE_CREATE:
-        return {
-            "path": request.get("path"),
-            "content": request.get("after_content"),
-            "summary": action.summary,
-        }
-    if action.type is ActionType.FILE_EDIT:
-        return {
-            "path": request.get("path"),
-            "old_text": request.get("before_content"),
-            "new_text": request.get("after_content"),
-            "summary": action.summary,
-        }
-    if action.type is ActionType.COMMAND:
-        from .commands import TEMPLATES
-
-        template_name = str(request.get("template", ""))
-        template = TEMPLATES.get(template_name)
-        argv = request.get("argv", [])
-        if template is None or not isinstance(argv, list):
-            return payload
-        expected = len(template.argv)
-        target = (
-            argv[expected]
-            if template.supports_target and len(argv) == expected + 1
-            else None
-        )
-        return {
-            "template": template_name,
-            "target": target,
-            "cwd": request.get("cwd", "."),
-        }
-    return payload
 
 
 async def _await_cleanup(task: asyncio.Task) -> None:

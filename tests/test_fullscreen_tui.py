@@ -18,7 +18,7 @@ from capslock.cli.fullscreen_tui.models import (
     toggle_details,
 )
 from capslock.cli.fullscreen_tui.presentation import present_action
-from capslock.cli.fullscreen_tui.screens import ApprovalScreen
+from capslock.cli.fullscreen_tui.screens import ApprovalScreen, ModelScreen
 from capslock.cli.fullscreen_tui.widgets import (
     CompletionBar,
     Composer,
@@ -65,7 +65,9 @@ def test_tool_presentation_is_allowlisted_and_redacted() -> None:
 
 
 def test_action_preview_is_redacted_and_bounded() -> None:
-    diff = "\n".join(["+password=secret-value", *[f"+line {index}" for index in range(80)]])
+    diff = "\n".join(
+        ["+password=secret-value", *[f"+line {index}" for index in range(80)]]
+    )
     action = ActionRecord(
         "action",
         "session",
@@ -88,7 +90,9 @@ def test_action_preview_is_redacted_and_bounded() -> None:
 
 
 def test_reducer_groups_read_tools_and_collapses_completed_reasoning() -> None:
-    state = reduce_event(TuiState(), _event(AgentEventKind.THINKING, {"text": "inspect"}, 1))
+    state = reduce_event(
+        TuiState(), _event(AgentEventKind.THINKING, {"text": "inspect"}, 1)
+    )
     state = reduce_event(
         state,
         _event(
@@ -115,7 +119,9 @@ def test_reducer_groups_read_tools_and_collapses_completed_reasoning() -> None:
             3,
         ),
     )
-    reasoning = next(item for item in state.messages if item.kind is MessageKind.REASONING)
+    reasoning = next(
+        item for item in state.messages if item.kind is MessageKind.REASONING
+    )
     tools = next(item for item in state.messages if item.kind is MessageKind.TOOLS)
     assert reasoning.collapsed is True
     assert tools.collapsed is True
@@ -180,6 +186,12 @@ class _Agent:
 
     async def enqueue(self, question: str):
         return SimpleNamespace(id="work-item", question=question)
+
+    async def set_model(self, value: str) -> str:
+        from capslock.models import selectable_model
+
+        self.model = selectable_model(value)
+        return self.model
 
     async def ask_stream(self, question: str, **kwargs):
         for item in self.events:
@@ -259,6 +271,24 @@ def test_fullscreen_command_menu_is_vertical_complete_and_scrolls_selection() ->
     asyncio.run(scenario())
 
 
+def test_fullscreen_model_command_uses_model_dialog() -> None:
+    async def scenario() -> None:
+        agent = _Agent()
+        app = CapsLockApp(CliContext(make_console(), agent))
+        async with app.run_test(size=(80, 24)) as pilot:
+            pending = asyncio.create_task(app._dispatch_command("/model"))
+            await pilot.pause()
+            assert isinstance(app.screen, ModelScreen)
+
+            await pilot.press("down", "enter")
+            await pending
+            await pilot.pause()
+            assert agent.model == "deepseek-v4-pro"
+            assert not isinstance(app.screen, ModelScreen)
+
+    asyncio.run(scenario())
+
+
 def test_long_transcript_only_mounts_latest_page() -> None:
     transcript = [
         {"role": "user" if index % 2 == 0 else "assistant", "content": f"消息 {index}"}
@@ -333,7 +363,9 @@ def test_approval_escape_rejects_and_never_defaults_to_execute() -> None:
     asyncio.run(scenario())
 
 
-def test_ui_mode_flag_and_environment_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_ui_mode_flag_and_environment_precedence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.delenv("CAPSLOCK_UI", raising=False)
     assert _ui_mode(build_parser().parse_args([])) == "inline"
     monkeypatch.setenv("CAPSLOCK_UI", "fullscreen")

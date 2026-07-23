@@ -4,7 +4,7 @@
 
 ## 稳定契约
 
-CapsLock 2.2.1 支持 Linux/macOS 与 Python 3.12。CLI 命令和退出码、`config_version = 2`、workspace schema v5、memory schema v3、portable archive v2、JSONL schema v2、Skill manifest、插件协议 v1 和 `ToolResult` 的 `ok/data/error` 模型输入协议在 2.x 系列内保持向后兼容。
+CapsLock 2.2.2 支持 Linux/macOS 与 Python 3.12。CLI 命令和退出码、`config_version = 2`、workspace schema v5、memory schema v3、portable archive v2、JSONL schema v2、Skill manifest、插件协议 v1 和 `ToolResult` 的 `ok/data/error` 模型输入协议在 2.x 系列内保持向后兼容。
 
 1.10.1 的 `repositories=`、`ModelRouter.bind_run()/use_role()/summary(run_id)` 与 `max_turns` 入口已删除。新弃用至少提前一个 minor 版本公告；删除的入口不提供静默兼容。完整映射见 [v2 开发过程与迁移](development/v2/v2.0.md)。
 
@@ -70,6 +70,7 @@ pending -> approved -> running -> completed
 | --- | --- |
 | `/help` | 显示 v2 命令。 |
 | `/status` | 汇总 session、workspace、model、permissions、context、usage、tasks 和 queue。 |
+| `/model [deepseek-v4-flash\|deepseek-v4-pro]` | 查看或切换当前 session 的模型；无参数时打开选择器。 |
 | `/permissions [full|approve|ask]` | 无参数时打开权限选择框；带参数时直接切换。 |
 | `/approvals` | 处理非交互、导入或旧数据留下的待审批动作。 |
 | `/queue` | 查看队列；`start <id>` 显式启动导入队列，另有 `move`、`cancel` 和 `retry`。 |
@@ -85,6 +86,11 @@ pending -> approved -> running -> completed
 | `/quit` | 退出 TUI，与 `/exit` 等价。 |
 
 v2 不解析旧 alias，也不提供独立 `/cost`、`/context`、`/tasks`、`/changes`、`/commands` 或 `/web` 页面。
+
+`/model` 只接受 `deepseek-v4-flash` 和 `deepseek-v4-pro`。选择写入当前
+session，恢复后继续生效；新 session 使用配置默认模型。运行中的模型会话保持
+不可变，因此活跃 run 期间的切换请求会被拒绝，避免一个 run 在工具轮次之间
+更换模型。
 
 ## TUI 输出
 

@@ -13,9 +13,10 @@ from ..domain import (
     LoopDetectionSettings,
     RunLimits,
     RunMode,
+    StopReason,
     WorkItemStatus,
 )
-from ..ports import ModelAuditPort, RunJournal, WorkflowPort, WorkspaceServicesPort
+from ..ports import GovernancePort, ModelAuditPort, RunJournal, WorkflowPort
 from ..security import redact
 from .governance import RunGovernor
 from .model import ChatModel, ModelRunContext, ModelRunSession, open_model_session
@@ -37,13 +38,15 @@ class RunOrchestrator:
     def __init__(
         self,
         *,
-        services: WorkspaceServicesPort,
+        governance: GovernancePort,
+        model_audit: ModelAuditPort,
         workflow: WorkflowPort,
         chat_model: ChatModel,
         default_limits: RunLimits,
         loop_settings: LoopDetectionSettings,
     ) -> None:
-        self.services = services
+        self.governance = governance
+        self.model_audit = model_audit
         self.workflow = workflow
         self.chat_model = chat_model
         self.default_limits = default_limits
@@ -66,7 +69,8 @@ class RunOrchestrator:
             resume_from_run_id=resume_from_run_id,
         )
         governor = await RunGovernor.create(
-            self.services,
+            self.governance,
+            self.model_audit,
             prepared.run.id,
             parent_run_id=prepared.run.parent_run_id,
             mode=mode,
@@ -122,6 +126,90 @@ class RunUsage:
     output_tokens: int
     cost_usd: float
     models: list[dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class RunOutcome:
+    status: WorkItemStatus
+    kind: AgentEventKind
+    payload: dict[str, Any]
+    stop_reason: str | None = None
+
+
+class RunOutcomeBuilder:
+    """Build terminal workflow data without persistence or runtime access."""
+
+    @staticmethod
+    def build(
+        *,
+        answer: str,
+        citations: list[dict[str, Any]],
+        memory_recalls: list[dict[str, Any]],
+        action_ids: list[str],
+        child_tasks: list[dict[str, Any]],
+        usage: RunUsage,
+        duration_ms: int,
+        stop_reason: StopReason | None,
+        budget: dict[str, Any] | None = None,
+    ) -> RunOutcome:
+        usage_data = {
+            "input_tokens": usage.input_tokens,
+            "output_tokens": usage.output_tokens,
+            "cost_usd": usage.cost_usd,
+        }
+        if stop_reason is not None:
+            return RunOutcome(
+                WorkItemStatus.STOPPED,
+                AgentEventKind.STOPPED,
+                {
+                    "status": WorkItemStatus.STOPPED.value,
+                    "answer": answer,
+                    "stop_reason": stop_reason.value,
+                    "budget": budget or {},
+                    "usage": usage_data,
+                    "duration_ms": duration_ms,
+                    "models": usage.models,
+                },
+                stop_reason.value,
+            )
+        child_ids = [f"child:{item['id']}" for item in child_tasks]
+        if action_ids or child_ids:
+            return RunOutcome(
+                WorkItemStatus.WAITING_APPROVAL,
+                AgentEventKind.WAITING_APPROVAL,
+                {
+                    "status": WorkItemStatus.WAITING_APPROVAL.value,
+                    "action_ids": action_ids + child_ids,
+                    "count": len(action_ids) + len(child_ids),
+                    "usage": usage_data,
+                    "models": usage.models,
+                    "collaboration": {
+                        "tasks": [
+                            {
+                                "task_id": str(item["id"]),
+                                "state": str(item["state"]),
+                                "verified": False,
+                            }
+                            for item in child_tasks
+                        ]
+                    }
+                    if child_tasks
+                    else None,
+                },
+            )
+        return RunOutcome(
+            WorkItemStatus.COMPLETED,
+            AgentEventKind.COMPLETED,
+            {
+                "status": WorkItemStatus.COMPLETED.value,
+                "answer": answer,
+                "citations": citations,
+                "memory_recalls": memory_recalls,
+                "usage": usage_data,
+                "duration_ms": duration_ms,
+                "models": usage.models,
+            },
+        )
 
 
 class RunFinalizer:

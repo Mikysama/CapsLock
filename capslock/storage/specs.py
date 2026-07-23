@@ -5,7 +5,7 @@ from __future__ import annotations
 import aiosqlite
 
 from .migrations import DatabaseSpec, MigrationStep
-from .schema_v2 import (
+from .schema import (
     MEMORY_APPLICATION_ID,
     MEMORY_MIGRATIONS,
     MEMORY_SCHEMA,

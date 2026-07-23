@@ -129,8 +129,16 @@ def approval_panel(action: ActionRecord) -> Panel:
     if value.target:
         parts.append(Text.assemble(("Target  ", "text.muted"), (value.target, "path")))
     if value.preview:
-        lexer = "diff" if value.preview_kind == "diff" else "bash" if value.preview_kind == "command" else "text"
-        parts.append(Syntax(value.preview, lexer, word_wrap=True, background_color="default"))
+        lexer = (
+            "diff"
+            if value.preview_kind == "diff"
+            else "bash"
+            if value.preview_kind == "command"
+            else "text"
+        )
+        parts.append(
+            Syntax(value.preview, lexer, word_wrap=True, background_color="default")
+        )
     return Panel(
         Group(*parts),
         title=Text(" Permission required ", style="warning"),

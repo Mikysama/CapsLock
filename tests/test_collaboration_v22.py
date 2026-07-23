@@ -18,7 +18,7 @@ from capslock.collaboration import (
     VerificationError,
     VerificationRequirement,
 )
-from capslock.storage.repositories_v2 import WorkspaceRepositories
+from capslock.storage.repositories import WorkspaceRepositories
 from capslock.tooling.async_catalog import workspace_tools
 from capslock.tooling.async_core import RunContext
 from capslock.tooling.collaboration import _reserve_parent_budget

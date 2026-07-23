@@ -7,7 +7,7 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
 from ..domain import MemoryOrigin, MemoryRecallHit, MemoryScope
-from ..storage.memory_v2 import MemoryRepositories
+from ..storage.memory_repositories import MemoryRepositories
 from .embeddings import EmbeddingService
 
 RECALL_LIMIT = 5

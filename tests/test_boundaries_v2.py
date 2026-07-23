@@ -8,7 +8,7 @@ import pytest
 
 from capslock.bootstrap import WorkspaceApplication
 from capslock.cli.app import create_client
-from capslock.config import Settings
+from capslock.configuration import Settings
 from capslock.external import is_suspicious, validate_public_url
 from capslock.layout import LayoutConflict, ProjectLayout, UserLayout
 from capslock.permissions import PermissionMode
@@ -78,7 +78,10 @@ def test_runtime_and_tooling_depend_only_on_neutral_ports() -> None:
         assert "from ..storage" not in text
     neutral = "\n".join(
         path.read_text(encoding="utf-8")
-        for path in [root / "ports.py", *(root / "domain").rglob("*.py")]
+        for path in [
+            *(root / "ports").rglob("*.py"),
+            *(root / "domain").rglob("*.py"),
+        ]
     )
     for forbidden in (
         "import sqlite3",
@@ -112,6 +115,24 @@ def test_workspace_application_retains_client_ownership_flag() -> None:
         close_client=False,
     )
     assert application.close_client is False
+
+
+def test_legacy_facades_are_removed() -> None:
+    root = Path(__file__).parents[1] / "capslock"
+    for removed in (
+        "config.py",
+        "embeddings.py",
+        "application/app.py",
+    ):
+        assert not (root / removed).exists(), removed
+
+
+def test_storage_uses_canonical_module_paths() -> None:
+    storage = Path(__file__).parents[1] / "capslock" / "storage"
+    for removed in ("repositories_v2", "memory_v2", "schema_v2.py"):
+        assert not (storage / removed).exists(), removed
+    for current in ("repositories", "memory_repositories", "schema.py"):
+        assert (storage / current).exists(), current
 
 
 def test_all_registered_tools_have_async_executors() -> None:

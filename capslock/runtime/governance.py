@@ -17,19 +17,21 @@ from ..domain import (
     StopReason,
 )
 from ..security import redact
-from ..ports import WorkspaceServicesPort
+from ..ports import GovernancePort, ModelAuditPort
 
 
 class RunGovernor:
     def __init__(
         self,
-        repositories: WorkspaceServicesPort,
+        governance: GovernancePort,
+        models: ModelAuditPort,
         run_id: str,
         snapshot: BudgetSnapshot,
         history: list[dict[str, Any]],
         loop_settings: LoopDetectionSettings,
     ) -> None:
-        self.repositories = repositories
+        self.governance = governance
+        self.models = models
         self.run_id = run_id
         self.snapshot = snapshot
         self.history = history
@@ -45,7 +47,8 @@ class RunGovernor:
     @classmethod
     async def create(
         cls,
-        repositories: WorkspaceServicesPort,
+        governance: GovernancePort,
+        models: ModelAuditPort,
         run_id: str,
         *,
         parent_run_id: str | None,
@@ -53,15 +56,13 @@ class RunGovernor:
         limits: RunLimits,
         loop_settings: LoopDetectionSettings,
     ) -> "RunGovernor":
-        snapshot, history = await repositories.governance.start(
+        snapshot, history = await governance.start(
             run_id, parent_run_id=parent_run_id, mode=mode, limits=limits
         )
-        return cls(repositories, run_id, snapshot, history, loop_settings)
+        return cls(governance, models, run_id, snapshot, history, loop_settings)
 
     async def current(self) -> BudgetSnapshot:
-        input_tokens, output_tokens, cost = await self.repositories.models.usage(
-            self.run_id
-        )
+        input_tokens, output_tokens, cost = await self.models.usage(self.run_id)
         self.snapshot = replace(
             self.snapshot,
             duration_ms=self.base_duration_ms
@@ -137,7 +138,7 @@ class RunGovernor:
         detail = self._loop_detail(fingerprint)
         if detail is not None:
             await self.stop(StopReason.REPEATED_TOOL_CALL, detail=detail)
-        attempt_id = await self.repositories.governance.reserve_attempt(
+        attempt_id = await self.governance.reserve_attempt(
             self.run_id,
             round_index=max(1, self.snapshot.tool_rounds),
             name=normalized_name,
@@ -150,9 +151,7 @@ class RunGovernor:
         return attempt_id, safe_arguments, fingerprint
 
     async def finish_tool(self, attempt_id: int, *, ok: bool, duration_ms: int) -> None:
-        await self.repositories.governance.finish_attempt(
-            attempt_id, ok=ok, duration_ms=duration_ms
-        )
+        await self.governance.finish_attempt(attempt_id, ok=ok, duration_ms=duration_ms)
         if self.history:
             self.history[-1]["ok"] = ok
         await self.current()
@@ -243,6 +242,4 @@ class RunGovernor:
         return None
 
     async def _save(self) -> None:
-        await self.repositories.governance.save(
-            self.run_id, self.snapshot, self.history
-        )
+        await self.governance.save(self.run_id, self.snapshot, self.history)

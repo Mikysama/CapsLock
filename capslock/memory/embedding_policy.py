@@ -7,7 +7,7 @@ import json
 from collections.abc import Awaitable, Callable
 
 from ..domain import EmbeddingBackend, MemoryInfo
-from ..storage.memory_v2 import MemoryRepositories
+from ..storage.memory_repositories import MemoryRepositories
 from .embeddings import (
     DEFAULT_FASTEMBED_MODEL,
     ExternalEmbeddingConfig,

@@ -12,7 +12,7 @@ from ..permissions import PermissionMode
 from .context import CliContext
 from .views.actions import render_approvals as render_approval_view
 from .views.actions import render_sources as render_source_view
-from .prompt import select_permission_mode
+from .prompt import select_model, select_permission_mode
 
 
 async def render_approvals(context: CliContext) -> None:
@@ -130,6 +130,32 @@ async def permissions(context: CliContext, text: str) -> None:
         context.console.print("[error]Usage:[/] /permissions [full|approve|ask]")
         return
     await set_permission_mode(context, parts[1])
+
+
+async def set_model(context: CliContext, value: str) -> None:
+    try:
+        model = await context.agent.set_model(value)
+        context.console.print(f"[success]Model:[/] {model}")
+    except ValueError as exc:
+        context.console.print(f"[error]Error:[/] {exc}")
+
+
+async def model_command(context: CliContext, text: str) -> None:
+    parts = shlex.split(text)
+    if len(parts) == 1:
+        try:
+            selected = await asyncio.to_thread(select_model, context.agent.model)
+        except (EOFError, KeyboardInterrupt):
+            context.console.print("[waiting]Model unchanged.[/]")
+            return
+        await set_model(context, selected)
+        return
+    if len(parts) != 2:
+        context.console.print(
+            "[error]Usage:[/] /model [deepseek-v4-flash|deepseek-v4-pro]"
+        )
+        return
+    await set_model(context, parts[1])
 
 
 async def mcp_command(context: CliContext, text: str) -> None:

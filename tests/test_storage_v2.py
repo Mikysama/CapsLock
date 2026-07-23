@@ -17,8 +17,8 @@ from capslock.storage.async_database import (
     MemoryDatabase,
     WorkspaceDatabase,
 )
-from capslock.storage.repositories_v2 import WorkspaceRepositories
-from capslock.storage.schema_v2 import (
+from capslock.storage.repositories import WorkspaceRepositories
+from capslock.storage.schema import (
     MEMORY_APPLICATION_ID,
     MEMORY_SCHEMA_VERSION,
     WORKSPACE_APPLICATION_ID,
@@ -52,6 +52,26 @@ def test_empty_databases_initialize_with_distinct_application_ids(
         finally:
             await workspace.close()
             await memory.close()
+
+    asyncio.run(scenario())
+
+
+def test_session_model_can_be_updated_and_restored(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        repositories = await WorkspaceRepositories.open(
+            tmp_path / "session-model.sqlite3", workspace=tmp_path
+        )
+        try:
+            session = await repositories.sessions.create("deepseek-v4-flash")
+            updated = await repositories.sessions.set_model(
+                session.id, "deepseek-v4-pro"
+            )
+            assert updated.model == "deepseek-v4-pro"
+            assert (await repositories.sessions.require(session.id)).model == (
+                "deepseek-v4-pro"
+            )
+        finally:
+            await repositories.close()
 
     asyncio.run(scenario())
 

@@ -12,6 +12,12 @@ from prompt_toolkit.application import get_app_or_none, run_in_terminal
 from prompt_toolkit.patch_stdout import patch_stdout
 from rich.console import Console
 
+from ..application.foreground import (
+    AuthorizerBindings,
+    ControllerEvent,
+    ControllerEventKind,
+    ForegroundRunController,
+)
 from ..domain import (
     ActionRecord,
     AgentEvent,
@@ -19,9 +25,6 @@ from ..domain import (
     ApprovalDecision,
     BudgetRequest,
     BudgetSnapshot,
-    MemoryScope,
-    WorkItemStatus,
-    RunMode,
 )
 from ..permissions import PermissionMode
 from ..status import AgentStatus, status_for_event, status_message
@@ -100,9 +103,7 @@ async def run_tui(context: CliContext, *, status_enabled: bool = True) -> int:
         toggle_details=toggle_details,
         prelude_provider=prelude,
     )
-    queue: asyncio.Queue[tuple[str, str, str | None] | None] = asyncio.Queue()
     state["inputs"] = inputs
-    router = context.agent.chat_model
 
     async def authorize_budget(request: BudgetRequest) -> bool:
         prompt = (
@@ -125,18 +126,49 @@ async def run_tui(context: CliContext, *, status_enabled: bool = True) -> int:
         answer = await run_in_terminal(lambda: console.input(prompt))
         return str(answer).strip().casefold() in {"y", "yes"}
 
-    state["limit_authorizer"] = authorize_limit
-
     async def authorize_action(action: ActionRecord) -> ApprovalDecision:
         return await _authorize_action(context, action)
 
-    set_authorizer = getattr(router, "set_budget_authorizer", None)
-    if callable(set_authorizer):
-        set_authorizer(authorize_budget)
-    set_action_authorizer = getattr(agent, "set_action_authorizer", None)
-    if callable(set_action_authorizer):
-        set_action_authorizer(authorize_action)
-    worker = asyncio.create_task(_worker(context, queue, state))
+    async def consume(item: ControllerEvent) -> None:
+        renderer = state.get("renderer")
+        if item.kind is ControllerEventKind.STARTED:
+            queued_items = state.get("queued_items")
+            if isinstance(queued_items, dict) and item.work_item_id:
+                queued_items.pop(item.work_item_id, None)
+            renderer = _RunRenderer(_TerminalWriter(console), state)
+            state["renderer"] = renderer
+            _set_activity(state, status_message(AgentStatus.THINKING))
+        elif (
+            item.kind is ControllerEventKind.RUN_EVENT
+            and item.event is not None
+            and isinstance(renderer, _RunRenderer)
+        ):
+            await renderer.handle(item.event)
+        elif item.kind is ControllerEventKind.CANCELLED and isinstance(
+            renderer, _RunRenderer
+        ):
+            await renderer.cancel()
+        elif item.kind is ControllerEventKind.FAILED and isinstance(
+            renderer, _RunRenderer
+        ):
+            if not renderer.terminal:
+                await renderer.fail(item.error or "run failed")
+        elif item.kind is ControllerEventKind.FINISHED:
+            state["renderer"] = None
+            _set_activity(state, None)
+
+    controller = ForegroundRunController(
+        agent,
+        consumer=consume,
+        authorize_limit=authorize_limit,
+    )
+    bindings = AuthorizerBindings(
+        agent,
+        action_authorizer=authorize_action,
+        budget_authorizer=authorize_budget,
+    )
+    await bindings.__aenter__()
+    await controller.start()
     animator = asyncio.create_task(_animate_activity(inputs, state))
     try:
         while True:
@@ -149,9 +181,7 @@ async def run_tui(context: CliContext, *, status_enabled: bool = True) -> int:
                         )
                     ).strip()
             except KeyboardInterrupt:
-                task = state.get("task")
-                if isinstance(task, asyncio.Task) and not task.done():
-                    task.cancel()
+                if await controller.cancel():
                     console.print("\n[warning]Cancelling the active run...[/]")
                     continue
                 return 0
@@ -162,9 +192,11 @@ async def run_tui(context: CliContext, *, status_enabled: bool = True) -> int:
             if question.startswith("/"):
                 try:
                     if question.startswith("/queue retry "):
-                        await _retry(context, queue, shlex.split(question)[2])
+                        await _retry(context, controller, shlex.split(question)[2])
                     elif question.startswith("/queue start "):
-                        await _start_queued(context, queue, shlex.split(question)[2])
+                        await _start_queued(
+                            context, controller, shlex.split(question)[2]
+                        )
                     elif await dispatch_slash_command(context, question) == "exit":
                         return 0
                 except (ValueError, OSError) as exc:
@@ -181,25 +213,17 @@ async def run_tui(context: CliContext, *, status_enabled: bool = True) -> int:
             queued_items = state.get("queued_items")
             if isinstance(queued_items, dict):
                 queued_items[item.id] = item.question
-            await queue.put((item.id, item.question, None))
-            console.print(
-                result_status("Queued", "waiting", detail=item.id[:8])
-            )
+            await controller.enqueue_item(item.id, item.question)
+            console.print(result_status("Queued", "waiting", detail=item.id[:8]))
     finally:
-        if callable(set_authorizer):
-            set_authorizer(None)
-        if callable(set_action_authorizer):
-            set_action_authorizer(None)
+        await bindings.__aexit__(None, None, None)
         state["stopping"] = True
-        await queue.put(None)
-        worker.cancel()
+        await controller.shutdown()
         animator.cancel()
-        for task in (worker, animator):
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-        await _delete_empty_session(context)
+        try:
+            await animator
+        except asyncio.CancelledError:
+            pass
 
 
 async def _animate_activity(inputs: object, state: dict[str, object]) -> None:
@@ -211,62 +235,6 @@ async def _animate_activity(inputs: object, state: dict[str, object]) -> None:
         app = getattr(inputs, "app", None)
         if app is not None and app.is_running:
             app.invalidate()
-
-
-async def _worker(
-    context: CliContext, queue: asyncio.Queue, state: dict[str, object]
-) -> None:
-    while True:
-        request = await queue.get()
-        if request is None:
-            return
-        item_id, question, resume_from = request
-        queued_items = state.get("queued_items")
-        if isinstance(queued_items, dict):
-            queued_items.pop(item_id, None)
-        task = asyncio.create_task(
-            _run_request(context, item_id, question, resume_from, state)
-        )
-        state["task"] = task
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-        except Exception as exc:
-            await _TerminalWriter(context.console).print(
-                result_status("Run failed", "failed", detail=str(exc))
-            )
-        finally:
-            state["task"] = None
-            _set_activity(state, None)
-
-
-async def _run_request(
-    context: CliContext,
-    item_id: str,
-    question: str,
-    resume_from: str | None,
-    state: dict[str, object],
-) -> None:
-    renderer = _RunRenderer(_TerminalWriter(context.console), state)
-    _set_activity(state, status_message(AgentStatus.THINKING))
-    try:
-        async for event in context.agent.ask_stream(
-            question,
-            work_item_id=item_id,
-            resume_from_run_id=resume_from,
-            mode=RunMode.INTERACTIVE,
-            authorize_limit=state.get("limit_authorizer"),
-        ):
-            await renderer.handle(event)
-    except asyncio.CancelledError:
-        await renderer.cancel()
-        raise
-    except Exception as exc:
-        if not renderer.terminal:
-            await renderer.fail(str(exc) or type(exc).__name__)
-    finally:
-        _set_activity(state, None)
 
 
 async def _authorize_action(
@@ -357,7 +325,9 @@ class _RunRenderer:
                 "failed": "failed",
                 "cancelled": "cancelled",
             }.get(status, status)
-            await self.writer.print(reasoning_summary(self.reasoning_text, status=outcome))
+            await self.writer.print(
+                reasoning_summary(self.reasoning_text, status=outcome)
+            )
         _set_activity(self.state, None)
         self.thinking = False
         self.reasoning_text = ""
@@ -520,9 +490,7 @@ class _RunRenderer:
         await self.writer.flush()
         _set_activity(self.state, None)
         await self.writer.print(
-            system_message(
-                result_status("Cancelled", "cancelled"), status="cancelled"
-            )
+            system_message(result_status("Cancelled", "cancelled"), status="cancelled")
         )
         self.terminal = True
 
@@ -631,36 +599,19 @@ def _set_activity(state: dict[str, object], activity: str | None) -> None:
         app.invalidate()
 
 
-async def _retry(context: CliContext, queue: asyncio.Queue, prefix: str) -> None:
-    run = await context.agent.repositories.workflow.retryable_run(
-        context.agent.session_id, prefix
-    )
-    item = await context.agent.enqueue(
-        run.question, parent_work_item_id=run.work_item_id
-    )
-    await queue.put((item.id, item.question, run.id))
+async def _retry(
+    context: CliContext,
+    controller: ForegroundRunController,
+    prefix: str,
+) -> None:
+    _, run = await controller.retry(prefix)
     context.console.print(f"[waiting]Retry queued:[/] {run.id[:8]}")
 
 
-async def _start_queued(context: CliContext, queue: asyncio.Queue, prefix: str) -> None:
-    repository = context.agent.repositories.workflow
-    item = await repository.require_work_item(prefix)
-    if item.session_id != context.agent.session_id:
-        raise ValueError("work item does not belong to this session")
-    if item.status is not WorkItemStatus.QUEUED:
-        raise ValueError("only queued work can be started")
-    await queue.put((item.id, item.question, None))
+async def _start_queued(
+    context: CliContext,
+    controller: ForegroundRunController,
+    prefix: str,
+) -> None:
+    item = await controller.start_queued(prefix)
     context.console.print(f"[waiting]Queued work activated:[/] {item.id[:8]}")
-
-
-async def _delete_empty_session(context: CliContext) -> None:
-    memory = context.agent.memory
-    if memory is not None:
-        try:
-            if await memory.list(
-                scope=MemoryScope.SESSION, include_inactive=True, limit=1
-            ):
-                return
-        except Exception:
-            return
-    await context.agent.repositories.sessions.delete_if_empty(context.agent.session_id)

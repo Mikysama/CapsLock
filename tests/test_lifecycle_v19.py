@@ -9,9 +9,8 @@ from pathlib import Path
 
 from rich.console import Console
 
-from capslock.application.workflow import WorkflowService
 from capslock.cli.app import async_main
-from capslock.config import CONFIG_VERSION, Settings, read_config_document
+from capslock.configuration import CONFIG_VERSION, Settings, read_config_document
 from capslock.credentials import (
     credential_status,
     delete_keyring_credential,
@@ -26,9 +25,10 @@ from capslock.domain import (
 )
 from capslock.layout import ProjectLayout
 from capslock.lifecycle import LifecycleError, LifecycleService
-from capslock.storage.memory_v2 import MemoryRepositories
-from capslock.storage.repositories_v2 import WorkspaceRepositories
-from capslock.storage.schema_v2 import MEMORY_SCHEMA_VERSION, WORKSPACE_SCHEMA_VERSION
+from capslock.storage.memory_repositories import MemoryRepositories
+from capslock.storage.repositories import WorkspaceRepositories
+from capslock.storage.schema import MEMORY_SCHEMA_VERSION, WORKSPACE_SCHEMA_VERSION
+from tests.helpers import workflow_service
 
 
 def test_config_v0_migrates_atomically_and_init_is_noninteractive(
@@ -215,7 +215,7 @@ def test_portable_import_is_idempotent_and_resets_approval(
         )
         memory = await MemoryRepositories.open(source_layout.user.memory)
         session = await repositories.sessions.create("model")
-        prepared = await WorkflowService(repositories).prepare(session.id, "question")
+        prepared = await workflow_service(repositories).prepare(session.id, "question")
         action = await repositories.actions.create(
             session_id=session.id,
             run_id=prepared.run.id,
@@ -229,7 +229,7 @@ def test_portable_import_is_idempotent_and_resets_approval(
             },
         )
         await repositories.actions.transition(action.id, ActionStatus.APPROVED)
-        await WorkflowService(repositories).finish(
+        await workflow_service(repositories).finish(
             prepared.run.id,
             status=WorkItemStatus.WAITING_APPROVAL,
             event_kind=AgentEventKind.WAITING_APPROVAL,

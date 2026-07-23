@@ -12,7 +12,7 @@ from pathlib import Path
 from openai import AsyncOpenAI
 from rich.console import Console
 
-from ..config import (
+from ..configuration import (
     CONFIG_VERSION,
     Settings,
     _atomic_write,

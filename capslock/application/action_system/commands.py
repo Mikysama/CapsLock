@@ -127,6 +127,21 @@ class CommandActionHandler:
         script = "test" if template.name == "npm_test" else "build"
         return isinstance(scripts, dict) and isinstance(scripts.get(script), str)
 
+    async def revalidate(self, action: ActionRecord) -> ActionProposal:
+        request = action.request
+        name = str(request.get("template", ""))
+        template = TEMPLATES.get(name)
+        argv = request.get("argv", [])
+        target = None
+        if template is not None and isinstance(argv, list):
+            expected = len(template.argv)
+            if template.supports_target and len(argv) == expected + 1:
+                target = argv[expected]
+        return await self.propose(
+            action.type,
+            {"template": name, "target": target, "cwd": request.get("cwd", ".")},
+        )
+
     async def execute(self, action: ActionRecord) -> ActionExecution:
         request = action.request
         process = await asyncio.create_subprocess_exec(

@@ -8,12 +8,11 @@ import os
 import sys
 from pathlib import Path
 
-from openai import AsyncOpenAI
 from rich.console import Console
 
 from .. import __version__
 from ..bootstrap import WorkspaceApplication
-from ..config import Settings
+from ..configuration import Settings
 from ..credentials import CredentialError
 from ..environment import load_project_environment
 from ..layout import LayoutConflict, ProjectLayout
@@ -22,8 +21,8 @@ from ..runtime import AgentRuntimeError
 from ..domain import RunLimits
 from ..session_management import SessionManager
 from ..storage.async_database import IncompatibleDatabaseError
-from ..storage.memory_v2 import MemoryRepositories
-from ..storage.repositories_v2 import WorkspaceRepositories
+from ..storage.memory_repositories import MemoryRepositories
+from ..storage.repositories import WorkspaceRepositories
 from ..theme import make_console
 from .context import CliContext
 from .diagnostics import (
@@ -39,6 +38,7 @@ from .diagnostics import (
 from .exec import run_exec
 from .lifecycle import backup_command, export_lifecycle, import_lifecycle
 from .plugins import plugin_command
+from .providers import create_provider_clients
 from .status import dynamic_status_supported
 from .setup import (
     config_migrate,
@@ -182,34 +182,6 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def create_client(settings: Settings) -> AsyncOpenAI:
-    if not settings.model_config.api_key or settings.model_config.api_key.startswith(
-        "your_"
-    ):
-        raise AgentRuntimeError("API key is not configured")
-    return AsyncOpenAI(
-        api_key=settings.model_config.api_key,
-        base_url=settings.model_config.base_url,
-        timeout=settings.model_config.timeout_seconds,
-    )
-
-
-def create_provider_clients(settings: Settings) -> dict[str, AsyncOpenAI]:
-    clients: dict[str, AsyncOpenAI] = {}
-    for name, provider in (settings.providers or {}).items():
-        if not provider.api_key or provider.api_key.startswith("your_"):
-            continue
-        clients[name] = AsyncOpenAI(
-            api_key=provider.api_key,
-            base_url=provider.base_url,
-            timeout=provider.timeout_seconds,
-        )
-    if not clients:
-        # Preserve the existing actionable error for the implicit legacy profile.
-        create_client(settings)
-    return clients
-
-
 async def create_application(
     workspace: Path,
     settings: Settings,
@@ -224,6 +196,14 @@ async def create_application(
         session_id=session_id,
         layout=layout,
     )
+
+
+def create_client(settings: Settings):
+    """Compatibility export; provider construction lives in ``cli.providers``."""
+
+    from .providers import create_client as provider_client
+
+    return provider_client(settings)
 
 
 def main(argv: list[str] | None = None, *, console: Console | None = None) -> int:

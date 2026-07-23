@@ -21,6 +21,7 @@ from prompt_toolkit.shortcuts import choice
 from prompt_toolkit.utils import get_cwidth
 
 from ..domain import ActionRecord, ApprovalDecision
+from ..models import SELECTABLE_MODELS
 from ..permissions import PermissionMode
 from ..status import SPINNER_FRAMES
 from ..theme import build_prompt_style
@@ -317,6 +318,38 @@ def select_permission_mode(current: PermissionMode) -> PermissionMode:
     )
 
 
+def select_model(current: str) -> str:
+    labels = {
+        "deepseek-v4-flash": "Fast model for everyday tasks",
+        "deepseek-v4-pro": "More capable model for complex tasks",
+    }
+    options = [
+        (
+            model,
+            FormattedText(
+                [
+                    ("class:command-name", model),
+                    ("class:footer", f"  {labels[model]}"),
+                ]
+            ),
+        )
+        for model in SELECTABLE_MODELS
+    ]
+    default = current if current in SELECTABLE_MODELS else SELECTABLE_MODELS[0]
+    return choice(
+        FormattedText(
+            [
+                ("class:command-name", "Select model\n"),
+                ("class:footer", "↑/↓ choose · Enter apply"),
+            ]
+        ),
+        options=options,
+        default=default,
+        style=PROMPT_STYLE,
+        symbol="❯",
+    )
+
+
 def select_action_decision(_action: ActionRecord) -> ApprovalDecision:
     header = FormattedText(
         [
@@ -372,10 +405,18 @@ def _updated_at(value: str) -> str:
 
 def refresh_slash_completion(buffer: object) -> None:
     prefix = buffer.document.text_before_cursor
+    buffer.cancel_completion()
     if prefix.startswith(("/", "$")):
         buffer.start_completion(select_first=False)
-    else:
-        buffer.cancel_completion()
+
+
+def bind_slash_completion_refresh(buffer: object) -> None:
+    """Refresh slash/Skill menus for every insertion, including fast paste."""
+
+    def refresh(sender: object) -> None:
+        refresh_slash_completion(sender)
+
+    buffer.on_text_insert += refresh
 
 
 SLASH_KEY_BINDINGS = KeyBindings()
@@ -447,13 +488,14 @@ def prompt_session(
         key_bindings=merge_key_bindings([SLASH_KEY_BINDINGS, inline_bindings]),
         style=PROMPT_STYLE,
         enable_history_search=True,
-        complete_while_typing=True,
+        complete_while_typing=False,
         complete_style=CompleteStyle.COLUMN,
         reserve_space_for_menu=16,
         erase_when_done=True,
         include_default_pygments_style=False,
         show_frame=True,
     )
+    bind_slash_completion_refresh(session.default_buffer)
     root = session.app.layout.container
     if isinstance(root, HSplit) and root.children:
         framed = root.children[0]

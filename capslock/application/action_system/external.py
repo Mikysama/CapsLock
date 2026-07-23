@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
-import os
 from typing import Any
 from urllib.parse import urljoin
 
@@ -21,8 +19,9 @@ from ...layout import ProjectLayout
 from ...mcp import McpRegistry
 from ...policy import PolicyError, WorkspacePolicy
 from ...plugins import PluginProcessClient, PluginRegistry
-from ...storage.repositories_v2 import WorkspaceRepositories
+from ...ports import SourcePort
 from .core import ActionExecution, ActionProposal
+from .executors import McpStdioExecutor, PluginActionExecutor
 
 
 class WebActionHandler:
@@ -30,7 +29,7 @@ class WebActionHandler:
 
     def __init__(
         self,
-        repositories: WorkspaceRepositories,
+        sources: SourcePort,
         *,
         tavily_api_key: str | None,
         timeout_seconds: float,
@@ -38,7 +37,7 @@ class WebActionHandler:
         max_redirects: int,
         client_factory: Any = None,
     ) -> None:
-        self.repositories = repositories
+        self.sources = sources
         self.key = tavily_api_key
         self.timeout_seconds = timeout_seconds
         self.max_bytes = max_bytes
@@ -94,7 +93,7 @@ class WebActionHandler:
             )
             if not isinstance(url, str):
                 continue
-            source = await self.repositories.sources.add(
+            source = await self.sources.add(
                 session_id=action.session_id,
                 run_id=action.run_id,
                 url=url,
@@ -143,7 +142,7 @@ class WebActionHandler:
             raw = response.content[: self.max_bytes]
             text = raw.decode(response.encoding or "utf-8", errors="replace")
             text = extract_text(text) if content_type == "text/html" else text
-            source = await self.repositories.sources.add(
+            source = await self.sources.add(
                 session_id=action.session_id,
                 run_id=action.run_id,
                 url=str(response.url),
@@ -165,6 +164,9 @@ class WebActionHandler:
     async def reverse(self, action: ActionRecord) -> dict[str, Any]:
         raise ValueError("Web actions cannot be reversed")
 
+    async def revalidate(self, action: ActionRecord) -> ActionProposal:
+        return await self.propose(action.type, dict(action.request))
+
 
 class McpActionHandler:
     types = frozenset({ActionType.MCP_CONNECT, ActionType.MCP_CALL})
@@ -185,6 +187,17 @@ class McpActionHandler:
         self.registry = McpRegistry(policy, layout=layout)
         self.plugin_registry = plugin_registry
         self.plugin_client = plugin_client or PluginProcessClient(
+            timeout_seconds=timeout_seconds,
+            output_limit_bytes=output_limit_bytes,
+        )
+        self.plugin_executor = PluginActionExecutor(
+            plugin_registry,
+            self.plugin_client,
+            output_limit_bytes=output_limit_bytes,
+        )
+        self.mcp_executor = McpStdioExecutor(
+            policy,
+            self.registry,
             timeout_seconds=timeout_seconds,
             output_limit_bytes=output_limit_bytes,
         )
@@ -244,100 +257,14 @@ class McpActionHandler:
     async def execute(self, action: ActionRecord) -> ActionExecution:
         plugin_name = action.request.get("plugin")
         if plugin_name is not None:
-            if not isinstance(plugin_name, str) or self.plugin_registry is None:
-                raise ValueError("plugin support is unavailable")
-            entry = await asyncio.to_thread(self.plugin_registry.get, plugin_name)
-            if not entry.manifest.permissions.issubset(entry.granted_permissions):
-                raise PolicyError("plugin workspace permission grant is incomplete")
-            if action.request.get("digest") != entry.manifest.digest:
-                raise PolicyError(
-                    "plugin package or workspace grant changed after approval"
-                )
-            response = await self.plugin_client.call(
-                entry.manifest,
-                str(action.request["tool"]),
-                action.request["arguments"],
-            )
-            result = {
-                "plugin": plugin_name,
-                "tool": action.request["tool"],
-                "result": response.get("data"),
-                "plugin_ok": response.get("ok"),
-                "plugin_error": response.get("error"),
-                "untrusted": True,
-            }
-            encoded = json.dumps(result, ensure_ascii=False, default=str)
-            if len(encoded.encode("utf-8")) > self.output_limit_bytes:
-                result = {
-                    "text": encoded.encode()[: self.output_limit_bytes].decode(
-                        "utf-8", "ignore"
-                    ),
-                    "truncated": True,
-                    "untrusted": True,
-                }
-            return ActionExecution(result, ActionResultKind.SUCCESS)
-        try:
-            from mcp import ClientSession, StdioServerParameters
-            from mcp.client.stdio import stdio_client
-        except ImportError as exc:
-            raise RuntimeError("MCP support requires the mcp package") from exc
-        server = await asyncio.to_thread(
-            self.registry.get, str(action.request["server"])
-        )
-        env = {"PATH": os.environ.get("PATH", ""), **server.env}
-        params = StdioServerParameters(
-            command=server.command,
-            args=list(server.args),
-            env=env,
-            cwd=str(self.policy.command_directory(server.cwd)),
-        )
-        async with asyncio.timeout(self.timeout_seconds):
-            async with stdio_client(params) as (read, write):
-                async with ClientSession(read, write) as session:
-                    await session.initialize()
-                    if action.type is ActionType.MCP_CONNECT:
-                        response = await session.list_tools()
-                        tools = [
-                            item.model_dump()
-                            if hasattr(item, "model_dump")
-                            else str(item)
-                            for item in getattr(response, "tools", [])
-                        ]
-                        result: dict[str, Any] = {
-                            "server": server.name,
-                            "tools": [
-                                item
-                                for item in tools
-                                if not isinstance(item, dict)
-                                or item.get("name") in server.allowed_tools
-                            ],
-                        }
-                    else:
-                        tool = str(action.request["tool"])
-                        if tool not in server.allowed_tools:
-                            raise PolicyError(
-                                f"MCP tool is not allowed for server {server.name}: {tool}"
-                            )
-                        response = await session.call_tool(
-                            tool, action.request["arguments"]
-                        )
-                        dumped = (
-                            response.model_dump()
-                            if hasattr(response, "model_dump")
-                            else str(response)
-                        )
-                        result = {"server": server.name, "tool": tool, "result": dumped}
-        encoded = json.dumps(result, ensure_ascii=False, default=str)
-        if len(encoded.encode("utf-8")) > self.output_limit_bytes:
-            result = {
-                "text": encoded.encode()[: self.output_limit_bytes].decode(
-                    "utf-8", "ignore"
-                ),
-                "truncated": True,
-            }
+            result = await self.plugin_executor.execute(action)
         else:
-            result = json.loads(encoded)
+            self.mcp_executor.registry = self.registry
+            result = await self.mcp_executor.execute(action)
         return ActionExecution(result, ActionResultKind.SUCCESS)
+
+    async def revalidate(self, action: ActionRecord) -> ActionProposal:
+        return await self.propose(action.type, dict(action.request))
 
     async def reverse(self, action: ActionRecord) -> dict[str, Any]:
         raise ValueError("MCP actions cannot be reversed")

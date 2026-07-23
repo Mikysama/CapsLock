@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from ..domain import MemoryOrigin, MemoryScope, MemoryType
-from ..storage.memory_v2 import MemoryRepositories
+from ..storage.memory_repositories import MemoryRepositories
 from .validation import (
     MAX_TRANSFER_BYTES,
     MAX_TRANSFER_RECORDS,

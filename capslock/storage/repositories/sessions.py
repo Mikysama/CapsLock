@@ -53,6 +53,15 @@ class SessionRepository(Repository):
             raise ValueError(f"session does not exist: {session_id}")
         return item
 
+    async def set_model(self, session_id: str, model: str) -> SessionInfo:
+        updated = await self.execute(
+            "UPDATE sessions SET model=?,updated_at=? WHERE id=?",
+            (model, now(), session_id),
+        )
+        if not updated:
+            raise ValueError(f"session does not exist: {session_id}")
+        return await self.require(session_id)
+
     async def list(
         self, limit: int = 20, *, include_archived: bool = False
     ) -> list[SessionInfo]:

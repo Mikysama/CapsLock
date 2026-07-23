@@ -6,8 +6,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from capslock.application.action_system import ActionCoordinator, FileActionHandler
-from capslock.application.workflow import WorkflowService
+from capslock.application.action_system import (
+    ActionCoordinator,
+    ActionRunState,
+    FileActionHandler,
+)
 from capslock.domain import (
     ApprovalDecision,
     ActionStatus,
@@ -27,7 +30,7 @@ from capslock.runtime.model import (
     ModelUsage,
 )
 from capslock.runtime.tool_loop import ToolLoop, ToolLoopError
-from capslock.storage.repositories_v2 import WorkspaceRepositories
+from capslock.storage.repositories import WorkspaceRepositories
 from capslock.tooling.async_core import RunContext, Tool, ToolRegistry, ToolResult
 from capslock.tooling.async_catalog import workspace_tools
 from tests.helpers import (
@@ -37,6 +40,7 @@ from tests.helpers import (
     answer,
     workspace_run,
     StubActionHandler,
+    workflow_service,
 )
 
 
@@ -72,7 +76,7 @@ def make_agent(
         model_name="test-model",
         chat_model=model,
         repositories=repositories,
-        workflow=WorkflowService(repositories),
+        workflow=workflow_service(repositories),
         session_id=session_id,
         policy=WorkspacePolicy(tmp_path),
         action_factory=lambda run_id: None,
@@ -83,6 +87,40 @@ def make_agent(
         permission_mode=PermissionMode.APPROVE_FOR_ME,
         max_tool_rounds=3,
     )
+
+
+def test_agent_model_switch_is_session_scoped_and_blocked_during_run(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        repositories = await WorkspaceRepositories.open(
+            tmp_path / "model.sqlite3", workspace=tmp_path
+        )
+        try:
+            session = await repositories.sessions.create("deepseek-v4-flash")
+            agent = make_agent(
+                tmp_path,
+                repositories,
+                session.id,
+                FakeChatModel(answer("unused")),
+            )
+            selected = await agent.set_model("deepseek-v4-pro")
+            assert selected == "deepseek-v4-pro"
+            assert agent.model == "deepseek-v4-pro"
+            assert agent.tool_loop.model == "deepseek-v4-pro"
+            assert agent.tool_loop.model_steps.model == "deepseek-v4-pro"
+            assert (await repositories.sessions.require(session.id)).model == selected
+
+            agent._active_runs = 1
+            with pytest.raises(ValueError, match="run is active"):
+                await agent.set_model("deepseek-v4-flash")
+            assert agent.model == "deepseek-v4-pro"
+            with pytest.raises(ValueError, match="deepseek-v4-flash"):
+                await agent.set_model("unsupported")
+        finally:
+            await repositories.close()
+
+    asyncio.run(scenario())
 
 
 def test_interactive_approval_executes_action_inside_same_run(tmp_path: Path) -> None:
@@ -111,7 +149,8 @@ def test_interactive_approval_executes_action_inside_same_run(tmp_path: Path) ->
 
             def actions(run_id: str) -> ActionCoordinator:
                 return ActionCoordinator(
-                    repositories,
+                    repositories.actions,
+                    ActionRunState(repositories.runs, repositories.workflow),
                     session_id=session.id,
                     run_id=run_id,
                     handlers=[
@@ -130,7 +169,7 @@ def test_interactive_approval_executes_action_inside_same_run(tmp_path: Path) ->
                 model_name="test-model",
                 chat_model=model,
                 repositories=repositories,
-                workflow=WorkflowService(repositories),
+                workflow=workflow_service(repositories),
                 session_id=session.id,
                 policy=WorkspacePolicy(tmp_path),
                 action_factory=actions,
@@ -193,7 +232,7 @@ def test_tool_loop_handles_invalid_arguments_and_continues(tmp_path: Path) -> No
                 chat_model=model,
                 model="test",
                 tools=ToolRegistry([Tool("echo", "echo", {"type": "object"}, execute)]),
-                journal=repositories.workflow,
+                journal=repositories.run_journal,
                 max_tool_rounds=2,
                 context_factory=context_factory(repositories, session.id),
             )
@@ -289,7 +328,7 @@ def test_tool_loop_emits_reasoning_as_thinking_delta(tmp_path: Path) -> None:
                 ),
                 model="test",
                 tools=ToolRegistry([]),
-                journal=repositories.workflow,
+                journal=repositories.run_journal,
                 max_tool_rounds=1,
                 context_factory=context_factory(repositories, session.id),
             )
@@ -337,7 +376,7 @@ def test_tool_loop_records_failed_model_steps(
                 chat_model=FakeChatModel(response),
                 model="test",
                 tools=ToolRegistry([]),
-                journal=repositories.workflow,
+                journal=repositories.run_journal,
                 max_tool_rounds=0,
                 context_factory=context_factory(repositories, session.id),
             )
@@ -531,7 +570,7 @@ def test_checkpoint_resume_uses_last_stable_async_step(tmp_path: Path) -> None:
             failed = next(
                 event for event in first_events if event.kind is AgentEventKind.FAILED
             )
-            checkpoint = await repositories.workflow.last_stable_step(failed.run_id)
+            checkpoint = await repositories.run_journal.last_stable_step(failed.run_id)
             assert checkpoint is not None
 
             second_model = FakeChatModel(answer("resumed"))
@@ -544,7 +583,7 @@ def test_checkpoint_resume_uses_last_stable_async_step(tmp_path: Path) -> None:
             completed = next(
                 event for event in resumed if event.kind is AgentEventKind.COMPLETED
             )
-            run = await repositories.workflow.require_run(completed.run_id)
+            run = await repositories.runs.require(completed.run_id)
             assert run.parent_run_id == failed.run_id
             assert run.resume_from_step_id == checkpoint.id
             assert any(
@@ -611,8 +650,8 @@ def test_cancelling_stream_closes_run_action_and_running_step(tmp_path: Path) ->
             assert action_id is not None
             action = await repositories.actions.require(action_id)
             assert action.status is ActionStatus.CANCELLED
-            run = await repositories.workflow.require_run(action.run_id)
-            item = await repositories.workflow.require_work_item(run.work_item_id)
+            run = await repositories.runs.require(action.run_id)
+            item = await repositories.work_items.require(run.work_item_id)
             assert run.status == item.status.value == "cancelled"
             assert (
                 await repositories.database.fetch_one(
@@ -620,7 +659,7 @@ def test_cancelling_stream_closes_run_action_and_running_step(tmp_path: Path) ->
                     (run.id,),
                 )
             )[0] == 0
-            events = await repositories.workflow.events(run.id)
+            events = await repositories.run_journal.events(run.id)
             assert [entry.kind for entry in events if entry.terminal] == [
                 AgentEventKind.CANCELLED
             ]

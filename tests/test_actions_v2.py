@@ -11,6 +11,7 @@ import pytest
 
 from capslock.application.action_system import (
     ActionCoordinator,
+    ActionRunState,
     CommandActionHandler,
     FileActionHandler,
     McpActionHandler,
@@ -26,7 +27,7 @@ from capslock.domain import (
 from capslock.layout import ProjectLayout, UserLayout
 from capslock.permissions import PermissionMode
 from capslock.policy import PolicyError, WorkspacePolicy
-from capslock.storage.repositories_v2 import WorkspaceRepositories
+from capslock.storage.repositories import WorkspaceRepositories
 from tests.helpers import StubActionHandler, workspace_run
 
 
@@ -43,7 +44,8 @@ def coordinator(
     if missing := set(ActionType) - covered:
         handlers.append(StubActionHandler(missing))
     return ActionCoordinator(
-        repositories,
+        repositories.actions,
+        ActionRunState(repositories.runs, repositories.workflow),
         session_id=session_id,
         run_id=run_id,
         handlers=handlers,
@@ -550,7 +552,7 @@ def test_web_search_is_async_audited_and_untrusted(tmp_path: Path) -> None:
         try:
             session, prepared = await workspace_run(repositories)
             handler = WebActionHandler(
-                repositories,
+                repositories.sources,
                 tavily_api_key="test",
                 timeout_seconds=1,
                 max_bytes=1000,
@@ -583,7 +585,7 @@ def test_web_timeout_marks_action_failed(tmp_path: Path) -> None:
         try:
             session, prepared = await workspace_run(repositories)
             handler = WebActionHandler(
-                repositories,
+                repositories.sources,
                 tavily_api_key="test",
                 timeout_seconds=0.01,
                 max_bytes=1000,

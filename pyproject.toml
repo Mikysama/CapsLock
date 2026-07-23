@@ -16,7 +16,7 @@ dev = ["pytest>=8.0.0", "ruff>=0.6.0", "build>=1.2.2", "twine>=5.1.0", "pip-audi
 local-embeddings = ["fastembed>=0.7,<1"]
 
 [project.scripts]
-capslock = "capslock.cli:main"
+capslock = "capslock.cli.app:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

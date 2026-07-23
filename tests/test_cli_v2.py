@@ -24,6 +24,7 @@ from capslock.cli.prompt import (
     prompt_prelude,
     prompt_session,
     select_action_decision,
+    select_model,
     select_permission_mode,
     select_session,
 )
@@ -127,6 +128,7 @@ def test_slash_command_catalog_has_no_v1_aliases() -> None:
     expected = {
         "/help",
         "/status",
+        "/model",
         "/permissions",
         "/approvals",
         "/queue",
@@ -378,6 +380,14 @@ def test_session_selector_uses_arrow_keys_and_enter(tmp_path: Path) -> None:
     assert selected == "b" * 32
 
 
+def test_model_selector_uses_arrow_keys_and_enter() -> None:
+    with create_pipe_input() as pipe:
+        pipe.send_text("\x1b[B\r")
+        with create_app_session(input=pipe, output=DummyOutput()):
+            selected = select_model("deepseek-v4-flash")
+    assert selected == "deepseek-v4-pro"
+
+
 def test_permission_selector_uses_current_default_and_arrow_keys() -> None:
     with create_pipe_input() as pipe:
         pipe.send_text("\x1b[B\r")
@@ -448,6 +458,28 @@ def test_bare_permissions_opens_selector(monkeypatch: pytest.MonkeyPatch) -> Non
     assert agent.permission_mode is PermissionMode.ASK_FOR_APPROVAL
     assert selected == ["permission_mode", "ask_for_approval"]
     assert "Permission mode: ask_for_approval" in output.getvalue()
+
+
+def test_model_command_switches_only_to_allowlisted_model() -> None:
+    from capslock.models import selectable_model
+
+    class Agent:
+        model = "deepseek-v4-flash"
+
+        async def set_model(self, value: str) -> str:
+            self.model = selectable_model(value)
+            return self.model
+
+    agent = Agent()
+    console, output = console_buffer()
+    context = CliContext(console, agent)
+    asyncio.run(dispatch_slash_command(context, "/model deepseek-v4-pro"))
+    assert agent.model == "deepseek-v4-pro"
+    assert "Model: deepseek-v4-pro" in output.getvalue()
+
+    asyncio.run(dispatch_slash_command(context, "/model unsupported"))
+    assert agent.model == "deepseek-v4-pro"
+    assert "model must be deepseek-v4-flash or deepseek-v4-pro" in output.getvalue()
 
 
 def test_inline_action_authorizer_returns_selected_decision(
@@ -685,6 +717,35 @@ def test_inline_composer_ctrl_c_exits_even_with_a_draft() -> None:
             pipe.send_text("draft\x03")
             with pytest.raises(KeyboardInterrupt):
                 asyncio.run(inputs.prompt_async())
+
+
+def test_inline_command_menu_refreshes_for_fast_typing_exact_match_and_delete() -> None:
+    async def wait_for(inputs, expected: list[str]) -> None:
+        for _ in range(50):
+            state = inputs.default_buffer.complete_state
+            actual = [item.text for item in state.completions] if state else []
+            if actual == expected:
+                return
+            await asyncio.sleep(0.01)
+        raise AssertionError(f"completion menu did not refresh: {actual!r}")
+
+    async def scenario(inputs, pipe) -> None:
+        task = asyncio.create_task(inputs.prompt_async())
+        await asyncio.sleep(0)
+        pipe.send_text("/")
+        await wait_for(inputs, [item.path for item in COMMANDS])
+        pipe.send_text("sta")
+        await wait_for(inputs, ["/status"])
+        pipe.send_text("tus")
+        await wait_for(inputs, ["/status "])
+        pipe.send_bytes(b"\x7f")
+        await wait_for(inputs, ["/status"])
+        pipe.send_bytes(b"\r")
+        assert await task == "/statu"
+
+    with create_pipe_input() as pipe:
+        with create_app_session(input=pipe, output=DummyOutput()):
+            asyncio.run(scenario(prompt_session(), pipe))
 
 
 def test_tui_status_row_is_reserved_and_can_be_disabled() -> None:

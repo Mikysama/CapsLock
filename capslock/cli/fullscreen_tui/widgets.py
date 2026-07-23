@@ -49,7 +49,11 @@ class Composer(TextArea):
             event.prevent_default()
             event.stop()
             self.post_message(self.CompletionRequested(-1 if event.key == "up" else 1))
-        elif event.key == "up" and "\n" not in self.text and self.cursor_location == (0, 0):
+        elif (
+            event.key == "up"
+            and "\n" not in self.text
+            and self.cursor_location == (0, 0)
+        ):
             event.prevent_default()
             event.stop()
             self.post_message(self.HistoryRequested(-1))
@@ -77,9 +81,18 @@ class MessageWidget(Static):
             text = message.text.strip()
             if message.collapsed:
                 first = " ".join(text.split())[:120]
-                self.update(Text.assemble(("◇ Reasoning ", "italic #718397"), (first + ("…" if len(text) > 120 else ""), "dim")))
+                self.update(
+                    Text.assemble(
+                        ("◇ Reasoning ", "italic #718397"),
+                        (first + ("…" if len(text) > 120 else ""), "dim"),
+                    )
+                )
             else:
-                self.update(Text.assemble(("◇ Reasoning\n", "italic #9A8FC7"), (text, "italic dim")))
+                self.update(
+                    Text.assemble(
+                        ("◇ Reasoning\n", "italic #9A8FC7"), (text, "italic dim")
+                    )
+                )
             return
         if message.kind is MessageKind.TOOLS:
             self.update(_tool_text(message))
@@ -189,11 +202,27 @@ class SessionHeader(Static):
         width: int,
     ) -> None:
         if width < 72:
-            self.update(Text.assemble(("⇪ CapsLock", "bold #8CB9DC"), (f" · {title}", "#DCE6F2")))
+            self.update(
+                Text.assemble(
+                    ("⇪ CapsLock", "bold #8CB9DC"), (f" · {title}", "#DCE6F2")
+                )
+            )
         elif width < 100:
-            self.update(Text.assemble(("⇪ CapsLock  ", "bold #8CB9DC"), (title, "bold"), (f"\n{model} · {permission}", "dim")))
+            self.update(
+                Text.assemble(
+                    ("⇪ CapsLock  ", "bold #8CB9DC"),
+                    (title, "bold"),
+                    (f"\n{model} · {permission}", "dim"),
+                )
+            )
         else:
-            self.update(Text.assemble(("⇪ CapsLock  ", "bold #8CB9DC"), (title, "bold"), (f"\n{workspace}  ·  {model}  ·  {permission}", "dim")))
+            self.update(
+                Text.assemble(
+                    ("⇪ CapsLock  ", "bold #8CB9DC"),
+                    (title, "bold"),
+                    (f"\n{workspace}  ·  {model}  ·  {permission}", "dim"),
+                )
+            )
 
 
 class QueueBar(Static):

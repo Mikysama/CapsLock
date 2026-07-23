@@ -14,6 +14,7 @@ class CommandSpec:
 COMMANDS = (
     CommandSpec("/help", "Show commands"),
     CommandSpec("/status", "Show session, plan, queue, context, and usage"),
+    CommandSpec("/model", "Show or change the model"),
     CommandSpec("/permissions", "Show or change permission mode"),
     CommandSpec("/approvals", "Review, approve, or reject pending actions"),
     CommandSpec("/queue", "List, move, cancel, or retry foreground work"),

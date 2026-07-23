@@ -31,6 +31,7 @@ from ..domain import (
 from ..evidence import Evidence
 from ..observability import EventSink
 from ..interaction import RunInteraction
+from ..models import selectable_model
 from ..permissions import PermissionMode
 from ..ports import (
     ActionFactory,
@@ -44,8 +45,14 @@ from ..skills import SkillValidationError
 from ..tooling.async_catalog import workspace_tools
 from ..tooling.async_core import RunContext, ToolRegistry
 from .context import CitationResolver, ContextBuilder, citation_data
+from .execution import RunExecutionService
 from .model import ChatModel
-from .run_support import RunEventPublisher, RunFinalizer, RunOrchestrator
+from .run_support import (
+    RunEventPublisher,
+    RunFinalizer,
+    RunOrchestrator,
+    RunOutcomeBuilder,
+)
 from .tool_loop import ToolLoop, ToolLoopError
 
 
@@ -122,17 +129,19 @@ class WorkspaceAgent:
         )
         self.loop_detection = loop_detection
         self.tools = tools or workspace_tools()
+        self._active_runs = 0
         self.citations = CitationResolver(repositories)
         self.tool_loop = ToolLoop(
             chat_model=chat_model,
             model=model_name,
             tools=self.tools,
-            journal=repositories.workflow,
+            journal=repositories.run_journal,
             max_tool_rounds=self.max_tool_rounds,
             context_factory=self._run_context,
         )
         self.run_orchestrator = RunOrchestrator(
-            services=repositories,
+            governance=repositories.governance,
+            model_audit=repositories.models,
             workflow=workflow,
             chat_model=chat_model,
             default_limits=self.default_limits,
@@ -140,11 +149,12 @@ class WorkspaceAgent:
         )
         self.run_finalizer = RunFinalizer(
             workflow=workflow,
-            journal=repositories.workflow,
+            journal=repositories.run_journal,
             model_audit=repositories.models,
             input_cost_per_million=self.input_cost,
             output_cost_per_million=self.output_cost,
         )
+        self.execution = RunExecutionService(self)
 
     def set_action_authorizer(
         self,
@@ -165,6 +175,18 @@ class WorkspaceAgent:
         self,
     ) -> Callable[[ActionRecord], Awaitable[ApprovalDecision]] | None:
         return self.interaction.action_authorizer
+
+    async def set_model(self, value: str) -> str:
+        """Switch future calls in this session to an allowlisted model."""
+
+        model = selectable_model(value)
+        if self._active_runs:
+            raise ValueError("cannot switch model while a run is active")
+        await self.repositories.sessions.set_model(self.session_id, model)
+        self.model = model
+        self.tool_loop.model = model
+        self.tool_loop.model_steps.model = model
+        return model
 
     async def enqueue(self, question: str, *, parent_work_item_id: str | None = None):
         return await self.workflow.enqueue(
@@ -187,8 +209,9 @@ class WorkspaceAgent:
             await queue.put(event)
 
         async def execute() -> None:
+            self._active_runs += 1
             try:
-                await self._execute(
+                await self.execution.execute(
                     question,
                     work_item_id=work_item_id,
                     resume_from_run_id=resume_from_run_id,
@@ -198,6 +221,7 @@ class WorkspaceAgent:
                     consumer=consume,
                 )
             finally:
+                self._active_runs -= 1
                 await queue.put(None)
 
         task = asyncio.create_task(execute())
@@ -214,7 +238,7 @@ class WorkspaceAgent:
             with suppress(asyncio.CancelledError):
                 await task
 
-    async def _execute(
+    async def _run_execution(
         self,
         question: str,
         *,
@@ -243,7 +267,7 @@ class WorkspaceAgent:
         input_tokens = output_tokens = 0
         publisher = RunEventPublisher(
             run_id=run_id,
-            journal=self.repositories.workflow,
+            journal=self.repositories.run_journal,
             event=self.events.emit,
             consumer=consumer,
         )
@@ -299,7 +323,7 @@ class WorkspaceAgent:
             await self.repositories.sessions.append_message(
                 self.session_id, run_id, "assistant", text
             )
-            await self.repositories.workflow.record_citations(
+            await self.repositories.run_journal.record_citations(
                 run_id, [item for item in citations if isinstance(item, Evidence)]
             )
             pending = await self.repositories.actions.list(
@@ -342,83 +366,36 @@ class WorkspaceAgent:
                 usage.output_tokens,
                 usage.cost_usd,
             )
-            model_summary = usage.models
-            if result.stop_reason is not None:
-                status, kind = WorkItemStatus.STOPPED, AgentEventKind.STOPPED
-                payload = {
-                    "status": status.value,
-                    "answer": text,
-                    "stop_reason": result.stop_reason.value,
-                    "budget": (await governor.current()).as_dict(),
-                    "usage": {
-                        "input_tokens": input_tokens,
-                        "output_tokens": output_tokens,
-                        "cost_usd": cost,
-                    },
-                    "duration_ms": duration,
-                    "models": model_summary,
-                }
-            elif pending or child_waiting:
-                status, kind = (
-                    WorkItemStatus.WAITING_APPROVAL,
-                    AgentEventKind.WAITING_APPROVAL,
-                )
-                payload = {
-                    "status": status.value,
-                    "action_ids": [item.id for item in pending]
-                    + [f"child:{item['id']}" for item in child_waiting],
-                    "count": len(pending) + len(child_waiting),
-                    "usage": {
-                        "input_tokens": input_tokens,
-                        "output_tokens": output_tokens,
-                        "cost_usd": cost,
-                    },
-                    "models": model_summary,
-                    "collaboration": {
-                        "tasks": [
-                            {
-                                "task_id": str(item["id"]),
-                                "state": str(item["state"]),
-                                "verified": False,
-                            }
-                            for item in child_waiting
-                        ]
+            outcome = RunOutcomeBuilder.build(
+                answer=text,
+                citations=[citation_data(item) for item in citations],
+                memory_recalls=[
+                    {
+                        "memory_id": hit.memory.id,
+                        "score": hit.score,
+                        "reasons": list(hit.reasons),
                     }
-                    if child_waiting
-                    else None,
-                }
-            else:
-                status, kind = WorkItemStatus.COMPLETED, AgentEventKind.COMPLETED
-                payload = {
-                    "status": status.value,
-                    "answer": text,
-                    "citations": [citation_data(item) for item in citations],
-                    "memory_recalls": [
-                        {
-                            "memory_id": hit.memory.id,
-                            "score": hit.score,
-                            "reasons": list(hit.reasons),
-                        }
-                        for hit in context.last_recalls
-                    ],
-                    "usage": {
-                        "input_tokens": input_tokens,
-                        "output_tokens": output_tokens,
-                        "cost_usd": cost,
-                    },
-                    "duration_ms": duration,
-                    "models": model_summary,
-                }
+                    for hit in context.last_recalls
+                ],
+                action_ids=[item.id for item in pending],
+                child_tasks=child_waiting,
+                usage=usage,
+                duration_ms=duration,
+                stop_reason=result.stop_reason,
+                budget=(await governor.current()).as_dict()
+                if result.stop_reason is not None
+                else None,
+            )
             terminal = await self.workflow.finish(
                 run_id,
-                status=status,
-                event_kind=kind,
-                payload=payload,
+                status=outcome.status,
+                event_kind=outcome.kind,
+                payload=outcome.payload,
                 duration_ms=duration,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 cost_usd=cost,
-                stop_reason=result.stop_reason.value if result.stop_reason else None,
+                stop_reason=outcome.stop_reason,
             )
             await publish(terminal)
         except asyncio.CancelledError:

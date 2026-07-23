@@ -13,8 +13,8 @@ from pathlib import Path
 from typing import Any
 
 from .security import redact
-from .storage.memory_v2 import MemoryRepositories, workspace_key
-from .storage.repositories_v2 import WorkspaceRepositories
+from .storage.memory_repositories import MemoryRepositories, workspace_key
+from .storage.repositories import WorkspaceRepositories
 
 SESSION_EXPORT_FORMAT = "capslock-session-export"
 SESSION_EXPORT_VERSION = 3
@@ -52,7 +52,7 @@ class SessionManager:
                 "cost": dict(
                     zip(
                         ("input_tokens", "output_tokens", "cost_usd"),
-                        await self.repositories.workflow.session_cost(session_id),
+                        await self.repositories.runs.session_cost(session_id),
                         strict=True,
                     )
                 ),

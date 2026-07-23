@@ -8,22 +8,18 @@ from pathlib import Path
 from ..async_database import MemoryDatabase
 from .candidates import CandidateRepository
 from .core import workspace_key
-from .lifecycle import MemoryRepository
+from .lifecycle import MemoryLifecycleRepository
+from .query import MemoryQueryRepository
+from .sources import MemorySourceRepository
+from .settings import MemorySettingsRepository
+from .audit import MemoryAuditRepository
 from .semantic import EmbeddingRepository, RecallRepository
 from .external import EmbeddingAuditRepository
-from .facades import (
-    MemoryAuditRepository,
-    MemoryLifecycleRepository,
-    MemoryQueryRepository,
-    MemorySettingsRepository,
-    MemorySourceRepository,
-)
 
 
 @dataclass(frozen=True)
 class MemoryRepositories:
     database: MemoryDatabase
-    memories: MemoryRepository
     lifecycle: MemoryLifecycleRepository
     query: MemoryQueryRepository
     sources: MemorySourceRepository
@@ -37,15 +33,15 @@ class MemoryRepositories:
     @classmethod
     async def open(cls, path: str | Path) -> "MemoryRepositories":
         database = await MemoryDatabase.open(path)
-        memories = MemoryRepository(database)
+        query = MemoryQueryRepository(database)
+        lifecycle = MemoryLifecycleRepository(database, query)
         return cls(
             database,
-            memories,
-            MemoryLifecycleRepository(memories),
-            MemoryQueryRepository(memories),
-            MemorySourceRepository(memories),
-            MemorySettingsRepository(memories),
-            MemoryAuditRepository(memories),
+            lifecycle,
+            query,
+            MemorySourceRepository(database),
+            MemorySettingsRepository(database),
+            MemoryAuditRepository(database),
             CandidateRepository(database),
             EmbeddingRepository(database),
             RecallRepository(database),
@@ -61,7 +57,6 @@ __all__ = [
     "EmbeddingRepository",
     "EmbeddingAuditRepository",
     "MemoryRepositories",
-    "MemoryRepository",
     "MemoryLifecycleRepository",
     "MemoryQueryRepository",
     "MemorySourceRepository",

@@ -28,6 +28,8 @@ async def dispatch_slash_command(context: CliContext, text: str) -> str:
             context.console.print(f"[command]{item.path:<14}[/] {item.description}")
     elif name == "/status":
         await _status(context)
+    elif name == "/model":
+        await actions.model_command(context, text)
     elif name == "/permissions":
         await actions.permissions(context, text)
     elif name == "/approvals":
@@ -71,10 +73,8 @@ async def _status(context: CliContext) -> None:
     agent = context.agent
     session = await agent.repositories.sessions.require(agent.session_id)
     tasks = await agent.repositories.tasks.list(agent.session_id)
-    work = await agent.repositories.workflow.list_work_items(
-        agent.session_id, active_only=True
-    )
-    cost = await agent.repositories.workflow.session_cost(agent.session_id)
+    work = await agent.repositories.work_items.list(agent.session_id, active_only=True)
+    cost = await agent.repositories.runs.session_cost(agent.session_id)
     count = await agent.repositories.sessions.message_count(agent.session_id)
     latest_budget = await agent.repositories.governance.latest_for_session(
         agent.session_id
@@ -219,25 +219,23 @@ async def _collaboration_usage(repository, items: list[dict]) -> dict[str, float
 
 
 async def _queue(context: CliContext, parts: list[str]) -> None:
-    repository = context.agent.repositories.workflow
+    repository = context.agent.repositories.work_items
     if len(parts) == 1:
         render_queue(
             context.console,
-            await repository.list_work_items(
-                context.agent.session_id, active_only=True
-            ),
+            await repository.list(context.agent.session_id, active_only=True),
         )
         return
     if len(parts) == 3 and parts[1] == "cancel":
-        item = await repository.require_work_item(parts[2])
+        item = await repository.require(parts[2])
         if item.session_id != context.agent.session_id:
             raise ValueError("work item does not belong to this session")
-        await repository.update_work_item(
+        await repository.update(
             item.id, WorkItemStatus.CANCELLED, error="cancelled before start"
         )
         return
     if len(parts) == 4 and parts[1] == "move":
-        item = await repository.require_work_item(parts[2])
+        item = await repository.require(parts[2])
         if item.session_id != context.agent.session_id:
             raise ValueError("work item does not belong to this session")
         await repository.reorder(item.id, int(parts[3]))

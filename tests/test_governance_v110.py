@@ -7,15 +7,14 @@ from pathlib import Path
 
 import pytest
 
-from capslock.application.workflow import WorkflowService
 from capslock.cli.context import CliContext
 from capslock.cli.exec import run_exec
-from capslock.config import Settings
+from capslock.configuration import Settings
 from capslock.domain import AgentEvent, AgentEventKind, RunLimits, RunMode
 from capslock.runtime.model import ModelMessage, ModelResponse, ModelToolCall
-from capslock.storage.repositories_v2 import WorkspaceRepositories
+from capslock.storage.repositories import WorkspaceRepositories
 from capslock.tooling.async_core import Tool, ToolRegistry, ToolResult
-from tests.helpers import FakeChatModel, answer
+from tests.helpers import FakeChatModel, answer, workflow_service
 from tests.test_runtime_v2 import make_agent
 from rich.console import Console
 
@@ -110,7 +109,9 @@ def test_budget_snapshot_round_trip(tmp_path: Path) -> None:
         )
         try:
             session = await repositories.sessions.create("test-model")
-            prepared = await WorkflowService(repositories).prepare(session.id, "budget")
+            prepared = await workflow_service(repositories).prepare(
+                session.id, "budget"
+            )
             snapshot, _ = await repositories.governance.start(
                 prepared.run.id,
                 parent_run_id=None,
