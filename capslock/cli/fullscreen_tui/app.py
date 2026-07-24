@@ -32,7 +32,9 @@ from ...permissions import PermissionMode
 from ...theme import make_console
 from .. import actions
 from ..commands import COMMANDS, command_descriptions, command_menu_completions
+from ..commands import CommandOutcome, CommandOutcomeKind
 from ..context import CliContext
+from ..command_ui import ConsoleCommandUI
 from ..dispatch import dispatch_slash_command
 from .models import (
     TuiState,
@@ -49,11 +51,13 @@ from .screens import (
     ApprovalScreen,
     ConfirmScreen,
     ContentScreen,
+    MarkdownContentScreen,
     HistorySearchScreen,
     InputRequestScreen,
     ModelScreen,
     PermissionScreen,
     SessionPickerScreen,
+    SideQuestionScreen,
     TextPromptScreen,
 )
 from .widgets import (
@@ -70,6 +74,55 @@ from .widgets import (
 
 _Result = TypeVar("_Result")
 _ACTIVITY_FPS = 12
+
+
+class FullscreenCommandUI:
+    """CommandUI adapter backed by Textual modal screens."""
+
+    def __init__(self, app: "CapsLockApp") -> None:
+        self.app = app
+        self.presented = False
+
+    async def select(self, title: str, choices) -> str | None:
+        if not choices:
+            return None
+        detail = "\n".join(
+            f"{i}. {item.label} {item.detail}" for i, item in enumerate(choices, 1)
+        )
+        value = await self.app._modal_wait(
+            TextPromptScreen(
+                title + "\n" + detail, placeholder="Number (blank cancels)"
+            )
+        )
+        if not value:
+            return None
+        try:
+            return choices[int(value) - 1].value
+        except (ValueError, IndexError):
+            raise ValueError("invalid selection") from None
+
+    async def confirm(self, title: str, detail: str, *, default: bool = False) -> bool:
+        return bool(await self.app._modal_wait(ConfirmScreen(title, detail)))
+
+    async def show(self, title: str, content: str) -> None:
+        self.presented = True
+        self.app.push_screen(ContentScreen(title, content))
+
+    async def show_markdown(self, title: str, content: str) -> None:
+        self.presented = True
+        self.app.push_screen(MarkdownContentScreen(title, content))
+
+    async def show_agent_response(
+        self, title: str, question: str, content: str, tools=()
+    ) -> None:
+        self.presented = True
+        self.app.push_screen(SideQuestionScreen(question, content, tools))
+
+    async def input_text(self, title: str, prompt: str) -> str | None:
+        return await self.app._modal_wait(TextPromptScreen(title, placeholder=prompt))
+
+    async def copy(self, content: str) -> str:
+        return await ConsoleCommandUI(self.app.context.console).copy(content)
 
 
 CSS = """
@@ -276,6 +329,7 @@ class CapsLockApp(App[int]):
         self._too_small = False
         self._activity_timer: Any = None
         self._sync_lock = asyncio.Lock()
+        self._side_question_task: asyncio.Task[Any] | None = None
 
     def compose(self) -> ComposeResult:
         with Vertical(id="main"):
@@ -394,6 +448,13 @@ class CapsLockApp(App[int]):
         await self.query_one(TranscriptView).sync_messages(self.state.messages)
 
     async def action_interrupt(self) -> None:
+        if self._side_question_task is not None and not self._side_question_task.done():
+            self._side_question_task.cancel()
+            self.state = add_system_message(
+                self.state, "Cancelling the side question…", status="cancelled"
+            )
+            await self._sync()
+            return
         if await self.controller.cancel():
             self.state = add_system_message(
                 self.state, "Cancelling the active run…", status="cancelled"
@@ -525,6 +586,18 @@ class CapsLockApp(App[int]):
         if name == "/queue" and len(parts) == 3 and parts[1] in {"retry", "start"}:
             await self._queue_command(parts[1], parts[2])
             return
+        if name == "/btw":
+            self._side_question_task = asyncio.current_task()
+            try:
+                await self._capture_command(text)
+            except asyncio.CancelledError:
+                self.state = add_system_message(
+                    self.state, "Side question cancelled", status="cancelled"
+                )
+                await self._sync()
+            finally:
+                self._side_question_task = None
+            return
         await self._capture_command(text)
 
     async def _interactive_memory(self, parts: list[str]) -> bool:
@@ -653,16 +726,29 @@ class CapsLockApp(App[int]):
             file=buffer, width=max(48, self.size.width - 6), force_terminal=False
         )
         try:
+            ui = FullscreenCommandUI(self)
             result = await dispatch_slash_command(
-                CliContext(console, self.agent_session, self.context.queries), text
+                CliContext(
+                    console,
+                    self.agent_session,
+                    self.context.queries,
+                    ui=ui,
+                    application=self.context.application,
+                ),
+                text,
             )
-            if result == "exit":
-                self.exit(0)
+            if result.kind is not CommandOutcomeKind.HANDLED:
+                self.exit(result)
                 return
         except (ValueError, OSError) as exc:
             console.print(f"Error: {exc}")
-        content = buffer.getvalue().rstrip() or "Command completed."
-        self.push_screen(ContentScreen(text.split(maxsplit=1)[0], content))
+        content = buffer.getvalue().rstrip()
+        if not ui.presented:
+            self.push_screen(
+                ContentScreen(
+                    text.split(maxsplit=1)[0], content or "Command completed."
+                )
+            )
         await self._sync_chrome()
 
     async def _capture_controller(self, function: Any, *args: object) -> None:
@@ -765,8 +851,12 @@ async def select_session_fullscreen(sessions: list[SessionInfo]) -> str | None:
 
 async def run_fullscreen_tui(
     context: CliContext, *, status_enabled: bool = True
-) -> int:
+) -> CommandOutcome:
     result = await CapsLockApp(context, status_enabled=status_enabled).run_async(
         mouse=True
     )
-    return int(result or 0)
+    return (
+        result
+        if isinstance(result, CommandOutcome)
+        else CommandOutcome(CommandOutcomeKind.EXIT)
+    )

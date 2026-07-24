@@ -1,6 +1,6 @@
 # CapsLock v2 开发者文档
 
-本目录记录 CapsLock v2 的架构、开发过程、安全边界与发布验证。当前稳定版本为 `2.3.1`，开发协议为 Tool Runtime v2、config 5、workspace schema 8 和 plugin protocol 4。
+本目录记录 CapsLock v2 的架构、开发过程、安全边界与发布验证。当前稳定版本为 `2.4.0`，开发协议为 Tool Runtime v2、config 5、workspace schema 9 和 plugin protocol 4。
 
 ## 文档入口
 
@@ -18,13 +18,14 @@
 - [v2.2.4 发布说明](../../releases/v2.2.4.md)：运行内核、上下文预算、插件隔离、事件耐久化和当前协议边界。
 - [v2.3.0 发布说明](../../releases/v2.3.0.md)：Tool Runtime v2、直接能力工具、Shell/MCP/LSP、可恢复交互与能力包重构。
 - [v2.3.1 发布说明](../../releases/v2.3.1.md)：用户消息背景、fullscreen 空闲动画与流式消息重绘优化。
+- [v2.4.0 发布说明](../../releases/v2.4.0.md)：类型化斜杠命令、session 导航、维护用量、上下文状态与格式 4 导出。
 
 ## 当前稳定边界
 
 - 组合根为 `capslock.bootstrap.WorkspaceApplication.open()`；runtime/tooling 通过 `capslock.ports` 使用应用与存储能力。
 - 模型、工具、动作、workflow 和记忆接口均为异步；公开 Agent 执行入口只有 `AgentSession.run_stream(RunRequest)`。
-- workspace schema 8、memory schema 3、portable archive 3、JSONL schema 3、`config_version = 5` 和 plugin protocol 4 是当前协议。
+- workspace schema 9、memory schema 3、portable archive 4、session export 4、JSONL schema 3、`config_version = 5` 和 plugin protocol 4 是当前协议。
 - 配置依赖图、Memory/Workflow repository、Lifecycle I/O/import merge、Action handler、子 Agent runner 与模型路由均使用显式窄接口；只有组合根可同时装配具体 storage、runtime 与 application。
 - fullscreen 中等待模态结果的斜杠命令运行在 Textual worker；根背景使用原生 `ansi_default`，Rich 内容通过只替换背景的渲染适配器保留全部字体样式。
 - 支持 Linux/macOS 与 Python 3.12；两个操作系统组合由发布 CI 验证。
-- config v3/v4 与 workspace schema v6/v7 使用 backup-first 自动迁移；旧 archive、JSONL、插件协议和删除的 Python 接口不提供兼容别名。
+- config v3/v4 与 workspace schema v6/v7/v8 使用 backup-first 自动迁移；archive v3 可读取，旧 JSONL、插件协议和删除的 Python 接口不提供兼容别名。

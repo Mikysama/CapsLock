@@ -30,6 +30,7 @@ from ..permissions import PermissionMode
 from ..status import AgentStatus, status_for_event, status_message
 from .context import CliContext
 from .dispatch import dispatch_slash_command
+from .commands import CommandOutcome, CommandOutcomeKind
 from .prompt import (
     prompt_session,
     prompt_prelude,
@@ -51,7 +52,9 @@ from .views.conversation import (
 from .views.workflow import render_history, result_status
 
 
-async def run_tui(context: CliContext, *, status_enabled: bool = True) -> int:
+async def run_tui(
+    context: CliContext, *, status_enabled: bool = True
+) -> CommandOutcome:
     agent, console = context.session, context.console
     startup(
         console,
@@ -62,9 +65,7 @@ async def run_tui(context: CliContext, *, status_enabled: bool = True) -> int:
     )
     queries = context.require_queries()
     session = await queries.session(agent.session_id)
-    render_history(
-        console, session, await queries.transcript(agent.session_id)
-    )
+    render_history(console, session, await queries.transcript(agent.session_id))
     state: dict[str, object] = {
         "task": None,
         "activity": None,
@@ -198,9 +199,9 @@ async def run_tui(context: CliContext, *, status_enabled: bool = True) -> int:
                 if await controller.cancel():
                     console.print("\n[warning]Cancelling the active run...[/]")
                     continue
-                return 0
+                return CommandOutcome(CommandOutcomeKind.EXIT)
             except EOFError:
-                return 0
+                return CommandOutcome(CommandOutcomeKind.EXIT)
             if not question:
                 continue
             if question.startswith("/"):
@@ -211,8 +212,10 @@ async def run_tui(context: CliContext, *, status_enabled: bool = True) -> int:
                         await _start_queued(
                             context, controller, shlex.split(question)[2]
                         )
-                    elif await dispatch_slash_command(context, question) == "exit":
-                        return 0
+                    else:
+                        outcome = await dispatch_slash_command(context, question)
+                        if outcome.kind is not CommandOutcomeKind.HANDLED:
+                            return outcome
                 except (ValueError, OSError) as exc:
                     error(console, exc)
                 continue
@@ -657,10 +660,12 @@ async def _answer_input_request(
             for option in options
             if isinstance(option, dict) and option.get("label")
         ]
-        menu = "\n".join(
-            f"  {index}. {label}" for index, label in enumerate(labels, 1)
+        menu = "\n".join(f"  {index}. {label}" for index, label in enumerate(labels, 1))
+        suffix = (
+            "comma-separated choices or free text"
+            if raw.get("multiple")
+            else "choice number or free text"
         )
-        suffix = "comma-separated choices or free text" if raw.get("multiple") else "choice number or free text"
         answer = await terminal_runner(
             lambda: context.console.input(f"{prompt}\n{menu}\n{suffix}: ")
         )

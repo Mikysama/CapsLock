@@ -4,6 +4,25 @@
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-07-24
+
+### Added
+
+- 新增 inline/fullscreen 共用的类型化斜杠命令注册表、usage、分组、可用性约束、异步 handler 和 Application session 导航结果。
+- 新增 `/resume`、`/btw`、`/compact`、`/new`、`/copy`、`/export`、`/branch`、`/context`、`/worktree`、`/rewind`、`/stats` 和 `/doctor`。
+- 新增 session lineage、active compaction state、context snapshots、隐藏维护 run 和 `session_rewind` Action 审计。
+
+### Changed
+
+- workspace schema 升至 9；backup、portable archive 和 session export 升至格式 4并继续读取格式 3。
+- `/btw` 使用隔离 FAST 工具循环并复用普通 Agent Markdown/工具结果渲染；正文不写入 transcript、memory 或审计事件。
+- fullscreen 禁用兼容性不一致的 DEC 2026 synchronized-output，保留普通差分刷新。
+
+### Compatibility
+
+- config 5、memory schema 3、JSONL schema 3 和 plugin protocol 4 保持不变；workspace v6/v7/v8 使用 backup-first 事务迁移至 v9。
+- 新命令只提供规范名称，不增加 `/continue`、`/clear` 或 `/fork` alias。
+
 ## [2.3.1] - 2026-07-24
 
 ### Changed

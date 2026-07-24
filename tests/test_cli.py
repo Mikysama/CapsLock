@@ -131,6 +131,18 @@ def test_slash_command_catalog_has_no_removed_aliases() -> None:
     expected = {
         "/help",
         "/status",
+        "/resume",
+        "/btw",
+        "/compact",
+        "/new",
+        "/copy",
+        "/export",
+        "/branch",
+        "/context",
+        "/worktree",
+        "/rewind",
+        "/stats",
+        "/doctor",
         "/model",
         "/permissions",
         "/approvals",
@@ -149,8 +161,17 @@ def test_slash_command_catalog_has_no_removed_aliases() -> None:
     assert {item.path for item in COMMANDS} == expected
     assert resolve_command("/status") is not None
     assert resolve_command("/quit") is not None
-    assert command_completions("/s") == ["/status", "/skills", "/sources"]
-    for removed in ("/cost", "/context", "/tasks", "/changes", "/commands", "/web"):
+    assert command_completions("/s") == ["/status", "/stats", "/skills", "/sources"]
+    for removed in (
+        "/cost",
+        "/continue",
+        "/clear",
+        "/fork",
+        "/tasks",
+        "/changes",
+        "/commands",
+        "/web",
+    ):
         assert resolve_command(removed) is None
 
 
@@ -740,7 +761,7 @@ def test_inline_command_menu_refreshes_for_fast_typing_exact_match_and_delete() 
         pipe.send_text("/")
         await wait_for(inputs, [item.path for item in COMMANDS])
         pipe.send_text("sta")
-        await wait_for(inputs, ["/status"])
+        await wait_for(inputs, ["/status", "/stats"])
         pipe.send_text("tus")
         await wait_for(inputs, ["/status "])
         pipe.send_bytes(b"\x7f")

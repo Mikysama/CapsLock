@@ -79,6 +79,15 @@ class WorkspaceApplication:
         )
         self.close_client = close_client
 
+    @property
+    def repositories(self) -> WorkspaceRepositories:
+        """Command-service persistence surface owned by this application."""
+        return self._repositories
+
+    @property
+    def memory_repositories(self) -> MemoryRepositories:
+        return self._memory_repositories
+
     @classmethod
     async def open(
         cls,

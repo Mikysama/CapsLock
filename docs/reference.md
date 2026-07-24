@@ -4,7 +4,7 @@
 
 ## 稳定契约
 
-CapsLock 2.3.1 支持 Linux/macOS 与 Python 3.12。当前开发协议为 `config_version = 5`、workspace schema 8、memory schema 3、portable archive 3、JSONL schema 3 和插件 manifest/protocol/grant 4。config v3/v4 与 workspace schema v6/v7 使用 backup-first 自动迁移；删除的 Python 接口不提供兼容入口。
+CapsLock 2.4.0 支持 Linux/macOS 与 Python 3.12。当前开发协议为 `config_version = 5`、workspace schema 9、memory schema 3、portable archive 4、session export 4、JSONL schema 3 和插件 manifest/protocol/grant 4。config v3/v4 与 workspace schema v6/v7/v8 使用 backup-first 自动迁移；删除的 Python 接口不提供兼容入口。
 
 公开运行入口为 `AgentSession.run_stream(RunRequest)`。CLI 通过应用查询面读取状态，不应依赖 repository 聚合对象。
 
@@ -83,6 +83,18 @@ pending -> approved -> running -> completed
 | --- | --- |
 | `/help` | 显示命令。 |
 | `/status` | 汇总 session、workspace、model、permissions、context、usage、tasks 和 queue。 |
+| `/resume [session-id-prefix\|query]` | 选择或解析当前 workspace 的历史 session，并在关闭当前 Application 后切换。 |
+| `/btw <question>` | 使用隔离的 FAST 工具循环回答临时问题；正文不进入 transcript 或 memory。 |
+| `/compact [focus instructions]` | 压缩较早历史并原子更新当前 session 的 active compaction。 |
+| `/new` | 关闭当前 Application 并创建空白 session。 |
+| `/copy [N]` | 将最近第 N 条可见 assistant 回答复制到剪贴板。 |
+| `/export [workspace-relative-path]` | 将当前 session 导出为 JSON 与 Markdown。 |
+| `/branch [title]` | 从当前逻辑上下文创建并切换到派生 session。 |
+| `/context` | 展示稳定上下文快照、预算分类和 active compaction。 |
+| `/worktree [list\|create <name>\|exit ...]` | 查看或通过审批管理当前 session 的 worktree。 |
+| `/rewind [run-id-prefix]` | 从早期 run 创建派生 session，并在安全校验与确认后恢复文件。 |
+| `/stats [workspace\|session]` | 汇总主运行指标，并单列 maintenance 用量。 |
+| `/doctor [--network]` | 在 TUI 中运行只读诊断；默认不联网。 |
 | `/model [deepseek-v4-flash\|deepseek-v4-pro]` | 查看或切换当前 session 的模型；无参数时打开选择器。 |
 | `/permissions [full|approve|ask]` | 无参数时打开权限选择框；带参数时直接切换。 |
 | `/approvals` | 处理非交互运行留下的待审批动作。 |
@@ -98,7 +110,7 @@ pending -> approved -> running -> completed
 | `/exit` | 退出 TUI。 |
 | `/quit` | 退出 TUI，与 `/exit` 等价。 |
 
-命令目录不提供额外 alias，也不提供独立 `/cost`、`/context`、`/tasks`、`/changes`、`/commands` 或 `/web` 页面。
+命令目录不提供额外 alias；`/continue`、`/clear`、`/fork`、`/cost`、`/tasks`、`/changes`、`/commands` 或 `/web` 不解析。
 
 `/model` 只接受 `deepseek-v4-flash` 和 `deepseek-v4-pro`。选择写入当前
 session，恢复后继续生效；新 session 使用配置默认模型。运行中的模型会话保持
@@ -207,7 +219,7 @@ ToolLoop 每个模型或工具阶段写 `run_steps`。只有 completed 且带 ch
 
 调度器按契约顺序返回结果，兄弟任务失败不会互相取消，父运行取消会传播到全部未完成子任务。子快照排除 `.git`、`.capslock`、环境文件和符号链接，并使用自己的 workspace/memory 数据库。`AgentOutputVerifier` 校验输出对象、allowlist 路径、必需检查、文件大小和 SHA-256；未通过的输出只返回失败诊断。
 
-workspace schema 8 使用 Agent、Tool invocation、input request、task dependency 和 session worktree 表保存可恢复状态、审计与验证结果。portable archive 默认不包含 artifact 正文。
+workspace schema 9 使用 Agent、Tool invocation、input request、task dependency、session lineage、active compaction、context snapshot 和 session worktree 表保存可恢复状态、审计与验证结果。portable archive 默认不包含 artifact 正文。
 
 ## 记忆契约
 
@@ -230,7 +242,7 @@ workspace schema 8 使用 Agent、Tool invocation、input request、task depende
 
 工作区数据库使用 application ID `0x434C4B32`，记忆数据库使用 `0x434C4D32`。两者开启 foreign keys、WAL 和 5 秒 busy timeout；记忆库额外开启 secure delete 并设置文件权限 `0600`。
 
-应用先读取 application ID 和 schema version，确认是当前格式后才切换 WAL。workspace schema 为 6，memory schema 为 3；其他 application ID 或 schema 只报错，不修改原数据库。
+应用先读取 application ID 和 schema version，确认是当前格式或可迁移的 v6/v7/v8 后才切换 WAL。workspace schema 为 9，memory schema 为 3；其他 application ID 或 schema 只报错，不修改原数据库。
 
 portable import 使用 archive ID 幂等记录。相同 ID 与内容跳过，同 ID 不同内容确定性重映射并重写引用。running run 转为 interrupted，approved/running action 转为 pending；导入的历史副作用不能在目标工作区执行 undo。
 

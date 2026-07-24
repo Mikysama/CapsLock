@@ -342,6 +342,10 @@ class SnapshotRepository(Repository):
         "sources",
         "tool_calls",
         "citations",
+        "context_compactions",
+        "session_lineage",
+        "session_context_state",
+        "context_snapshots",
         "run_governance",
         "tool_call_attempts",
     )
@@ -376,6 +380,7 @@ def _decode(record: dict[str, Any]) -> dict[str, Any]:
         "arguments_json",
         "limits_json",
         "history_json",
+        "summary_json",
     ):
         if record.get(key):
             record[key.removesuffix("_json")] = json.loads(record.pop(key))

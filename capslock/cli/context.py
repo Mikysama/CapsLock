@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from rich.console import Console
 
@@ -15,6 +16,8 @@ class CliContext:
     console: Console
     session: AgentSession
     queries: WorkspaceQueries | None = None
+    ui: Any = None
+    application: Any = None
 
     def __post_init__(self) -> None:
         if self.queries is None:

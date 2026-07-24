@@ -13,6 +13,7 @@ from ...domain import (
     RunStepStatus,
     WorkItemInfo,
     WorkItemStatus,
+    RunKind,
 )
 
 
@@ -28,6 +29,7 @@ def work_item(row) -> WorkItemInfo:
         current_run_id=row["current_run_id"],
         parent_work_item_id=row["parent_work_item_id"],
         error=row["error"],
+        kind=RunKind(row["kind"]),
     )
 
 
@@ -49,6 +51,7 @@ def run(row) -> RunInfo:
         parent_run_id=row["parent_run_id"],
         resume_from_step_id=row["resume_from_step_id"],
         stop_reason=row["stop_reason"],
+        kind=RunKind(row["kind"]),
     )
 
 

@@ -6,31 +6,78 @@ import json
 import shlex
 
 from . import actions
-from .commands import COMMANDS, resolve_command
+from .commands import (
+    COMMANDS,
+    CommandAvailability,
+    CommandOutcome,
+    CommandOutcomeKind,
+    register_handler,
+    resolve_command,
+)
 from .context import CliContext
 from .memory import memory_command
 from .skills import skills_command
 from .views.workflow import StatusView, render_queue, render_status
 
 
-async def dispatch_slash_command(context: CliContext, text: str) -> str:
+async def dispatch_slash_command(context: CliContext, text: str) -> CommandOutcome:
     spec = resolve_command(text)
     if spec is None:
         context.console.print("[warning]Unknown command. Use /help.[/]")
-        return "handled"
+        return CommandOutcome()
     parts = shlex.split(text)
-    name = spec.path
-    if name in {"/exit", "/quit"}:
-        return "exit"
-    if name == "/help":
-        for item in COMMANDS:
-            context.console.print(f"[command]{item.path:<14}[/] {item.description}")
-    elif name == "/status":
+    if spec.availability is CommandAvailability.IDLE_ONLY:
+        if (
+            context.session.engine.active
+            or await context.session.sessions.has_active_work(
+                context.session.session_id
+            )
+        ):
+            raise ValueError(
+                f"{spec.path} is available only while the foreground run is idle"
+            )
+    if spec.path in {"/resume", "/new", "/branch", "/rewind", "/worktree"}:
+        processes = getattr(context.session, "process_manager", None)
+        if processes is not None and processes.has_active(context.session.session_id):
+            raise ValueError("cannot navigate while background Shell jobs are active")
+        children = await context.require_queries().collaboration_tasks(
+            context.session.session_id
+        )
+        if any(
+            item["state"] in {"created", "running", "waiting_approval"}
+            for item in children
+        ):
+            raise ValueError("cannot navigate while child Agents are active")
+    if spec.handler is None:
+        raise RuntimeError(f"command handler is not registered: {spec.path}")
+    return await spec.handler(context, parts, text)
+
+
+async def _handled(function, *args) -> CommandOutcome:
+    await function(*args)
+    return CommandOutcome()
+
+
+async def _help(context, parts, raw):
+    if len(parts) != 1:
+        raise ValueError("usage: /help")
+    for item in COMMANDS:
+        context.console.print(f"[command]{item.path:<16}[/] {item.description}")
+    return CommandOutcome()
+
+
+async def _exit(context, parts, raw):
+    return CommandOutcome(CommandOutcomeKind.EXIT)
+
+
+async def _builtin(context, parts, raw):
+    name = parts[0]
+    if name == "/status":
         await _status(context)
     elif name == "/model":
-        await actions.model_command(context, text)
+        await actions.model_command(context, raw)
     elif name == "/permissions":
-        await actions.permissions(context, text)
+        await actions.permissions(context, raw)
     elif name == "/approvals":
         if len(parts) == 3 and parts[1] == "approve":
             await actions.approve_action(context, parts[2])
@@ -44,26 +91,25 @@ async def dispatch_slash_command(context: CliContext, text: str) -> str:
     elif name == "/queue":
         await _queue(context, parts)
     elif name == "/memory":
-        await memory_command(context, text)
+        await memory_command(context, raw)
     elif name == "/skills":
-        await skills_command(context, text)
+        await skills_command(context, raw)
     elif name == "/agents":
         await _agents(context, parts)
     elif name == "/sources":
         await actions.render_sources(context)
     elif name == "/mcp":
-        await actions.mcp_command(context, text)
+        await actions.mcp_command(context, raw)
     elif name == "/diff":
         await actions.show_git_diff(context)
     elif name == "/undo":
         await actions.undo(context)
     elif name == "/rename":
         if len(parts) < 2:
-            context.console.print("[error]Usage:[/] /rename <title>")
-        else:
-            session = await context.session.rename(" ".join(parts[1:]))
-            context.console.print(f"[success]Renamed:[/] {session.title}")
-    return "handled"
+            raise ValueError("usage: /rename <title>")
+        session = await context.session.rename(" ".join(parts[1:]))
+        context.console.print(f"[success]Renamed:[/] {session.title}")
+    return CommandOutcome()
 
 
 async def _status(context: CliContext) -> None:
@@ -236,3 +282,42 @@ async def _queue(context: CliContext, parts: list[str]) -> None:
     raise ValueError(
         "usage: /queue [start <id>|cancel <id>|move <id> <position>|retry <run-id>]"
     )
+
+
+# Registration stays at the boundary so the catalog has no dependency on CLI services.
+from . import new_commands as _new  # noqa: E402
+
+register_handler("/help", _help)
+register_handler("/exit", _exit)
+register_handler("/quit", _exit)
+for _path in (
+    "/status",
+    "/model",
+    "/permissions",
+    "/approvals",
+    "/queue",
+    "/memory",
+    "/skills",
+    "/agents",
+    "/sources",
+    "/mcp",
+    "/diff",
+    "/undo",
+    "/rename",
+):
+    register_handler(_path, _builtin)
+for _path, _handler in {
+    "/resume": _new.resume,
+    "/btw": _new.btw,
+    "/compact": _new.compact,
+    "/new": _new.new_session,
+    "/copy": _new.copy_answer,
+    "/export": _new.export_session,
+    "/branch": _new.branch,
+    "/context": _new.context_info,
+    "/worktree": _new.worktree,
+    "/rewind": _new.rewind,
+    "/stats": _new.stats,
+    "/doctor": _new.doctor,
+}.items():
+    register_handler(_path, _handler)

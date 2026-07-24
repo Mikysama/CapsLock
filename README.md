@@ -2,7 +2,7 @@
 
 CapsLock 是一个本机工作区 Agent，用于读取和修改代码、检索证据、运行受沙箱保护的 Shell、查询代码语义，以及按审批策略访问 Web、MCP 和本地插件。Tool Runtime v2 将工具契约、参数级策略、可恢复暂停、调度、富结果与审计统一到异步执行链。
 
-当前源码版本为 `2.3.1`。本次补丁统一优化 inline/fullscreen 上下文用户消息样式，并修复 fullscreen 空闲动画持续重绘造成的终端高 CPU 与卡顿。Tool Runtime v2、config 5、workspace schema 8、memory schema 3 和 plugin protocol 4 均保持兼容。架构与部署边界见 [当前开发者文档](docs/development/v2/current.md)，发布摘要见 [2.3.1 发布说明](docs/releases/v2.3.1.md)。
+当前源码版本为 `2.4.0`。本次升级引入 inline/fullscreen 共用的类型化斜杠命令系统，新增 session 导航、临时 `/btw` 问答、上下文压缩、派生与回退、worktree、统计和诊断命令。workspace schema 升至 9，portable/backup/session export 升至格式 4；config 5、memory schema 3、JSONL schema 3 和 plugin protocol 4 保持不变。架构与部署边界见 [当前开发者文档](docs/development/v2/current.md)，发布摘要见 [2.4.0 发布说明](docs/releases/v2.4.0.md)。
 
 正式支持矩阵：Linux/macOS，Python 3.12。发布 CI 会在两个操作系统组合中执行测试、构建、依赖审计和安装冒烟。
 
@@ -79,11 +79,13 @@ printf '%s\n' "总结最近的改动" | capslock exec --json
 TUI 保留以下命令：
 
 ```text
-/help /status /permissions /approvals /queue /memory /skills /agents
-/model /sources /mcp /diff /undo /rename /exit /quit
+/help /status /resume /btw /compact /new /copy /export /branch /context
+/worktree /rewind /stats /doctor /permissions /approvals /queue /memory
+/skills /agents /model /sources /mcp /diff /undo /rename
+/exit /quit
 ```
 
-队列、任务、上下文和费用汇总到 `/status`。动作越过当前权限边界时，TUI 会在同一个 run 内阻塞，显示动作类型、风险、目标及最多 40 行/4 KiB 的脱敏命令或 diff 预览，然后给出默认拒绝的选择框；原始参数、完整文件内容和凭据不会进入预览。批准或拒绝的最终状态会返回模型继续推理，不再先结束为 `waiting_approval`。取消选择、EOF 和 Ctrl-C 均按拒绝处理。`/approvals` 仅处理非交互 `exec`、portable import 或旧数据留下的待审批动作。裸 `/permissions` 使用方向键选择权限模式，显式 `/permissions approve|ask|full` 仍可快捷切换。portable import 恢复的 queued work 只会在 `/queue start <id>` 后进入前台 worker，旧批准必须重新确认。旧的 `/cost`、`/context`、`/tasks`、`/changes`、`/commands`、`/web`、`/approve` 和 `/reject` 不再解析。`/exit` 与 `/quit` 均可退出 TUI。
+`/resume`、`/new`、`/branch` 和 `/rewind` 通过关闭当前 Application 并重新组合目标 session 完成导航；`/btw` 使用隔离 FAST 工具循环，正文只在当前 TUI 展示，审计用量与主统计分离。动作越过当前权限边界时，TUI 会在同一个 run 内阻塞，显示动作类型、风险、目标及最多 40 行/4 KiB 的脱敏命令或 diff 预览，然后给出默认拒绝的选择框；原始参数、完整文件内容和凭据不会进入预览。批准或拒绝的最终状态会返回模型继续推理。旧的 `/cost`、`/continue`、`/clear`、`/fork`、`/tasks`、`/changes`、`/commands`、`/web`、`/approve` 和 `/reject` 不解析。
 
 输入 `/model` 可用方向键在 `deepseek-v4-flash` 与 `deepseek-v4-pro` 之间选择，也可直接执行 `/model <name>`。选择仅作用于当前 session 并随 session 恢复；新 session 仍采用配置默认模型。活跃 run 期间不能切换，队列中尚未开始的请求会使用切换后的模型。
 
@@ -367,7 +369,7 @@ CapsLock 只接受 canonical 布局：
 - 事件日志：`.capslock/state/events.jsonl`
 - 用户记忆：`${CAPSLOCK_HOME:-~/.capslock}/state/memory.sqlite3`
 
-工作区库和记忆库使用不同的 SQLite `application_id`。当前 workspace schema 为 8，memory schema 为 3；workspace schema v6/v7 在 WAL checkpoint 和 SQLite backup 后事务升级。旧 application ID、其他非当前 schema 或未知已有表均拒绝启动。
+工作区库和记忆库使用不同的 SQLite `application_id`。当前 workspace schema 为 9，memory schema 为 3；workspace schema v6/v7/v8 在 WAL checkpoint 和 SQLite backup 后事务升级。旧 application ID、其他非当前 schema 或未知已有表均拒绝启动。
 
 ## 架构
 

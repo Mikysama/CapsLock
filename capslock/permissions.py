@@ -50,7 +50,11 @@ class ApprovalPolicy:
                 "Modifies workspace files.",
                 "CapsLock records original content; use /undo while the file is unchanged.",
             )
-        if action in {ActionType.WORKTREE_CREATE, ActionType.WORKTREE_EXIT}:
+        if action in {
+            ActionType.WORKTREE_CREATE,
+            ActionType.WORKTREE_EXIT,
+            ActionType.SESSION_REWIND,
+        }:
             return RiskAssessment(
                 "high",
                 "Changes the active Git workspace and may create or remove a branch.",
@@ -85,7 +89,7 @@ class ApprovalPolicy:
         )
 
     def requires_approval(self, mode: PermissionMode, action: ActionType) -> bool:
-        if action is ActionType.WORKTREE_EXIT:
+        if action in {ActionType.WORKTREE_EXIT, ActionType.SESSION_REWIND}:
             return True
         assessment = self.assess(action)
         if mode is PermissionMode.FULL_ACCESS:

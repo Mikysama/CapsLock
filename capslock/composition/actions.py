@@ -16,6 +16,7 @@ from ..application.action_system import (
     WebActionHandler,
     WorktreeActionHandler,
     WorkspaceExecutionScope,
+    SessionRewindActionHandler,
     resolve_named_credential,
 )
 from ..configuration import Settings
@@ -144,6 +145,7 @@ def build_action_factory(
                 max_per_session=settings.worktree.max_per_session,
                 process_manager=processes,
             ),
+            SessionRewindActionHandler(),
         ]
         coordinator = ActionCoordinator(
             repositories.actions,

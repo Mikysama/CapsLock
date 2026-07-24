@@ -4,14 +4,24 @@ from __future__ import annotations
 
 import uuid
 
-from ...domain import WorkItemInfo, WorkItemStatus, validate_work_item_transition
+from ...domain import (
+    RunKind,
+    WorkItemInfo,
+    WorkItemStatus,
+    validate_work_item_transition,
+)
 from .core import Repository, now
 from .workflow_records import work_item
 
 
 class WorkItemRepository(Repository):
     async def enqueue(
-        self, session_id: str, question: str, *, parent_work_item_id: str | None = None
+        self,
+        session_id: str,
+        question: str,
+        *,
+        parent_work_item_id: str | None = None,
+        kind: RunKind = RunKind.AGENT,
     ) -> WorkItemInfo:
         identifier, timestamp = uuid.uuid4().hex, now()
         async with self.database.transaction() as connection:
@@ -22,12 +32,13 @@ class WorkItemRepository(Repository):
                 )
             ).fetchone()
             await connection.execute(
-                """INSERT INTO work_items(id,session_id,question,status,position,parent_work_item_id,created_at,updated_at)
-                   VALUES(?,?,?,'queued',?,?,?,?)""",
+                """INSERT INTO work_items(id,session_id,question,kind,status,position,parent_work_item_id,created_at,updated_at)
+                   VALUES(?,?,?,?,'queued',?,?,?,?)""",
                 (
                     identifier,
                     session_id,
                     question,
+                    kind.value,
                     int(row[0]),
                     parent_work_item_id,
                     timestamp,

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from rich.syntax import Syntax
+from rich.markdown import Markdown as RichMarkdown
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -16,8 +17,10 @@ from textual.widgets.option_list import Option
 from ...domain import ActionRecord, ApprovalDecision, SessionInfo
 from ...models import SELECTABLE_MODELS
 from ...permissions import PermissionMode
+from ..presentation import ToolPresentation
 from .presentation import present_action
 from .rendering import TransparentBackground
+from ..views.conversation import tool_group
 
 
 class ContentScreen(ModalScreen[None]):
@@ -33,6 +36,66 @@ class ContentScreen(ModalScreen[None]):
             yield Static(self.dialog_title, classes="dialog-title")
             with VerticalScroll(classes="dialog-scroll"):
                 yield Static(self.content, markup=False)
+            yield Static("Esc close", classes="input-guide")
+
+    def action_dismiss_screen(self) -> None:
+        self.dismiss(None)
+
+
+class MarkdownContentScreen(ContentScreen):
+    """Scrollable content dialog rendered with the same Markdown engine as chat."""
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="dialog", classes="content-dialog"):
+            yield Static(self.dialog_title, classes="dialog-title")
+            with VerticalScroll(classes="dialog-scroll"):
+                yield Static(
+                    TransparentBackground(
+                        RichMarkdown(
+                            self.content,
+                            code_theme="ansi_dark",
+                            hyperlinks=True,
+                        )
+                    )
+                )
+            yield Static("Esc close", classes="input-guide")
+
+
+class SideQuestionScreen(ModalScreen[None]):
+    """Isolated side-agent result using the normal assistant Markdown renderer."""
+
+    BINDINGS = [Binding("escape", "dismiss_screen", "Close")]
+
+    def __init__(
+        self,
+        question: str,
+        content: str,
+        tools: Sequence[ToolPresentation] = (),
+    ) -> None:
+        super().__init__()
+        self.question = question
+        self.content = content
+        self.tools = tuple(tools)
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="dialog", classes="content-dialog"):
+            yield Static(
+                Text.assemble(("/btw ", "bold #C4A96B"), (self.question, "dim")),
+                classes="dialog-title",
+            )
+            with VerticalScroll(classes="dialog-scroll"):
+                if self.tools:
+                    yield Static(tool_group(list(self.tools), expanded=True))
+                yield Static(
+                    TransparentBackground(
+                        RichMarkdown(
+                            self.content,
+                            code_theme="ansi_dark",
+                            hyperlinks=True,
+                        )
+                    ),
+                    classes="message assistant",
+                )
             yield Static("Esc close", classes="input-guide")
 
     def action_dismiss_screen(self) -> None:
@@ -135,7 +198,9 @@ class InputRequestScreen(ModalScreen[dict[str, object] | None]):
             with Horizontal(classes="dialog-actions"):
                 yield Button("Cancel", id="cancel", variant="default")
                 yield Button("Submit", id="submit", variant="primary")
-            yield Static("All questions require an answer · Esc cancel", classes="input-guide")
+            yield Static(
+                "All questions require an answer · Esc cancel", classes="input-guide"
+            )
 
     def on_mount(self) -> None:
         self.query_one("#input-answer-0", Input).focus()
@@ -155,12 +220,14 @@ class InputRequestScreen(ModalScreen[dict[str, object] | None]):
                 for item in options
                 if isinstance(item, dict)
             ]
+
             def resolve(token: str) -> str:
                 return (
                     values[int(token) - 1]
                     if token.isdigit() and 1 <= int(token) <= len(values)
                     else token
                 )
+
             answers[str(question.get("id"))] = (
                 [resolve(item.strip()) for item in entered.split(",")]
                 if question.get("multiple")

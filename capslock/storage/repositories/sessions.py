@@ -156,6 +156,155 @@ class SessionRepository(Repository):
                 "UPDATE sessions SET updated_at=? WHERE id=?", (timestamp, session_id)
             )
 
+    async def assistant_answers(self, session_id: str) -> list[dict[str, object]]:
+        rows = await self.all(
+            """SELECT m.id,m.run_id,m.content,m.created_at FROM messages m
+               JOIN runs r ON r.id=m.run_id WHERE m.session_id=? AND m.role='assistant'
+               AND r.kind IN ('agent','session_seed') ORDER BY m.id DESC""",
+            (session_id,),
+        )
+        return [dict(row) for row in rows]
+
+    async def derive(
+        self,
+        session_id: str,
+        *,
+        title: str,
+        derivation_kind: str,
+        target_run_id: str | None = None,
+    ) -> SessionInfo:
+        if derivation_kind not in {"branch", "rewind"}:
+            raise ValueError("invalid session derivation kind")
+        parent = await self.require(session_id)
+        normalized = normalize_session_title(title)
+        identifier, seed_run, seed_work, timestamp = (
+            uuid.uuid4().hex,
+            uuid.uuid4().hex,
+            uuid.uuid4().hex,
+            now(),
+        )
+        async with self.database.transaction() as connection:
+            if target_run_id is not None:
+                target = await (
+                    await connection.execute(
+                        "SELECT id FROM runs WHERE id=? AND session_id=? AND kind='agent' AND status='completed'",
+                        (target_run_id, session_id),
+                    )
+                ).fetchone()
+                if target is None:
+                    raise ValueError(
+                        "target run is not a completed agent run in this session"
+                    )
+            await connection.execute(
+                """INSERT INTO sessions(id,model,created_at,updated_at,title,title_source,title_updated_at)
+                   VALUES(?,?,?,?,?,'manual',?)""",
+                (identifier, parent.model, timestamp, timestamp, normalized, timestamp),
+            )
+            await connection.execute(
+                "INSERT INTO session_search(session_id,kind,content,created_at) VALUES(?, 'title', ?, ?)",
+                (identifier, normalized, timestamp),
+            )
+            await connection.execute(
+                """INSERT INTO work_items(id,session_id,question,kind,status,position,created_at,updated_at)
+                   VALUES(?,?,?,'session_seed','completed',0,?,?)""",
+                (
+                    seed_work,
+                    identifier,
+                    f"Derived from {session_id[:8]}",
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            await connection.execute(
+                """INSERT INTO runs(id,session_id,work_item_id,question,kind,status,started_at,finished_at,duration_ms)
+                   VALUES(?,?,?,?,'session_seed','completed',?,?,0)""",
+                (
+                    seed_run,
+                    identifier,
+                    seed_work,
+                    f"Derived from {session_id[:8]}",
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            boundary = ""
+            values: list[object] = [session_id]
+            if target_run_id is not None:
+                boundary = " AND m.id<=(SELECT max(id) FROM messages WHERE run_id=?)"
+                values.append(target_run_id)
+            rows = await (
+                await connection.execute(
+                    """SELECT m.id,m.role,m.content,m.created_at FROM messages m
+                   JOIN runs r ON r.id=m.run_id WHERE m.session_id=?
+                   AND r.kind IN ('agent','session_seed')"""
+                    + boundary
+                    + " ORDER BY m.id",
+                    tuple(values),
+                )
+            ).fetchall()
+            message_map: dict[int, int] = {}
+            for row in rows:
+                cursor = await connection.execute(
+                    "INSERT INTO messages(session_id,run_id,role,content,created_at) VALUES(?,?,?,?,?)",
+                    (
+                        identifier,
+                        seed_run,
+                        row["role"],
+                        row["content"],
+                        row["created_at"],
+                    ),
+                )
+                message_map[int(row["id"])] = int(cursor.lastrowid)
+                await connection.execute(
+                    "INSERT INTO session_search(session_id,kind,content,created_at) VALUES(?,'message',?,?)",
+                    (identifier, row["content"], row["created_at"]),
+                )
+            await connection.execute(
+                "INSERT INTO session_lineage(session_id,parent_session_id,target_run_id,derivation_kind,created_at) VALUES(?,?,?,?,?)",
+                (identifier, session_id, target_run_id, derivation_kind, timestamp),
+            )
+            active = await (
+                await connection.execute(
+                    """SELECT c.* FROM session_context_state s JOIN context_compactions c
+                   ON c.id=s.active_compaction_id WHERE s.session_id=? AND c.valid=1""",
+                    (session_id,),
+                )
+            ).fetchone()
+            if (
+                active is not None
+                and active["first_message_id"] in message_map
+                and active["last_message_id"] in message_map
+            ):
+                compact_id = f"compact_{uuid.uuid4().hex}"
+                await connection.execute(
+                    """INSERT INTO context_compactions(id,session_id,run_id,first_message_id,last_message_id,
+                       summary_json,source_compaction_id,input_tokens,output_tokens,source_tokens,target_tokens,
+                       model_profile,source_digest,focus_instructions,valid,created_at)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?)""",
+                    (
+                        compact_id,
+                        identifier,
+                        seed_run,
+                        message_map[int(active["first_message_id"])],
+                        message_map[int(active["last_message_id"])],
+                        active["summary_json"],
+                        None,
+                        active["input_tokens"],
+                        active["output_tokens"],
+                        active["source_tokens"],
+                        active["target_tokens"],
+                        active["model_profile"],
+                        active["source_digest"],
+                        active["focus_instructions"],
+                        timestamp,
+                    ),
+                )
+                await connection.execute(
+                    "INSERT INTO session_context_state(session_id,active_compaction_id,updated_at) VALUES(?,?,?)",
+                    (identifier, compact_id, timestamp),
+                )
+        return await self.require(identifier)
+
     async def messages(
         self,
         session_id: str,
@@ -163,14 +312,15 @@ class SessionRepository(Repository):
         *,
         excluded_run_ids: set[str] | None = None,
     ) -> list[dict[str, str]]:
-        query = "SELECT role,content FROM messages WHERE session_id=?"
+        query = """SELECT m.role,m.content FROM messages m JOIN runs r ON r.id=m.run_id
+                   WHERE m.session_id=? AND r.kind NOT IN ('local_command','side_question')"""
         values: list[object] = [session_id]
         if excluded_run_ids:
             query += (
-                " AND run_id NOT IN (" + ",".join("?" for _ in excluded_run_ids) + ")"
+                " AND m.run_id NOT IN (" + ",".join("?" for _ in excluded_run_ids) + ")"
             )
             values.extend(sorted(excluded_run_ids))
-        query += " ORDER BY id DESC LIMIT ?"
+        query += " ORDER BY m.id DESC LIMIT ?"
         values.append(limit)
         rows = await self.all(query, tuple(values))
         return [
@@ -184,16 +334,16 @@ class SessionRepository(Repository):
         *,
         excluded_run_ids: set[str] | None = None,
     ) -> list[dict[str, object]]:
-        query = "SELECT id,role,content,run_id FROM messages WHERE session_id=?"
+        query = """SELECT m.id,m.role,m.content,m.run_id FROM messages m
+                   JOIN runs r ON r.id=m.run_id WHERE m.session_id=?
+                   AND r.kind NOT IN ('local_command','side_question')"""
         values: list[object] = [session_id]
         if excluded_run_ids:
             query += (
-                " AND run_id NOT IN ("
-                + ",".join("?" for _ in excluded_run_ids)
-                + ")"
+                " AND m.run_id NOT IN (" + ",".join("?" for _ in excluded_run_ids) + ")"
             )
             values.extend(sorted(excluded_run_ids))
-        query += " ORDER BY id"
+        query += " ORDER BY m.id"
         return [
             {
                 "id": int(row["id"]),
@@ -207,11 +357,12 @@ class SessionRepository(Repository):
     async def message_count(
         self, session_id: str, *, excluded_run_ids: set[str] | None = None
     ) -> int:
-        query = "SELECT count(*) FROM messages WHERE session_id=?"
+        query = """SELECT count(*) FROM messages m JOIN runs r ON r.id=m.run_id
+                   WHERE m.session_id=? AND r.kind NOT IN ('local_command','side_question')"""
         values: list[object] = [session_id]
         if excluded_run_ids:
             query += (
-                " AND run_id NOT IN (" + ",".join("?" for _ in excluded_run_ids) + ")"
+                " AND m.run_id NOT IN (" + ",".join("?" for _ in excluded_run_ids) + ")"
             )
             values.extend(sorted(excluded_run_ids))
         row = await self.one(query, tuple(values))
@@ -284,7 +435,7 @@ class SessionRepository(Repository):
         rows = await self.all(
             """SELECT m.id,m.role,m.content,m.run_id,m.created_at,r.status,r.error_message
                FROM messages m JOIN runs r ON r.id=m.run_id
-               WHERE m.session_id=? ORDER BY m.id""",
+               WHERE m.session_id=? AND r.kind NOT IN ('local_command','side_question') ORDER BY m.id""",
             (session_id,),
         )
         for row in rows:
@@ -306,7 +457,7 @@ class SessionRepository(Repository):
 
         runs = await self.all(
             """SELECT id,question,status,started_at,error_message
-               FROM runs WHERE session_id=? ORDER BY started_at""",
+               FROM runs WHERE session_id=? AND kind='agent' ORDER BY started_at""",
             (session_id,),
         )
         for index, row in enumerate(runs):

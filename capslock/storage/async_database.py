@@ -95,8 +95,8 @@ class AsyncDatabase:
         if (
             self.label == "workspace"
             and app_id == self.application_id
-            and version in {6, 7}
-            and self.schema_version == 8
+            and version in {6, 7, 8}
+            and self.schema_version == 9
         ):
             from .upgrades import upgrade_workspace_schema
 

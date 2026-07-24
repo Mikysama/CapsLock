@@ -317,50 +317,70 @@ async def async_main(
                     session_id = session.id
             finally:
                 await repositories.close()
-        application = await create_application(
-            workspace, settings, session_id, layout=layout
-        )
-        async with application:
-            from .context import CliContext
+        from .commands import CommandOutcomeKind
+        from .context import CliContext
 
-            context = CliContext(output, application.session, application.queries)
-            if args.command == "exec":
-                from .exec import run_exec
-
-                return await run_exec(
-                    context,
-                    args.question,
-                    json_events=args.json,
-                    spinner=not args.no_spinner,
-                    quiet=args.quiet,
-                    limits=_exec_limits(application.session.default_limits, args),
-                )
-            from .status import dynamic_status_supported
-
-            status_enabled = (
-                not args.no_spinner
-                and not args.quiet
-                and dynamic_status_supported(
-                    output.file, output_is_tty=output.is_terminal
-                )
+        next_session_id = session_id
+        while True:
+            application = await create_application(
+                workspace, settings, next_session_id, layout=layout
             )
-            if ui_mode == "fullscreen":
-                try:
-                    from .fullscreen_tui import run_fullscreen_tui
+            async with application:
+                context = CliContext(
+                    output,
+                    application.session,
+                    application.queries,
+                    application=application,
+                )
+                if args.command == "exec":
+                    from .exec import run_exec
 
-                    return await run_fullscreen_tui(
-                        context, status_enabled=status_enabled
+                    return await run_exec(
+                        context,
+                        args.question,
+                        json_events=args.json,
+                        spinner=not args.no_spinner,
+                        quiet=args.quiet,
+                        limits=_exec_limits(application.session.default_limits, args),
                     )
-                except Exception as exc:
-                    errors.print(
-                        "[error]Fullscreen TUI error:[/] "
-                        f"{exc}\nUse `capslock --ui inline` to run the "
-                        "terminal-native UI."
-                    )
-                    return 1
-            from .tui import run_tui
+                from .status import dynamic_status_supported
 
-            return await run_tui(context, status_enabled=status_enabled)
+                status_enabled = (
+                    not args.no_spinner
+                    and not args.quiet
+                    and dynamic_status_supported(
+                        output.file, output_is_tty=output.is_terminal
+                    )
+                )
+                if ui_mode == "fullscreen":
+                    try:
+                        from .fullscreen_tui import run_fullscreen_tui
+
+                        outcome = await run_fullscreen_tui(
+                            context, status_enabled=status_enabled
+                        )
+                    except Exception as exc:
+                        errors.print(
+                            "[error]Fullscreen TUI error:[/] "
+                            f"{exc}\nUse `capslock --ui inline` to run the "
+                            "terminal-native UI."
+                        )
+                        return 1
+                else:
+                    from .tui import run_tui
+
+                    outcome = await run_tui(context, status_enabled=status_enabled)
+                current = application.session
+                if outcome.kind is CommandOutcomeKind.NEW_SESSION:
+                    await current.delete_if_empty()
+                    next_session_id = None
+                elif outcome.kind is CommandOutcomeKind.SWITCH_SESSION:
+                    if not outcome.session_id:
+                        raise RuntimeError("session switch outcome has no target")
+                    next_session_id = outcome.session_id
+                else:
+                    await current.delete_if_empty()
+                    return 0
     except KeyboardInterrupt:
         errors.print("\n[warning]Cancelled.[/]")
         return 130
@@ -395,6 +415,7 @@ async def _sessions(
         rename_session,
         search_sessions,
     )
+
     repositories = await WorkspaceRepositories.open(
         layout.database, workspace=workspace
     )

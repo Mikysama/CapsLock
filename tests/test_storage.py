@@ -206,7 +206,7 @@ def test_current_state_reopens_without_mutation(tmp_path: Path) -> None:
         try:
             workspace_version = (await workspace.fetch_one("PRAGMA user_version"))[0]
             memory_version = (await memory.fetch_one("PRAGMA user_version"))[0]
-            assert workspace_version == WORKSPACE_SCHEMA_VERSION == 8
+            assert workspace_version == WORKSPACE_SCHEMA_VERSION == 9
             assert memory_version == MEMORY_SCHEMA_VERSION == 3
         finally:
             await workspace.close()
@@ -216,9 +216,9 @@ def test_current_state_reopens_without_mutation(tmp_path: Path) -> None:
         workspace = await WorkspaceDatabase.open(workspace_path)
         memory = await MemoryDatabase.open(memory_path)
         try:
-            assert (
-                await workspace.fetch_one("PRAGMA user_version")
-            )[0] == WORKSPACE_SCHEMA_VERSION
+            assert (await workspace.fetch_one("PRAGMA user_version"))[
+                0
+            ] == WORKSPACE_SCHEMA_VERSION
             assert (await memory.fetch_one("PRAGMA user_version"))[0] == 3
         finally:
             await workspace.close()
@@ -241,7 +241,7 @@ def test_session_export_includes_all_snapshot_tables(tmp_path: Path) -> None:
             target = await manager.export(session.id, "exports/session")
             document = json.loads((target / "session.json").read_text(encoding="utf-8"))
             assert document["format"] == "capslock-session-export"
-            assert document["version"] == 3
+            assert document["version"] == 4
             assert document["sessions"][0]["id"] == session.id
             assert document["messages"][0]["content"] == "Export this"
             assert document["runs"][0]["work_item_id"] == prepared.work_item.id

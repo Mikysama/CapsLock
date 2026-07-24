@@ -116,9 +116,7 @@ def test_environment_and_keyring_credentials_are_secret_safe(monkeypatch) -> Non
     assert not credential_status("keyring:primary").available
 
 
-def test_backup_verification_and_tamper_rejection(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_backup_verification_and_tamper_rejection(tmp_path: Path, monkeypatch) -> None:
     async def scenario() -> None:
         monkeypatch.setenv("CAPSLOCK_HOME", str(tmp_path / "home"))
         workspace = tmp_path / "workspace"
@@ -130,13 +128,15 @@ def test_backup_verification_and_tamper_rejection(
         memory = await MemoryRepositories.open(layout.user.memory)
         await repositories.close()
         await memory.close()
-        layout.config.write_text(f"config_version = {CONFIG_VERSION}\n", encoding="utf-8")
+        layout.config.write_text(
+            f"config_version = {CONFIG_VERSION}\n", encoding="utf-8"
+        )
         layout.local_mcp.parent.mkdir(parents=True, exist_ok=True)
         layout.local_mcp.write_text(
             '{"servers":{"demo":{"env":{"TOKEN":"mcp-secret"}}}}',
             encoding="utf-8",
         )
-        assert _version(layout.database) == WORKSPACE_SCHEMA_VERSION == 8
+        assert _version(layout.database) == WORKSPACE_SCHEMA_VERSION == 9
         assert _version(layout.user.memory) == MEMORY_SCHEMA_VERSION == 3
         service = LifecycleService(layout)
         backup = service.backup_create(tmp_path / "state.clbackup")
@@ -155,9 +155,7 @@ def test_backup_verification_and_tamper_rejection(
     asyncio.run(scenario())
 
 
-def test_non_current_database_schemas_are_rejected(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_non_current_database_schemas_are_rejected(tmp_path: Path, monkeypatch) -> None:
     async def scenario() -> None:
         monkeypatch.setenv("CAPSLOCK_HOME", str(tmp_path / "home"))
         workspace = tmp_path / "workspace"

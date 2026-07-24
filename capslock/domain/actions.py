@@ -19,6 +19,7 @@ class ActionType(StrEnum):
     MCP_CONNECT = "mcp_connect"
     MCP_CALL = "mcp_call"
     CREDENTIAL_ACCESS = "credential_access"
+    SESSION_REWIND = "session_rewind"
 
 
 class ActionStatus(StrEnum):

@@ -38,8 +38,8 @@ from .specs import (
 
 
 EXPORT_FORMAT = "capslock-lifecycle-export"
-ARCHIVE_VERSION = 3
-SUPPORTED_ARCHIVE_VERSIONS = frozenset({ARCHIVE_VERSION})
+ARCHIVE_VERSION = 4
+SUPPORTED_ARCHIVE_VERSIONS = frozenset({3, ARCHIVE_VERSION})
 MAX_ARCHIVE_RECORDS = 100_000
 
 
@@ -312,6 +312,7 @@ class PortableArchiveService:
                 connection.commit()
             finally:
                 connection.close()
+
 
 class LifecycleService:
     """Synchronous facade over backup and portable archive services."""

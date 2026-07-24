@@ -625,13 +625,17 @@ class AgentSession:
             + "\n</available-skills>"
         )
 
-    def _run_context(self, run_id: str) -> ExecutionContext:
+    def _run_context(
+        self,
+        run_id: str,
+        *,
+        model_session: Any = None,
+        artifacts: Any = ...,
+    ) -> ExecutionContext:
         classifier = None
-        if (
-            self.shell_classifier_factory is not None
-            and self._active_model_session is not None
-        ):
-            classifier = self.shell_classifier_factory(self._active_model_session)
+        classifier_session = model_session or self._active_model_session
+        if self.shell_classifier_factory is not None and classifier_session is not None:
+            classifier = self.shell_classifier_factory(classifier_session)
         context = ExecutionContext(
             session_id=self.session_id,
             run_id=run_id,
@@ -644,7 +648,7 @@ class AgentSession:
             skills=self.skill_service,
             permission_mode=self.permission_mode,
             collaboration=self.collaboration,
-            artifacts=self.artifacts,
+            artifacts=self.artifacts if artifacts is ... else artifacts,
             permission_engine=self.permission_engine,
             process_manager=self.process_manager,
             catalog=self.tools,

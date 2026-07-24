@@ -1,6 +1,6 @@
 # 当前运行内核与安全边界
 
-本文描述 CapsLock 2.3.1 的开发边界。产品在本机运行，支持直接能力工具、可审批 Action、受沙箱保护的通用 Shell、session 隔离后台进程、受管理 MCP/LSP 和单层子 Agent；不提供远程控制、后台 daemon 或第三方可执行 Hook。
+本文描述 CapsLock 2.4.0 的开发边界。产品在本机运行，支持直接能力工具、类型化斜杠命令、可审批 Action、受沙箱保护的通用 Shell、session 隔离后台进程、受管理 MCP/LSP 和单层子 Agent；不提供远程控制、后台 daemon 或第三方可执行 Hook。
 
 ## 模块边界
 
@@ -30,7 +30,7 @@ MCP 使用唯一的受管理长连接路径，负责 tools/resources discovery�
 
 ## 当前数据协议
 
-当前格式为 config 5、workspace schema 8、memory schema 3、portable archive 3、JSONL schema 3 和 plugin protocol 4。workspace 启动支持 backup-first、事务化的 v6/v7→v8 升级；config v3/v4 自动备份并转换为 v5。迁移失败保留原库和备份，不继续部分升级。
+当前格式为 config 5、workspace schema 9、memory schema 3、portable archive 4、session export 4、JSONL schema 3 和 plugin protocol 4。workspace 启动支持 backup-first、事务化的 v6/v7/v8→v9 升级；config v3/v4 自动备份并转换为 v5。迁移失败保留原库和备份，不继续部分升级。
 
 ## 发布门禁
 

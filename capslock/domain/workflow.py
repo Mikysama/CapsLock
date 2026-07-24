@@ -19,6 +19,13 @@ class WorkItemStatus(StrEnum):
     STOPPED = "stopped"
 
 
+class RunKind(StrEnum):
+    AGENT = "agent"
+    LOCAL_COMMAND = "local_command"
+    SIDE_QUESTION = "side_question"
+    SESSION_SEED = "session_seed"
+
+
 WORK_ITEM_TRANSITIONS: dict[WorkItemStatus, frozenset[WorkItemStatus]] = {
     WorkItemStatus.QUEUED: frozenset(
         {WorkItemStatus.RUNNING, WorkItemStatus.CANCELLED}
@@ -177,6 +184,7 @@ class WorkItemInfo:
     current_run_id: str | None = None
     parent_work_item_id: str | None = None
     error: str | None = None
+    kind: RunKind = RunKind.AGENT
 
 
 @dataclass(frozen=True)
@@ -227,3 +235,4 @@ class RunInfo:
     parent_run_id: str | None = None
     resume_from_step_id: str | None = None
     stop_reason: str | None = None
+    kind: RunKind = RunKind.AGENT

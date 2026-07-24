@@ -19,21 +19,27 @@ async def upgrade_workspace_schema(
     if source_version is None:
         row = await (await connection.execute("PRAGMA user_version")).fetchone()
         source_version = int(row[0])
-    if source_version not in {6, 7}:
+    if source_version not in {6, 7, 8}:
         raise ValueError(f"unsupported workspace upgrade source: {source_version}")
     checkpoint = await connection.execute("PRAGMA wal_checkpoint(FULL)")
     await checkpoint.close()
     await connection.commit()
-    backup = path.parent / "backups" / (
-        f"capslock-v{source_version}-"
-        + datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
-        + ".sqlite3"
+    backup = (
+        path.parent
+        / "backups"
+        / (
+            f"capslock-v{source_version}-"
+            + datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+            + ".sqlite3"
+        )
     )
     await asyncio.to_thread(_backup, path, backup)
     try:
         if source_version == 6:
             await connection.executescript(_UPGRADE_FIRST_STEP)
-        await connection.executescript(_UPGRADE_SECOND_STEP)
+        if source_version in {6, 7}:
+            await connection.executescript(_UPGRADE_SECOND_STEP)
+        await connection.executescript(_UPGRADE_THIRD_STEP)
     except BaseException:
         await connection.rollback()
         raise
@@ -368,6 +374,87 @@ CREATE TABLE session_worktrees (
 CREATE UNIQUE INDEX idx_session_worktree_active ON session_worktrees(session_id) WHERE active=1;
 
 PRAGMA user_version=8;
+COMMIT;
+PRAGMA legacy_alter_table=OFF;
+PRAGMA foreign_keys=ON;
+"""
+
+
+_UPGRADE_THIRD_STEP = """
+PRAGMA foreign_keys=OFF;
+PRAGMA legacy_alter_table=ON;
+BEGIN IMMEDIATE;
+
+ALTER TABLE work_items ADD COLUMN kind TEXT NOT NULL DEFAULT 'agent'
+  CHECK(kind IN ('agent','local_command','side_question','session_seed'));
+ALTER TABLE runs ADD COLUMN kind TEXT NOT NULL DEFAULT 'agent'
+  CHECK(kind IN ('agent','local_command','side_question','session_seed'));
+ALTER TABLE context_compactions ADD COLUMN focus_instructions TEXT;
+
+ALTER TABLE actions RENAME TO actions_v8;
+CREATE TABLE actions (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  action_type TEXT NOT NULL CHECK(action_type IN ('file_edit','file_create','notebook_edit','worktree_create','worktree_exit','command','web_search','web_fetch','mcp_connect','mcp_call','credential_access','session_rewind')),
+  status TEXT NOT NULL CHECK(status IN ('pending','approved','running','completed','failed','rejected','cancelled')),
+  result_kind TEXT,
+  summary TEXT NOT NULL,
+  request_json TEXT NOT NULL CHECK(json_valid(request_json)),
+  result_json TEXT CHECK(result_json IS NULL OR json_valid(result_json)),
+  risk_level TEXT,
+  risk_reason TEXT,
+  rollback TEXT,
+  error_code TEXT,
+  error_message TEXT,
+  created_at TEXT NOT NULL,
+  approved_at TEXT,
+  started_at TEXT,
+  finished_at TEXT,
+  reversed_at TEXT,
+  decided_at TEXT,
+  import_id TEXT REFERENCES lifecycle_imports(id) ON DELETE SET NULL,
+  historical_only INTEGER NOT NULL DEFAULT 0 CHECK(historical_only IN (0,1)),
+  requires_reapproval INTEGER NOT NULL DEFAULT 0 CHECK(requires_reapproval IN (0,1))
+) STRICT;
+INSERT INTO actions SELECT * FROM actions_v8;
+DROP TABLE actions_v8;
+CREATE INDEX idx_actions_session_created ON actions(session_id,created_at);
+CREATE INDEX idx_actions_run_status ON actions(run_id,status);
+
+CREATE TABLE session_lineage (
+  session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+  parent_session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  target_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+  derivation_kind TEXT NOT NULL CHECK(derivation_kind IN ('branch','rewind')),
+  created_at TEXT NOT NULL,
+  CHECK(session_id<>parent_session_id)
+) STRICT;
+CREATE INDEX idx_session_lineage_parent ON session_lineage(parent_session_id,created_at);
+CREATE TABLE session_context_state (
+  session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+  active_compaction_id TEXT REFERENCES context_compactions(id) ON DELETE SET NULL,
+  updated_at TEXT NOT NULL
+) STRICT;
+CREATE TABLE context_snapshots (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+  compaction_id TEXT REFERENCES context_compactions(id) ON DELETE SET NULL,
+  system_tokens INTEGER NOT NULL DEFAULT 0 CHECK(system_tokens>=0),
+  tool_tokens INTEGER NOT NULL DEFAULT 0 CHECK(tool_tokens>=0),
+  message_tokens INTEGER NOT NULL DEFAULT 0 CHECK(message_tokens>=0),
+  memory_tokens INTEGER NOT NULL DEFAULT 0 CHECK(memory_tokens>=0),
+  compaction_tokens INTEGER NOT NULL DEFAULT 0 CHECK(compaction_tokens>=0),
+  total_tokens INTEGER NOT NULL CHECK(total_tokens>=0),
+  input_budget INTEGER NOT NULL CHECK(input_budget>0),
+  trigger_tokens INTEGER NOT NULL CHECK(trigger_tokens>=0),
+  stable INTEGER NOT NULL DEFAULT 1 CHECK(stable IN (0,1)),
+  created_at TEXT NOT NULL
+) STRICT;
+CREATE INDEX idx_context_snapshots_session ON context_snapshots(session_id,created_at);
+
+PRAGMA user_version=9;
 COMMIT;
 PRAGMA legacy_alter_table=OFF;
 PRAGMA foreign_keys=ON;

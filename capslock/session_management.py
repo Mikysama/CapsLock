@@ -17,7 +17,7 @@ from .storage.memory_repositories import MemoryRepositories, workspace_key
 from .storage.repositories import WorkspaceRepositories
 
 SESSION_EXPORT_FORMAT = "capslock-session-export"
-SESSION_EXPORT_VERSION = 3
+SESSION_EXPORT_VERSION = 4
 
 
 class SessionManager:

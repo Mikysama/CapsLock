@@ -13,7 +13,12 @@ from textual.widgets import Static
 from capslock.cli.context import CliContext
 from capslock.cli.app import _ui_mode, build_parser
 from capslock.cli.commands import COMMANDS
-from capslock.cli.fullscreen_tui.app import CSS, CapsLockApp, run_fullscreen_tui
+from capslock.cli.fullscreen_tui.app import (
+    CSS,
+    CapsLockApp,
+    FullscreenCommandUI,
+    run_fullscreen_tui,
+)
 from capslock.cli.fullscreen_tui.models import (
     MessageKind,
     MessageViewModel,
@@ -23,7 +28,12 @@ from capslock.cli.fullscreen_tui.models import (
 )
 from capslock.cli.fullscreen_tui.presentation import present_action
 from capslock.cli.fullscreen_tui.rendering import TransparentBackground
-from capslock.cli.fullscreen_tui.screens import ApprovalScreen, ModelScreen
+from capslock.cli.fullscreen_tui.screens import (
+    ApprovalScreen,
+    MarkdownContentScreen,
+    ModelScreen,
+    SideQuestionScreen,
+)
 from capslock.cli.fullscreen_tui.widgets import (
     ActivityBar,
     CompletionBar,
@@ -439,7 +449,7 @@ def test_fullscreen_command_menu_is_vertical_complete_and_scrolls_selection() ->
             menu = app.query_one(CompletionBar)
             rendered = menu.query_one(".completion-content", Static).render().plain
             assert rendered.splitlines() == [
-                f"{'❯' if index == 0 else ' '} {item.path.ljust(12)}  {item.description}"
+                f"{'❯' if index == 0 else ' '} {item.path.ljust(max(len(command.path) for command in COMMANDS))}  {item.description}"
                 for index, item in enumerate(COMMANDS)
             ]
             assert "/quit" in rendered
@@ -449,6 +459,48 @@ def test_fullscreen_command_menu_is_vertical_complete_and_scrolls_selection() ->
             await pilot.pause()
             assert app._completion_index == len(COMMANDS) - 1
             assert menu.scroll_y > 0
+
+    asyncio.run(scenario())
+
+
+def test_fullscreen_command_ui_uses_markdown_content_screen() -> None:
+    async def scenario() -> None:
+        app = CapsLockApp(CliContext(make_console(), _Agent()))
+        async with app.run_test(size=(80, 24)) as pilot:
+            await FullscreenCommandUI(app).show_markdown(
+                "BTW", "# Result\n\n**important**"
+            )
+            await pilot.pause()
+            assert isinstance(app.screen, MarkdownContentScreen)
+            rendered = "\n".join(
+                item.render_line(line).text
+                for item in app.screen.query(Static)
+                for line in range(item.size.height)
+            )
+            assert "Result" in rendered
+            assert "important" in rendered
+            assert "**important**" not in rendered
+
+    asyncio.run(scenario())
+
+
+def test_fullscreen_side_question_uses_agent_markdown_screen() -> None:
+    async def scenario() -> None:
+        app = CapsLockApp(CliContext(make_console(), _Agent()))
+        async with app.run_test(size=(80, 24)) as pilot:
+            await FullscreenCommandUI(app).show_agent_response(
+                "BTW", "what changed?", "**important**\n\n- first item"
+            )
+            await pilot.pause()
+            assert isinstance(app.screen, SideQuestionScreen)
+            rendered = "\n".join(
+                item.render_line(line).text
+                for item in app.screen.query(Static)
+                for line in range(item.size.height)
+            )
+            assert "important" in rendered
+            assert "first item" in rendered
+            assert "**important**" not in rendered
 
     asyncio.run(scenario())
 
