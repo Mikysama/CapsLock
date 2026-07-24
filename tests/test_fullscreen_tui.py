@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -24,6 +25,7 @@ from capslock.cli.fullscreen_tui.presentation import present_action
 from capslock.cli.fullscreen_tui.rendering import TransparentBackground
 from capslock.cli.fullscreen_tui.screens import ApprovalScreen, ModelScreen
 from capslock.cli.fullscreen_tui.widgets import (
+    ActivityBar,
     CompletionBar,
     Composer,
     MessageWidget,
@@ -270,6 +272,69 @@ def test_fullscreen_layout_at_supported_sizes(size: tuple[int, int]) -> None:
             assert app.query_one(SessionHeader).display
             assert app.query_one(TranscriptView).display
             assert app.query_one(Composer).has_focus
+
+    asyncio.run(scenario())
+
+
+def test_fullscreen_activity_timer_only_runs_while_spinner_is_visible() -> None:
+    async def scenario() -> None:
+        app = CapsLockApp(CliContext(make_console(), _Agent()))
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            assert app._activity_timer is not None
+            assert not app._activity_timer._active.is_set()
+
+            app.state = replace(app.state, activity="Thinking")
+            await app._sync()
+            assert app._activity_timer._active.is_set()
+
+            app.state = replace(app.state, activity=None)
+            await app._sync()
+            assert not app._activity_timer._active.is_set()
+
+    asyncio.run(scenario())
+
+
+def test_fullscreen_activity_bar_does_not_repaint_when_already_clear() -> None:
+    bar = ActivityBar()
+    updates: list[object] = []
+    bar.update = updates.append  # type: ignore[method-assign]
+
+    active = replace(TuiState(), activity="Thinking")
+    assert bar.update_state(active, enabled=True)
+    assert not bar.update_state(TuiState(), enabled=True)
+    assert not bar.update_state(TuiState(), enabled=True)
+    assert len(updates) == 2
+
+
+def test_fullscreen_message_widget_skips_unchanged_updates() -> None:
+    async def scenario() -> None:
+        app = CapsLockApp(CliContext(make_console(), _Agent()))
+        async with app.run_test(size=(80, 24)):
+            message = MessageViewModel("message", MessageKind.USER, "hello")
+            widget = MessageWidget(message)
+            updates: list[object] = []
+            widget.update = updates.append  # type: ignore[method-assign]
+
+            widget.update_message(message)
+            widget.update_message(replace(message, text="updated"))
+            assert len(updates) == 1
+
+    asyncio.run(scenario())
+
+
+def test_fullscreen_user_prompt_background_fills_transcript_width() -> None:
+    async def scenario() -> None:
+        agent = _Agent()
+        agent.queries.sessions = _Sessions([{"role": "user", "content": "hello"}])
+        app = CapsLockApp(CliContext(make_console(), agent))
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            transcript = app.query_one(TranscriptView)
+            message = app.query_one(MessageWidget)
+
+            assert message.outer_size.width == transcript.content_region.width
+            assert message.styles.background.hex == "#E0E0E0"
 
     asyncio.run(scenario())
 
@@ -527,15 +592,22 @@ def test_fullscreen_tui_uses_alternate_screen_driver(
     assert options == {"mouse": True}
 
 
-def test_fullscreen_tui_uses_only_terminal_default_or_transparent_backgrounds() -> None:
+def test_fullscreen_tui_only_paints_the_user_prompt_background() -> None:
     background_rules = [
         line.strip() for line in CSS.splitlines() if "background:" in line
     ]
     assert background_rules
     assert all(
-        line.endswith(("background: transparent;", "background: ansi_default;"))
+        line.endswith(
+            (
+                "background: transparent;",
+                "background: ansi_default;",
+                "background: #E0E0E0;",
+            )
+        )
         for line in background_rules
     )
+    assert background_rules.count("background: #E0E0E0;") == 1
 
 
 def test_fullscreen_tui_root_uses_terminal_default_background() -> None:

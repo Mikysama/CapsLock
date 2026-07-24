@@ -1,6 +1,6 @@
 # 当前运行内核与安全边界
 
-本文描述 CapsLock 2.3.0 的开发边界。产品在本机运行，支持直接能力工具、可审批 Action、受沙箱保护的通用 Shell、session 隔离后台进程、受管理 MCP/LSP 和单层子 Agent；不提供远程控制、后台 daemon 或第三方可执行 Hook。
+本文描述 CapsLock 2.3.1 的开发边界。产品在本机运行，支持直接能力工具、可审批 Action、受沙箱保护的通用 Shell、session 隔离后台进程、受管理 MCP/LSP 和单层子 Agent；不提供远程控制、后台 daemon 或第三方可执行 Hook。
 
 ## 模块边界
 

@@ -69,6 +69,7 @@ from .widgets import (
 
 
 _Result = TypeVar("_Result")
+_ACTIVITY_FPS = 12
 
 
 CSS = """
@@ -104,7 +105,7 @@ Screen {
 }
 .message.user {
     border-left: thick #8CB9DC;
-    background: transparent;
+    background: #E0E0E0;
     padding: 1;
 }
 .message.assistant {
@@ -304,7 +305,9 @@ class CapsLockApp(App[int]):
         self._history_index = len(self._input_history)
         await self._authorizers.__aenter__()
         await self.controller.start()
-        self._activity_timer = self.set_interval(1 / 30, self._refresh_activity)
+        self._activity_timer = self.set_interval(
+            1 / _ACTIVITY_FPS, self._refresh_activity, pause=True
+        )
         await self._sync()
         self.query_one(Composer).focus()
 
@@ -423,9 +426,7 @@ class CapsLockApp(App[int]):
             if item.event.kind is AgentEventKind.WAITING_INPUT:
                 request = item.event.data.get("request", {})
                 questions = (
-                    request.get("questions", [])
-                    if isinstance(request, dict)
-                    else []
+                    request.get("questions", []) if isinstance(request, dict) else []
                 )
                 answers = await self._modal_wait(InputRequestScreen(questions))
                 if answers is not None:
@@ -735,9 +736,14 @@ class CapsLockApp(App[int]):
             width=width,
             context_limit=self.agent_session.context_budget.input_budget,
         )
-        self.query_one(ActivityBar).update_state(
+        activity = self.query_one(ActivityBar).update_state(
             self.state, enabled=self.status_enabled
         )
+        if self._activity_timer is not None:
+            if activity:
+                self._activity_timer.resume()
+            else:
+                self._activity_timer.pause()
 
 
 class _SessionPickerApp(App[str | None]):

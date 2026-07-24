@@ -68,9 +68,13 @@ class MessageWidget(Static):
     def __init__(self, message: MessageViewModel) -> None:
         super().__init__(classes=f"message {message.kind.value}")
         self.message_id = message.id
+        self._message: MessageViewModel | None = None
         self.update_message(message)
 
     def update_message(self, message: MessageViewModel) -> None:
+        if message == self._message:
+            return
+        self._message = message
         self.set_classes(f"message {message.kind.value}")
         if message.kind is MessageKind.ASSISTANT:
             self.update(TransparentBackground(RichMarkdown(message.text or " ")))
@@ -283,15 +287,22 @@ class CompletionBar(VerticalScroll):
 
 
 class ActivityBar(Static):
-    frame = 0
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)
+        self.frame = 0
+        self._clear = True
 
-    def update_state(self, state: TuiState, *, enabled: bool) -> None:
-        if enabled and state.activity and not state.has_streaming_answer:
+    def update_state(self, state: TuiState, *, enabled: bool) -> bool:
+        active = bool(enabled and state.activity and not state.has_streaming_answer)
+        if active:
             glyph = SPINNER_FRAMES[self.frame % len(SPINNER_FRAMES)]
             self.frame += 1
             self.update(Text(f"{glyph} {state.activity}…", style="bold #72A7CC"))
-        else:
+            self._clear = False
+        elif not self._clear:
             self.update(" ")
+            self._clear = True
+        return active
 
 
 class StatusBar(Static):

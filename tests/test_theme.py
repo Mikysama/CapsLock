@@ -1,8 +1,9 @@
 from io import StringIO
 import re
 
-from capslock.cli.views.conversation import assistant_content
+from capslock.cli.views.conversation import assistant_content, user_message
 from capslock.theme import (
+    RICH_BACKGROUND_STYLE_DEFINITIONS,
     RICH_BOLD_STYLE_DEFINITIONS,
     RICH_STYLE_DEFINITIONS,
     RICH_THEME,
@@ -29,6 +30,7 @@ def test_theme_declares_transparent_layers_and_requested_tokens() -> None:
     assert THEME_TOKENS["background"] == "transparent"
     assert THEME_TOKENS["surface"] == "transparent"
     assert THEME_TOKENS["overlay"] == "transparent"
+    assert THEME_TOKENS["userPromptBackground"] == "#E0E0E0"
     assert THEME_TOKENS["textPrimary"] == "#DCE6F2"
     assert THEME_TOKENS["borderFocus"] == "#8CB9DC"
     assert THEME_TOKENS["agent"] == "#8FB6D6"
@@ -40,6 +42,8 @@ def test_theme_declares_transparent_layers_and_requested_tokens() -> None:
     assert RICH_THEME.styles["reasoning"].italic
     assert not RICH_THEME.styles["answer"].dim
     assert not RICH_THEME.styles["answer"].italic
+    assert RICH_BACKGROUND_STYLE_DEFINITIONS["user.background"] == "#E0E0E0"
+    assert RICH_THEME.styles["user.background"].bgcolor is not None
     component_styles = set(RICH_STYLE_DEFINITIONS) | set(RICH_BOLD_STYLE_DEFINITIONS)
     assert all(RICH_THEME.styles[name].bgcolor is None for name in component_styles)
 
@@ -96,4 +100,28 @@ def test_markdown_inline_code_and_code_blocks_never_set_a_black_background() -> 
         48 in parameters
         or any(40 <= value <= 47 or 100 <= value <= 107 for value in parameters)
         for parameters in sgr_parameters
+    )
+
+
+def test_inline_user_prompt_background_fills_row_next_to_blue_marker() -> None:
+    stream = StringIO()
+    terminal = make_console(
+        file=stream,
+        color_system="truecolor",
+        force_terminal=True,
+        no_color=False,
+        width=20,
+    )
+    lines = terminal.render_lines(user_message("hello"), terminal.options, pad=False)
+
+    assert len(lines) == 1
+    assert lines[0][0].text == "▌"
+    assert lines[0][0].style is not None
+    assert lines[0][0].style.bgcolor is None
+    row = "".join(segment.text for segment in lines[0])
+    assert row.startswith("▌  ❯ hello")
+    assert len(row) == terminal.options.max_width
+    assert all(
+        segment.style is not None and segment.style.bgcolor is not None
+        for segment in lines[0][1:]
     )

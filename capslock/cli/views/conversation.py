@@ -19,21 +19,40 @@ from ..presentation import ToolPresentation, present_action
 
 @dataclass(frozen=True)
 class InlineMessageCard:
-    """A background-free Textual-style left border for static scrollback."""
+    """A Textual-style left border for static scrollback."""
 
     content: Any
     border_style: str
+    background_style: str | None = None
 
     def __rich_console__(
         self, console: Console, options: ConsoleOptions
     ) -> RenderResult:
         child_options = options.update_width(max(1, options.max_width - 3))
         lines = console.render_lines(self.content, child_options, pad=False)
-        style = console.get_style(self.border_style)
+        border_style = console.get_style(self.border_style)
+        background_style = (
+            console.get_style(self.background_style) if self.background_style else None
+        )
         for line in lines:
-            yield Segment("▌ ", style)
-            yield Segment(" ")
-            yield from line
+            if background_style is None:
+                yield Segment("▌ ", border_style)
+                yield Segment(" ")
+                yield from line
+                yield Segment.line()
+                continue
+
+            # Keep the prompt surface flush with the blue marker and fill the row.
+            yield Segment("▌", border_style)
+            yield Segment("  ", background_style)
+            for segment in Segment.adjust_line_length(
+                line, child_options.max_width, background_style
+            ):
+                yield Segment(
+                    segment.text,
+                    (segment.style or background_style) + background_style,
+                    segment.control,
+                )
             yield Segment.line()
 
 
@@ -41,6 +60,7 @@ def user_message(text: str) -> InlineMessageCard:
     return message_card(
         Text.assemble(("❯ ", "user.label"), (text, "user")),
         border_style="border.focus",
+        background_style="user.background",
     )
 
 
@@ -65,10 +85,12 @@ def system_message(content: object, *, status: str = "info") -> InlineMessageCar
     return message_card(content, border_style=style)
 
 
-def message_card(content: object, *, border_style: str) -> InlineMessageCard:
+def message_card(
+    content: object, *, border_style: str, background_style: str | None = None
+) -> InlineMessageCard:
     """Mirror the Textual message card while retaining terminal scrollback."""
 
-    return InlineMessageCard(content, border_style)
+    return InlineMessageCard(content, border_style, background_style)
 
 
 def reasoning_summary(text: str, *, status: str = "complete") -> Text:

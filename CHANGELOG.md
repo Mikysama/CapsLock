@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+## [2.3.1] - 2026-07-24
+
+### Changed
+
+- inline 与 fullscreen 的上下文用户 prompt 行新增浅灰背景，并紧贴左侧蓝色标记铺满消息宽度。
+- fullscreen 空闲时暂停 ActivityBar 动画，活动动画降至 12 FPS，并跳过未变化消息的重复重绘，避免终端持续高 CPU 和无效输出。
+
 ## [2.3.0] - 2026-07-24
 
 ### Added

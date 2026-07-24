@@ -2,7 +2,7 @@
 
 CapsLock 是一个本机工作区 Agent，用于读取和修改代码、检索证据、运行受沙箱保护的 Shell、查询代码语义，以及按审批策略访问 Web、MCP 和本地插件。Tool Runtime v2 将工具契约、参数级策略、可恢复暂停、调度、富结果与审计统一到异步执行链。
 
-当前源码版本为 `2.3.0`。本次升级引入直接能力工具、动态 Tool Catalog、持久化审批/输入恢复、通用 Shell、受管 MCP/LSP、文档与 Worktree/异步 Agent 工具，并将外部协议基础设施与 Agent runtime 分层。config v3/v4 与 workspace schema v6/v7 会先备份再自动升级；已删除的 Python 工具 API 和插件 v3 不提供兼容入口。架构与部署边界见 [当前开发者文档](docs/development/v2/current.md)，发布摘要见 [2.3.0 发布说明](docs/releases/v2.3.0.md)。
+当前源码版本为 `2.3.1`。本次补丁统一优化 inline/fullscreen 上下文用户消息样式，并修复 fullscreen 空闲动画持续重绘造成的终端高 CPU 与卡顿。Tool Runtime v2、config 5、workspace schema 8、memory schema 3 和 plugin protocol 4 均保持兼容。架构与部署边界见 [当前开发者文档](docs/development/v2/current.md)，发布摘要见 [2.3.1 发布说明](docs/releases/v2.3.1.md)。
 
 正式支持矩阵：Linux/macOS，Python 3.12。发布 CI 会在两个操作系统组合中执行测试、构建、依赖审计和安装冒烟。
 
@@ -101,9 +101,10 @@ Markdown 渲染，reasoning 与连续只读/搜索工具在完成后折叠；`Ct
 截断的动作摘要、命令或 diff，并始终默认拒绝。终端小于 48×14 时只显示尺寸
 提示，不允许进行审批。
 
-inline 与 fullscreen 均不指定固定背景色；fullscreen 根层使用终端原生默认背景，
-所有容器、消息、输入区和模态框保持透明。Markdown、代码高亮和输入光标行只移除
-字符背景，不改变前景色、粗细、斜体、下划线或链接样式。
+inline 与 fullscreen 的根层仍使用终端原生默认背景，仅上下文中的用户 prompt 行
+使用浅灰背景并与左侧蓝色标记对齐；其余容器、消息、输入区和模态框保持透明。
+Markdown、代码高亮和输入光标行只移除字符背景，不改变前景色、粗细、斜体、
+下划线或链接样式。
 
 `capslock resume` 使用方向键选择历史 session 并重放完整可见对话；也可显式传入完整 session ID 或唯一前缀。已完成消息以及中断/失败 run 的用户问题和已产生文本都会进入恢复视图与后续模型上下文。
 

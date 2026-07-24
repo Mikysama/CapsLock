@@ -1,6 +1,6 @@
 # CapsLock v2 开发者文档
 
-本目录记录 CapsLock v2 的架构、开发过程、安全边界与发布验证。当前稳定版本为 `2.3.0`，开发协议为 Tool Runtime v2、config 5、workspace schema 8 和 plugin protocol 4。
+本目录记录 CapsLock v2 的架构、开发过程、安全边界与发布验证。当前稳定版本为 `2.3.1`，开发协议为 Tool Runtime v2、config 5、workspace schema 8 和 plugin protocol 4。
 
 ## 文档入口
 
@@ -17,6 +17,7 @@
 - [v2.2.3 发布说明](../../releases/v2.2.3.md)：fullscreen 模态命令消息泵修复、终端默认背景和字符级透明渲染。
 - [v2.2.4 发布说明](../../releases/v2.2.4.md)：运行内核、上下文预算、插件隔离、事件耐久化和当前协议边界。
 - [v2.3.0 发布说明](../../releases/v2.3.0.md)：Tool Runtime v2、直接能力工具、Shell/MCP/LSP、可恢复交互与能力包重构。
+- [v2.3.1 发布说明](../../releases/v2.3.1.md)：用户消息背景、fullscreen 空闲动画与流式消息重绘优化。
 
 ## 当前稳定边界
 

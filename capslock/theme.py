@@ -16,6 +16,7 @@ THEME_TOKENS: Mapping[str, str] = {
     "background": "transparent",
     "surface": "transparent",
     "overlay": "transparent",
+    "userPromptBackground": "#E0E0E0",
     "textPrimary": "#DCE6F2",
     "textSecondary": "#A9B8C8",
     "textMuted": "#718397",
@@ -88,6 +89,9 @@ RICH_BOLD_STYLE_DEFINITIONS: Mapping[str, str] = {
     "running.bold": THEME_TOKENS["running"],
     "waiting.bold": THEME_TOKENS["waiting"],
 }
+RICH_BACKGROUND_STYLE_DEFINITIONS: Mapping[str, str] = {
+    "user.background": THEME_TOKENS["userPromptBackground"],
+}
 
 
 def _make_rich_theme(color_system: object = None) -> Theme:
@@ -113,6 +117,11 @@ def _make_rich_theme(color_system: object = None) -> Theme:
         if target is not None:
             color = color.downgrade(target)
         styles[name] = RichStyle(color=color, bold=True)
+    for name, value in RICH_BACKGROUND_STYLE_DEFINITIONS.items():
+        color = Color.parse(value)
+        if target is not None:
+            color = color.downgrade(target)
+        styles[name] = RichStyle(bgcolor=color)
     return Theme(styles)
 
 
