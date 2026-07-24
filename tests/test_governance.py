@@ -16,10 +16,25 @@ from capslock.domain import AgentEvent, AgentEventKind, RunLimits, RunMode
 from capslock.runtime import RunRequest
 from capslock.runtime.model import ModelMessage, ModelResponse, ModelToolCall
 from capslock.storage.repositories import WorkspaceRepositories
-from capslock.tooling.async_core import Tool, ToolRegistry, ToolResult
+from capslock.tooling.contracts import ToolOutcome, define_tool
+from capslock.tooling.executor import ToolRuntime
 from tests.helpers import FakeChatModel, answer, workflow_service
 from tests.test_runtime import make_agent
 from rich.console import Console
+
+ToolRegistry = ToolRuntime
+
+
+def Tool(name, description, schema, execute, **kwargs):
+    return define_tool(name, description, schema, execute, **kwargs)
+
+
+def ToolResult(ok, data, error=None):
+    return (
+        ToolOutcome.success(data)
+        if ok
+        else ToolOutcome.failure(error or "failed", data=data)
+    )
 
 
 @pytest.mark.parametrize("version", (1, 2))
@@ -44,7 +59,7 @@ def test_fresh_schema_has_governance_tables(tmp_path: Path) -> None:
         )
         try:
             version = await repositories.database.fetch_one("PRAGMA user_version")
-            assert version[0] == 6
+            assert version[0] == 8
             for table in ("run_governance", "tool_call_attempts"):
                 assert await repositories.database.fetch_one(
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",

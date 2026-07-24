@@ -11,6 +11,7 @@ from .core import (
 from .credentials import CredentialActionHandler, resolve_named_credential
 from .external import McpActionHandler, WebActionHandler
 from .files import FileActionHandler
+from .worktrees import WorkspaceExecutionScope, WorktreeActionHandler
 
 __all__ = [
     "ActionCoordinator",
@@ -25,5 +26,7 @@ __all__ = [
     "McpActionHandler",
     "TEMPLATES",
     "WebActionHandler",
+    "WorkspaceExecutionScope",
+    "WorktreeActionHandler",
     "resolve_named_credential",
 ]

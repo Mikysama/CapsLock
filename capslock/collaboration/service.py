@@ -41,6 +41,7 @@ class CollaborationService:
         max_depth: int = 1,
         child_runner: ChildRunner | None = None,
         verifier: AgentOutputVerifier | None = None,
+        background_enabled: bool = True,
     ) -> None:
         if max_children < 1 or max_concurrency < 1:
             raise ValueError("collaboration limits must be positive")
@@ -53,14 +54,20 @@ class CollaborationService:
         self.max_depth = max_depth
         self.child_runner = child_runner
         self.verifier = verifier or AgentOutputVerifier()
+        self.background_enabled = background_enabled
         self._tasks: dict[str, asyncio.Task[ValidatedAgentOutput]] = {}
         self._contracts: dict[str, AgentTaskContract] = {}
 
     async def delegate(
-        self, contracts: Sequence[AgentTaskContract]
+        self,
+        contracts: Sequence[AgentTaskContract],
+        *,
+        background: bool = False,
     ) -> list[ValidatedAgentOutput]:
         if not contracts:
             raise ValueError("at least one child task is required")
+        if background and not self.background_enabled:
+            raise ValueError("background child Agents are disabled")
         if len(contracts) > self.max_children:
             raise ValueError(
                 f"at most {self.max_children} child tasks may be delegated"
@@ -117,6 +124,21 @@ class CollaborationService:
         for contract, task in zip(contracts, tasks, strict=True):
             self._tasks[contract.task_id] = task
             self._contracts[contract.task_id] = contract
+        if background:
+            for contract, task in zip(contracts, tasks, strict=True):
+                task.add_done_callback(
+                    lambda completed, task_id=contract.task_id: self._background_done(
+                        task_id, completed
+                    )
+                )
+            return [
+                ValidatedAgentOutput(
+                    task_id=contract.task_id,
+                    state=AgentTaskState.CREATED,
+                    summary="background child Agent started",
+                )
+                for contract in contracts
+            ]
         try:
             return await asyncio.gather(*tasks)
         except asyncio.CancelledError:
@@ -129,6 +151,57 @@ class CollaborationService:
             for contract in contracts:
                 self._tasks.pop(contract.task_id, None)
                 self._contracts.pop(contract.task_id, None)
+
+    def _background_done(
+        self, task_id: str, task: asyncio.Task[ValidatedAgentOutput]
+    ) -> None:
+        self._tasks.pop(task_id, None)
+        self._contracts.pop(task_id, None)
+        if not task.cancelled():
+            try:
+                task.exception()
+            except Exception:
+                pass
+
+    async def status(
+        self,
+        task_id: str,
+        *,
+        parent_run_id: str | None = None,
+        session_id: str | None = None,
+        wait: bool = False,
+        timeout: float = 60,
+    ) -> dict[str, Any]:
+        record = await self.repository.get_task(task_id)
+        if record is None:
+            raise ValueError("child task does not exist")
+        if parent_run_id is not None and str(record["parent_run_id"]) != parent_run_id:
+            raise ValueError("child task does not belong to this run")
+        if session_id is not None:
+            owner = await self.repository.one(
+                "SELECT session_id FROM runs WHERE id=?",
+                (str(record["parent_run_id"]),),
+            )
+            if owner is None or str(owner["session_id"]) != session_id:
+                raise ValueError("child task does not belong to this session")
+        if parent_run_id is None and session_id is None:
+            raise ValueError("child task ownership scope is required")
+        if wait and task_id in self._tasks:
+            try:
+                async with asyncio.timeout(min(max(timeout, 0.1), 60)):
+                    await asyncio.shield(self._tasks[task_id])
+            except TimeoutError:
+                pass
+            record = await self.repository.get_task(task_id)
+            assert record is not None
+        output = await self.repository.get_output(task_id)
+        return {
+            "task_id": task_id,
+            "state": str(record["state"]),
+            "error": record.get("error"),
+            "child_run_id": record.get("child_run_id"),
+            "output": output.as_dict() if output is not None else None,
+        }
 
     async def cancel(self, task_id: str) -> None:
         task = self._tasks.get(task_id)

@@ -11,6 +11,8 @@ from .action import (
 from .collaboration import CollaborationPort
 from .memory import MemoryPort, SkillPort, SkillRegistryPort
 from .model import GovernancePort, ModelAuditPort
+from .lsp import LspClientPort
+from .mcp import ManagedMcpResource, ManagedMcpTool, McpClientPort, McpServer
 from .workflow import (
     RunJournal,
     RunJournalRepositoryPort,
@@ -30,6 +32,11 @@ __all__ = [
     "ActionRepositoryPort",
     "CollaborationPort",
     "GovernancePort",
+    "LspClientPort",
+    "ManagedMcpResource",
+    "ManagedMcpTool",
+    "McpClientPort",
+    "McpServer",
     "MemoryPort",
     "ModelAuditPort",
     "RunJournal",

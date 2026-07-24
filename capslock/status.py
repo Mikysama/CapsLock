@@ -80,7 +80,10 @@ def status_for_event(
         return AgentStatus.ANALYZING, None
     if kind is AgentEventKind.TEXT_DELTA:
         return AgentStatus.GENERATING, None
-    if kind is AgentEventKind.WAITING_APPROVAL:
+    if kind in {
+        AgentEventKind.WAITING_APPROVAL,
+        AgentEventKind.WAITING_INPUT,
+    }:
         return AgentStatus.WAITING, None
     if kind is AgentEventKind.LIMIT_REACHED:
         return AgentStatus.WAITING, None

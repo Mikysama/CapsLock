@@ -2,7 +2,7 @@
 
 WORKSPACE_APPLICATION_ID = 0x434C4B32  # CLK2
 MEMORY_APPLICATION_ID = 0x434C4D32  # CLM2
-WORKSPACE_SCHEMA_VERSION = 6
+WORKSPACE_SCHEMA_VERSION = 8
 MEMORY_SCHEMA_VERSION = 3
 
 WORKSPACE_SCHEMA = """
@@ -45,7 +45,7 @@ CREATE TABLE work_items (
   id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
   question TEXT NOT NULL,
-  status TEXT NOT NULL CHECK(status IN ('queued','running','waiting_approval','completed','failed','cancelled','interrupted','stopped')),
+  status TEXT NOT NULL CHECK(status IN ('queued','running','waiting_approval','waiting_input','completed','failed','cancelled','interrupted','stopped')),
   position INTEGER NOT NULL CHECK(position>=0),
   parent_work_item_id TEXT REFERENCES work_items(id) ON DELETE SET NULL,
   error TEXT,
@@ -58,7 +58,7 @@ CREATE TABLE runs (
   session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
   work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE,
   question TEXT NOT NULL,
-  status TEXT NOT NULL CHECK(status IN ('running','waiting_approval','completed','failed','cancelled','interrupted','stopped')),
+  status TEXT NOT NULL CHECK(status IN ('running','waiting_approval','waiting_input','completed','failed','cancelled','interrupted','stopped')),
   started_at TEXT NOT NULL,
   finished_at TEXT,
   duration_ms INTEGER CHECK(duration_ms IS NULL OR duration_ms>=0),
@@ -78,7 +78,7 @@ CREATE TABLE run_steps (
   run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
   ordinal INTEGER NOT NULL CHECK(ordinal>=0),
   kind TEXT NOT NULL CHECK(kind IN ('model','tool','approval')),
-  status TEXT NOT NULL CHECK(status IN ('running','completed','failed','cancelled')),
+  status TEXT NOT NULL CHECK(status IN ('running','waiting_approval','waiting_input','completed','failed','cancelled')),
   checkpoint_json TEXT CHECK(checkpoint_json IS NULL OR json_valid(checkpoint_json)),
   started_at TEXT NOT NULL,
   finished_at TEXT,
@@ -92,7 +92,7 @@ CREATE TABLE run_events (
   sequence INTEGER NOT NULL CHECK(sequence>=1),
   event_id TEXT NOT NULL UNIQUE,
   trace_id TEXT NOT NULL,
-  event_kind TEXT NOT NULL CHECK(event_kind IN ('queued','thinking','text_delta','tool_running','tool_completed','budget_updated','limit_reached','budget_extended','waiting_approval','completed','failed','cancelled','stopped')),
+  event_kind TEXT NOT NULL CHECK(event_kind IN ('queued','thinking','text_delta','tool_queued','tool_running','tool_progress','tool_permission','tool_completed','tool_cancelled','budget_updated','limit_reached','budget_extended','waiting_approval','waiting_input','completed','failed','cancelled','stopped')),
   payload_json TEXT NOT NULL CHECK(json_valid(payload_json)),
   created_at TEXT NOT NULL,
   UNIQUE(run_id,sequence)
@@ -110,7 +110,7 @@ CREATE TABLE actions (
   id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
   run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-  action_type TEXT NOT NULL CHECK(action_type IN ('file_edit','file_create','command','web_search','web_fetch','mcp_connect','mcp_call','credential_access')),
+  action_type TEXT NOT NULL CHECK(action_type IN ('file_edit','file_create','notebook_edit','worktree_create','worktree_exit','command','web_search','web_fetch','mcp_connect','mcp_call','credential_access')),
   status TEXT NOT NULL CHECK(status IN ('pending','approved','running','completed','failed','rejected','cancelled')),
   result_kind TEXT,
   summary TEXT NOT NULL,
@@ -137,11 +137,22 @@ CREATE TABLE tasks (
   id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
   run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
-  text TEXT NOT NULL,
+  subject TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  owner TEXT,
+  active_form TEXT,
+  metadata_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(metadata_json)),
   status TEXT NOT NULL CHECK(status IN ('pending','running','blocked','completed','failed','cancelled')),
   position INTEGER NOT NULL CHECK(position>=0),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
+) STRICT;
+CREATE TABLE task_dependencies (
+  task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  blocked_by_task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(task_id,blocked_by_task_id),
+  CHECK(task_id<>blocked_by_task_id)
 ) STRICT;
 CREATE TABLE sources (
   id TEXT PRIMARY KEY,
@@ -171,17 +182,38 @@ CREATE TABLE tool_invocations (
   name TEXT NOT NULL,
   spec_json TEXT NOT NULL CHECK(json_valid(spec_json)),
   capabilities_json TEXT NOT NULL CHECK(json_valid(capabilities_json)),
+  resolved_policy_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(resolved_policy_json)),
   arguments_json TEXT NOT NULL CHECK(json_valid(arguments_json)),
-  status TEXT NOT NULL CHECK(status IN ('validating','authorizing','running','completed','failed','cancelled')),
+  status TEXT NOT NULL CHECK(status IN ('received','validating','authorizing','queued','running','waiting_approval','waiting_input','completed','failed','cancelled')),
+  execution_status TEXT CHECK(execution_status IS NULL OR execution_status IN ('succeeded','failed','denied','cancelled')),
+  delivery_status TEXT CHECK(delivery_status IS NULL OR delivery_status IN ('inline','artifact','truncated','delivery_failed')),
+  timings_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(timings_json)),
   result_preview TEXT,
   artifact_id TEXT,
   error_code TEXT,
+  pause_kind TEXT CHECK(pause_kind IS NULL OR pause_kind IN ('approval','user_input')),
+  pause_request_id TEXT,
+  continuation_json TEXT CHECK(continuation_json IS NULL OR json_valid(continuation_json)),
   started_at TEXT NOT NULL,
   finished_at TEXT,
   duration_ms INTEGER CHECK(duration_ms IS NULL OR duration_ms>=0),
   UNIQUE(run_id,sequence)
 ) STRICT;
 CREATE INDEX idx_tool_invocations_run ON tool_invocations(run_id,sequence);
+CREATE TABLE tool_input_requests (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  invocation_id TEXT NOT NULL REFERENCES tool_invocations(id) ON DELETE CASCADE,
+  status TEXT NOT NULL CHECK(status IN ('pending','answered','cancelled')),
+  questions_json TEXT NOT NULL CHECK(json_valid(questions_json)),
+  answers_json TEXT CHECK(answers_json IS NULL OR json_valid(answers_json)),
+  resume_data_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(resume_data_json)),
+  created_at TEXT NOT NULL,
+  answered_at TEXT,
+  UNIQUE(invocation_id)
+) STRICT;
+CREATE INDEX idx_tool_input_requests_session ON tool_input_requests(session_id,status,created_at);
 CREATE TABLE tool_artifacts (
   id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -196,6 +228,43 @@ CREATE TABLE tool_artifacts (
   UNIQUE(session_id,sha256)
 ) STRICT;
 CREATE INDEX idx_tool_artifacts_session ON tool_artifacts(session_id,created_at);
+CREATE TABLE permission_decisions (
+  id TEXT PRIMARY KEY,
+  invocation_id TEXT NOT NULL REFERENCES tool_invocations(id) ON DELETE CASCADE,
+  behavior TEXT NOT NULL CHECK(behavior IN ('allow','ask','deny')),
+  source TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  rule_json TEXT CHECK(rule_json IS NULL OR json_valid(rule_json)),
+  classifier_json TEXT CHECK(classifier_json IS NULL OR json_valid(classifier_json)),
+  decided_by TEXT,
+  created_at TEXT NOT NULL
+) STRICT;
+CREATE INDEX idx_permission_decisions_invocation ON permission_decisions(invocation_id,created_at);
+CREATE TABLE permission_rules (
+  id TEXT PRIMARY KEY,
+  session_id TEXT REFERENCES sessions(id) ON DELETE CASCADE,
+  behavior TEXT NOT NULL CHECK(behavior IN ('allow','ask','deny')),
+  tool TEXT NOT NULL,
+  constraints_json TEXT NOT NULL CHECK(json_valid(constraints_json)),
+  source TEXT NOT NULL CHECK(source='session'),
+  created_at TEXT NOT NULL
+) STRICT;
+CREATE INDEX idx_permission_rules_session ON permission_rules(session_id,tool);
+CREATE TABLE tool_discoveries (
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  tool_name TEXT NOT NULL,
+  catalog_generation INTEGER NOT NULL CHECK(catalog_generation>=1),
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(session_id,tool_name)
+) STRICT;
+CREATE TABLE tool_result_replacements (
+  tool_call_id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  invocation_id TEXT REFERENCES tool_invocations(id) ON DELETE SET NULL,
+  delivery_status TEXT NOT NULL CHECK(delivery_status IN ('artifact','truncated','delivery_failed')),
+  replacement_json TEXT NOT NULL CHECK(json_valid(replacement_json)),
+  created_at TEXT NOT NULL
+) STRICT;
 CREATE TABLE context_compactions (
   id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -367,6 +436,19 @@ CREATE TABLE agent_outputs (
   output_sha256 TEXT NOT NULL,
   created_at TEXT NOT NULL
 ) STRICT;
+CREATE TABLE session_worktrees (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  path TEXT NOT NULL,
+  branch TEXT NOT NULL,
+  base_commit TEXT NOT NULL,
+  active INTEGER NOT NULL DEFAULT 0 CHECK(active IN (0,1)),
+  status TEXT NOT NULL CHECK(status IN ('active','kept','removed','invalid')),
+  created_at TEXT NOT NULL,
+  exited_at TEXT,
+  UNIQUE(session_id,path)
+) STRICT;
+CREATE UNIQUE INDEX idx_session_worktree_active ON session_worktrees(session_id) WHERE active=1;
 """
 
 MEMORY_SCHEMA = """

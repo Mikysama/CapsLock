@@ -16,6 +16,7 @@ from .status import AsyncStatusRenderer
 EXEC_EVENT_SCHEMA_VERSION = 3
 APPROVAL_REQUIRED_EXIT = 3
 GOVERNANCE_STOP_EXIT = 4
+INPUT_REQUIRED_EXIT = 5
 
 
 async def run_exec(
@@ -27,6 +28,7 @@ async def run_exec(
     quiet: bool = False,
     status_renderer: AsyncStatusRenderer | None = None,
     limits: RunLimits | None = None,
+    resume_from_run_id: str | None = None,
 ) -> int:
     prompt = question if question is not None else sys.stdin.read()
     if not prompt.strip():
@@ -46,7 +48,12 @@ async def run_exec(
         await renderer.start()
     try:
         stream = context.session.run_stream(
-            RunRequest(question=prompt, mode=RunMode.EXEC, limits=limits)
+            RunRequest(
+                question=prompt,
+                mode=RunMode.EXEC,
+                limits=limits,
+                resume_from_run_id=resume_from_run_id,
+            )
         )
         async for event in stream:
             if json_events:
@@ -72,6 +79,8 @@ async def run_exec(
                 await renderer.handle(event)
             if event.kind.value == "waiting_approval":
                 exit_code = APPROVAL_REQUIRED_EXIT
+            elif event.kind.value == "waiting_input":
+                exit_code = INPUT_REQUIRED_EXIT
             elif event.kind.value == "failed":
                 exit_code = 1
             elif event.kind.value == "cancelled":

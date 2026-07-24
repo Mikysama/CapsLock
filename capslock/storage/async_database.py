@@ -92,6 +92,18 @@ class AsyncDatabase:
                 await self.connection.rollback()
                 raise
             return
+        if (
+            self.label == "workspace"
+            and app_id == self.application_id
+            and version in {6, 7}
+            and self.schema_version == 8
+        ):
+            from .upgrades import upgrade_workspace_schema
+
+            await upgrade_workspace_schema(
+                self.path, self.connection, source_version=version
+            )
+            return
         if app_id != self.application_id or version != self.schema_version:
             raise IncompatibleDatabaseError(
                 f"{self.label} database schema is not supported: {self.path}"

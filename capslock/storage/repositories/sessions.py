@@ -228,7 +228,8 @@ class SessionRepository(Repository):
 
     async def has_active_work(self, session_id: str) -> bool:
         row = await self.one(
-            "SELECT 1 FROM work_items WHERE session_id=? AND status IN ('running','waiting_approval') LIMIT 1",
+            """SELECT 1 FROM work_items WHERE session_id=?
+               AND status IN ('running','waiting_approval','waiting_input') LIMIT 1""",
             (session_id,),
         )
         return row is not None

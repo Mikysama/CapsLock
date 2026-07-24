@@ -10,6 +10,9 @@ from typing import Any
 class ActionType(StrEnum):
     FILE_EDIT = "file_edit"
     FILE_CREATE = "file_create"
+    NOTEBOOK_EDIT = "notebook_edit"
+    WORKTREE_CREATE = "worktree_create"
+    WORKTREE_EXIT = "worktree_exit"
     COMMAND = "command"
     WEB_SEARCH = "web_search"
     WEB_FETCH = "web_fetch"

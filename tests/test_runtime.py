@@ -33,13 +33,15 @@ from capslock.runtime.model import (
 )
 from capslock.runtime.tool_loop import ToolLoop, ToolLoopError
 from capslock.storage.repositories import WorkspaceRepositories
-from capslock.tooling.async_core import (
+from capslock.tooling.contracts import (
     ExecutionContext,
-    Tool,
-    ToolRegistry,
-    ToolResult,
+    InterruptBehavior,
+    ResolvedToolPolicy,
+    ToolOutcome,
+    define_tool,
 )
-from capslock.tooling.async_catalog import workspace_tools
+from capslock.tooling.executor import ToolRuntime
+from capslock.tooling.tools import workspace_tools
 from tests.helpers import (
     DummySkillRegistry,
     DummySkillService,
@@ -49,6 +51,20 @@ from tests.helpers import (
     StubActionHandler,
     workflow_service,
 )
+
+ToolRegistry = ToolRuntime
+
+
+def Tool(name, description, schema, execute, **kwargs):
+    return define_tool(name, description, schema, execute, **kwargs)
+
+
+def ToolResult(ok, data, error=None):
+    return (
+        ToolOutcome.success(data)
+        if ok
+        else ToolOutcome.failure(error or "failed", data=data)
+    )
 
 
 def context_factory(repositories: WorkspaceRepositories, session_id: str):
@@ -155,7 +171,7 @@ def test_interactive_approval_executes_action_inside_same_run(tmp_path: Path) ->
                         (
                             ModelToolCall(
                                 "create",
-                                "propose_file_create",
+                                "create_file",
                                 '{"path":"approved.txt","content":"done\\n"}',
                             ),
                         ),
@@ -234,6 +250,76 @@ def test_interactive_approval_executes_action_inside_same_run(tmp_path: Path) ->
                 if message.get("role") == "tool"
             )
             assert '"status": "completed"' in tool_message["content"]
+        finally:
+            await repositories.close()
+
+    asyncio.run(scenario())
+
+
+def test_ask_user_resumes_same_run_and_cancels_later_batch_calls(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        repositories = await WorkspaceRepositories.open(
+            tmp_path / "pause.sqlite3", workspace=tmp_path
+        )
+        try:
+            session = await repositories.sessions.create("test-model")
+            model = FakeChatModel(
+                ModelResponse(
+                    ModelMessage(
+                        None,
+                        (
+                            ModelToolCall(
+                                "ask",
+                                "ask_user",
+                                '{"questions":[{"id":"choice","question":"Choose",'
+                                '"options":["A","B"]}]}',
+                            ),
+                            ModelToolCall(
+                                "later",
+                                "list_files",
+                                '{"path":"."}',
+                            ),
+                        ),
+                    )
+                ),
+                answer("Continued after the answer."),
+            )
+            agent = make_agent(
+                tmp_path,
+                repositories,
+                session.id,
+                model,
+                tools=workspace_tools(include_collaboration=False),
+            )
+
+            first = await collect(agent, "Ask before continuing")
+            paused = first[-1]
+            assert paused.kind is AgentEventKind.WAITING_INPUT
+            run_id = paused.run_id
+            request_id = str(paused.data["request_id"])
+            invocations = await repositories.database.fetch_all(
+                "SELECT id,name,status FROM tool_invocations WHERE run_id=? ORDER BY sequence",
+                (run_id,),
+            )
+            assert [(row["name"], row["status"]) for row in invocations] == [
+                ("ask_user", "waiting_input"),
+                ("list_files", "cancelled"),
+            ]
+
+            await repositories.run_journal.answer_input_request(
+                request_id, session.id, {"choice": "A"}
+            )
+            resumed = [event async for event in agent.resume_paused_stream(run_id)]
+            assert resumed[-1].kind is AgentEventKind.COMPLETED
+            assert resumed[-1].run_id == run_id
+            resumed_invocation = await repositories.database.fetch_one(
+                "SELECT status,execution_status FROM tool_invocations WHERE id=?",
+                (str(invocations[0]["id"]),),
+            )
+            assert resumed_invocation["status"] == "completed"
+            assert resumed_invocation["execution_status"] == "succeeded"
         finally:
             await repositories.close()
 
@@ -651,7 +737,20 @@ def test_cancelling_stream_closes_run_action_and_running_step(tmp_path: Path) ->
                 await asyncio.Event().wait()
                 return ToolResult(True, {})
 
-            tools = ToolRegistry([Tool("slow", "slow", {"type": "object"}, slow)])
+            tools = ToolRegistry(
+                [
+                    Tool(
+                        "slow",
+                        "slow",
+                        {"type": "object"},
+                        slow,
+                        policy=ResolvedToolPolicy(
+                            external_side_effects=True,
+                            interrupt_behavior=InterruptBehavior.CANCEL,
+                        ),
+                    )
+                ]
+            )
             agent = make_agent(
                 tmp_path,
                 repositories,

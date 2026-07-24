@@ -12,6 +12,8 @@ from .types import (
     BudgetSettings,
     CommandSettings,
     ContextSettings,
+    DocumentSettings,
+    LspSettings,
     McpSettings,
     MemorySettings,
     ModelProfileSettings,
@@ -19,7 +21,10 @@ from .types import (
     ProviderSettings,
     RoutingSettings,
     RuntimeSettings,
+    ShellSettings,
+    ToolSettings,
     WebSettings,
+    WorktreeSettings,
 )
 
 if TYPE_CHECKING:
@@ -30,6 +35,8 @@ if TYPE_CHECKING:
 class Settings:
     model_config: ModelSettings
     runtime: RuntimeSettings
+    tools: ToolSettings
+    shell: ShellSettings
     context: ContextSettings
     command: CommandSettings
     web: WebSettings
@@ -37,6 +44,9 @@ class Settings:
     permission_mode: str
     memory: MemorySettings = MemorySettings()
     agents: AgentSettings = AgentSettings()
+    lsp: LspSettings = LspSettings()
+    documents: DocumentSettings = DocumentSettings()
+    worktree: WorktreeSettings = WorktreeSettings()
     providers: dict[str, ProviderSettings] | None = None
     models: dict[str, ModelProfileSettings] | None = None
     routing: RoutingSettings | None = None

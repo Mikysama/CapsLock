@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -27,7 +26,6 @@ from capslock.domain import (
     ActionType,
     ApprovalDecision,
 )
-from capslock.layout import ProjectLayout, UserLayout
 from capslock.permissions import PermissionMode
 from capslock.policy import PolicyError, WorkspacePolicy
 from capslock.storage.repositories import WorkspaceRepositories
@@ -103,6 +101,7 @@ def test_named_credential_requires_approval_and_never_persists_secret(
             tmp_path / "credential.sqlite3", workspace=tmp_path
         )
         try:
+
             async def approve(action):
                 assert action.request["name"] == "PLUGIN_TOKEN"
                 assert "secret-value" not in str(action)
@@ -646,47 +645,8 @@ def test_web_timeout_marks_action_failed(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
-def test_mcp_handler_uses_native_async_session_and_allowlist(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_mcp_handler_uses_managed_client_and_allowlist(tmp_path: Path) -> None:
     async def scenario() -> None:
-        import mcp
-        import mcp.client.stdio
-
-        initialized: list[bool] = []
-
-        class Session:
-            def __init__(self, read, write) -> None:
-                pass
-
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *args) -> None:
-                return None
-
-            async def initialize(self) -> None:
-                initialized.append(True)
-
-            async def call_tool(self, name, arguments):
-                return SimpleNamespace(model_dump=lambda: {"value": arguments["value"]})
-
-        @asynccontextmanager
-        async def stdio_client(parameters):
-            yield object(), object()
-
-        monkeypatch.setattr(mcp, "ClientSession", Session)
-        monkeypatch.setattr(mcp.client.stdio, "stdio_client", stdio_client)
-        layout = ProjectLayout.discover(
-            tmp_path,
-            user=UserLayout(tmp_path / "home", tmp_path / "memory.sqlite3"),
-        )
-        handler = McpActionHandler(
-            WorkspacePolicy(tmp_path),
-            timeout_seconds=1,
-            output_limit_bytes=1000,
-            layout=layout,
-        )
         server = SimpleNamespace(
             name="demo",
             command=sys.executable,
@@ -695,7 +655,28 @@ def test_mcp_handler_uses_native_async_session_and_allowlist(
             cwd=".",
             allowed_tools=("echo",),
         )
-        handler.registry = SimpleNamespace(get=lambda name: server)
+        calls: list[tuple[str, str, object]] = []
+        refreshes: list[str] = []
+
+        class ManagedClient:
+            errors = {}
+
+            def server(self, name):
+                return server
+
+            async def call(self, server_name, tool_name, arguments):
+                calls.append((server_name, tool_name, arguments))
+                return {"value": arguments["value"]}
+
+            async def refresh(self, server_name):
+                refreshes.append(server_name)
+                return ()
+
+        handler = McpActionHandler(
+            WorkspacePolicy(tmp_path),
+            output_limit_bytes=1000,
+            mcp_client=ManagedClient(),
+        )
         repositories = await WorkspaceRepositories.open(
             tmp_path / "state.sqlite3", workspace=tmp_path
         )
@@ -709,6 +690,8 @@ def test_mcp_handler_uses_native_async_session_and_allowlist(
                     tool="blocked",
                     arguments={},
                 )
+            with pytest.raises(ValueError, match="no longer supported"):
+                await actions.propose(ActionType.MCP_CONNECT, server="demo")
             proposal = await actions.propose(
                 ActionType.MCP_CALL,
                 server="demo",
@@ -716,8 +699,16 @@ def test_mcp_handler_uses_native_async_session_and_allowlist(
                 arguments={"value": 3},
             )
             result = await actions.approve_and_execute(proposal.id)
-            assert initialized == [True]
+            assert calls == [("demo", "echo", {"value": 3})]
             assert result.result["result"] == {"value": 3}
+            historical = await handler.mcp_executor.execute(
+                SimpleNamespace(
+                    type=ActionType.MCP_CONNECT,
+                    request={"server": "demo"},
+                )
+            )
+            assert historical == {"server": "demo", "tools": []}
+            assert refreshes == ["demo"]
         finally:
             await repositories.close()
 

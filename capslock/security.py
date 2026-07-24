@@ -15,6 +15,7 @@ TEXT_SUFFIXES = {
     ".go",
     ".h",
     ".html",
+    ".ipynb",
     ".java",
     ".js",
     ".json",

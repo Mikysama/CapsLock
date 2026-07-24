@@ -20,6 +20,9 @@ from .rules import (
 from .types import (
     CommandSettings,
     ContextSettings,
+    DocumentSettings,
+    LspServerSettings,
+    LspSettings,
     McpSettings,
     MemorySettings,
     ModelProfileSettings,
@@ -27,7 +30,10 @@ from .types import (
     ProviderSettings,
     RoutingSettings,
     RuntimeSettings,
+    ShellSettings,
+    ToolSettings,
     WebSettings,
+    WorktreeSettings,
 )
 
 
@@ -85,10 +91,38 @@ def resolve_settings(
         primary.input_cost_per_million,
         primary.output_cost_per_million,
     )
+    raw_lsp_servers = group("lsp").get("servers", {})
+    lsp_servers = {
+        str(name): LspServerSettings(
+            command=tuple(str(item) for item in server.get("command", ())),
+            extensions=tuple(str(item) for item in server.get("extensions", ())),
+            root_markers=tuple(
+                str(item) for item in server.get("root_markers", (".git",))
+            ),
+        )
+        for name, server in (
+            raw_lsp_servers.items() if isinstance(raw_lsp_servers, dict) else ()
+        )
+        if isinstance(server, dict)
+    }
     return settings_factory(
         model_config=primary_model,
         runtime=RuntimeSettings(
             max_tool_rounds=max_tool_rounds(group("runtime")),
+        ),
+        tools=ToolSettings(
+            schema_budget_tokens=int(group("tools").get("schema_budget_tokens", 8_000)),
+            max_read_concurrency=int(group("tools").get("max_read_concurrency", 4)),
+            aggregate_result_bytes=int(group("tools").get("aggregate_result_bytes", 65_536)),
+        ),
+        shell=ShellSettings(
+            enabled=boolean(group("shell").get("enabled", True)),
+            default_timeout_seconds=float(group("shell").get("default_timeout_seconds", 120)),
+            max_timeout_seconds=float(group("shell").get("max_timeout_seconds", 600)),
+            classifier_enabled=boolean(group("shell").get("classifier_enabled", True)),
+            classifier_threshold=float(group("shell").get("classifier_threshold", 0.95)),
+            background_enabled=boolean(group("shell").get("background_enabled", True)),
+            output_bytes=int(group("shell").get("output_bytes", 100_000)),
         ),
         context=ContextSettings(
             auto_compact=boolean(group("context").get("auto_compact", True)),
@@ -108,6 +142,38 @@ def resolve_settings(
             ),
         ),
         agents=agent_settings(group("agents")),
+        lsp=LspSettings(
+            enabled=boolean(group("lsp").get("enabled", True)),
+            startup_timeout_seconds=float(
+                group("lsp").get("startup_timeout_seconds", 10)
+            ),
+            request_timeout_seconds=float(
+                group("lsp").get("request_timeout_seconds", 15)
+            ),
+            idle_timeout_seconds=float(
+                group("lsp").get("idle_timeout_seconds", 300)
+            ),
+            servers=lsp_servers,
+        ),
+        documents=DocumentSettings(
+            max_pdf_bytes=int(
+                group("documents").get("max_pdf_bytes", 50 * 1024 * 1024)
+            ),
+            max_pdf_pages=int(group("documents").get("max_pdf_pages", 10)),
+            max_notebook_bytes=int(
+                group("documents").get("max_notebook_bytes", 10 * 1024 * 1024)
+            ),
+            max_notebook_cells=int(
+                group("documents").get("max_notebook_cells", 50)
+            ),
+            max_cell_output_bytes=int(
+                group("documents").get("max_cell_output_bytes", 65_536)
+            ),
+        ),
+        worktree=WorktreeSettings(
+            enabled=boolean(group("worktree").get("enabled", True)),
+            max_per_session=int(group("worktree").get("max_per_session", 4)),
+        ),
         command=CommandSettings(
             command_timeout_seconds=float(
                 value("command", "CAPSLOCK_COMMAND_TIMEOUT_SECONDS", 120)

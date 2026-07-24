@@ -20,7 +20,7 @@ from ..domain import (
 )
 from ..interaction import RunInteraction
 from ..plugins import PluginRegistry
-from ..tooling.plugins import plugin_tools
+from ..tooling.tools.plugins import plugin_tools
 from .capabilities import ChildCapabilityPolicy
 from .models import AgentTaskContract, AgentTaskState
 from .service import ChildApprovalPending, CollaborationService

@@ -11,6 +11,7 @@ class WorkItemStatus(StrEnum):
     QUEUED = "queued"
     RUNNING = "running"
     WAITING_APPROVAL = "waiting_approval"
+    WAITING_INPUT = "waiting_input"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -25,6 +26,7 @@ WORK_ITEM_TRANSITIONS: dict[WorkItemStatus, frozenset[WorkItemStatus]] = {
     WorkItemStatus.RUNNING: frozenset(
         {
             WorkItemStatus.WAITING_APPROVAL,
+            WorkItemStatus.WAITING_INPUT,
             WorkItemStatus.COMPLETED,
             WorkItemStatus.FAILED,
             WorkItemStatus.CANCELLED,
@@ -39,11 +41,19 @@ WORK_ITEM_TRANSITIONS: dict[WorkItemStatus, frozenset[WorkItemStatus]] = {
             WorkItemStatus.CANCELLED,
         }
     ),
+    WorkItemStatus.WAITING_INPUT: frozenset(
+        {
+            WorkItemStatus.RUNNING,
+            WorkItemStatus.FAILED,
+            WorkItemStatus.CANCELLED,
+        }
+    ),
 }
 
 FINALIZABLE_WORK_ITEM_STATUSES = frozenset(
     {
         WorkItemStatus.WAITING_APPROVAL,
+        WorkItemStatus.WAITING_INPUT,
         WorkItemStatus.COMPLETED,
         WorkItemStatus.FAILED,
         WorkItemStatus.CANCELLED,
@@ -115,6 +125,8 @@ class RunStepKind(StrEnum):
 
 class RunStepStatus(StrEnum):
     RUNNING = "running"
+    WAITING_APPROVAL = "waiting_approval"
+    WAITING_INPUT = "waiting_input"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -124,12 +136,17 @@ class AgentEventKind(StrEnum):
     QUEUED = "queued"
     THINKING = "thinking"
     TEXT_DELTA = "text_delta"
+    TOOL_QUEUED = "tool_queued"
     TOOL_RUNNING = "tool_running"
+    TOOL_PROGRESS = "tool_progress"
+    TOOL_PERMISSION = "tool_permission"
     TOOL_COMPLETED = "tool_completed"
+    TOOL_CANCELLED = "tool_cancelled"
     BUDGET_UPDATED = "budget_updated"
     LIMIT_REACHED = "limit_reached"
     BUDGET_EXTENDED = "budget_extended"
     WAITING_APPROVAL = "waiting_approval"
+    WAITING_INPUT = "waiting_input"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -139,6 +156,7 @@ class AgentEventKind(StrEnum):
 TERMINAL_EVENT_KINDS = frozenset(
     {
         AgentEventKind.WAITING_APPROVAL,
+        AgentEventKind.WAITING_INPUT,
         AgentEventKind.COMPLETED,
         AgentEventKind.FAILED,
         AgentEventKind.CANCELLED,

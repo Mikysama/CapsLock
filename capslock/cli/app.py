@@ -68,6 +68,16 @@ def build_parser() -> argparse.ArgumentParser:
     delete = commands.add_parser("delete")
     delete.add_argument("session_id", nargs="?")
     delete.add_argument("--yes", action="store_true")
+    input_parser = subparsers.add_parser(
+        "input", help="List, answer, or cancel durable user-input requests"
+    )
+    input_commands = input_parser.add_subparsers(dest="input_command")
+    input_commands.add_parser("list")
+    input_answer = input_commands.add_parser("answer")
+    input_answer.add_argument("request_id")
+    input_answer.add_argument("--answers-json", required=True)
+    input_cancel = input_commands.add_parser("cancel")
+    input_cancel.add_argument("request_id")
     initialize_parser = subparsers.add_parser("init", help="Initialize a workspace")
     initialize_parser.add_argument("--non-interactive", action="store_true")
     initialize_parser.add_argument("--provider")
@@ -133,6 +143,7 @@ def build_parser() -> argparse.ArgumentParser:
         plugin_change.add_argument("--yes", action="store_true")
         if command == "enable":
             plugin_change.add_argument("--trusted-native", action="store_true")
+            plugin_change.add_argument("--session-lifecycle", action="store_true")
     doctor_parser = subparsers.add_parser(
         "doctor", help="Check configuration and state"
     )
@@ -261,6 +272,10 @@ async def async_main(
         from ..configuration import Settings
 
         settings = Settings.load(workspace, layout=layout)
+        if args.command == "input":
+            from .input_requests import input_command
+
+            return await input_command(output, layout, workspace, settings, args)
         if args.command in {"session", "sessions"}:
             return await _sessions(output, args, workspace, layout, settings)
         session_id = getattr(args, "session_id", None)

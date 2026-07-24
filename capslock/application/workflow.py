@@ -26,6 +26,7 @@ class PreparedRun:
     work_item: WorkItemInfo
     run: RunInfo
     checkpoint: RunStepInfo | None = None
+    resumed: bool = False
 
 
 class WorkflowService:
@@ -62,6 +63,22 @@ class WorkflowService:
         checkpoint = None
         parent_work_item_id = None
         if resume_from_run_id is not None:
+            candidate = await self.runs.get(
+                resume_from_run_id, session_id=session_id
+            )
+            if candidate is not None and candidate.status in {
+                "waiting_approval",
+                "waiting_input",
+            }:
+                await self.unit_of_work.resume_paused(session_id, candidate.id)
+                resumed_run = await self.runs.require(
+                    candidate.id, session_id=session_id
+                )
+                checkpoint = await self.journal.last_stable_step(candidate.id)
+                if checkpoint is None:
+                    raise ValueError("paused run has no resumable checkpoint")
+                resumed_item = await self.work_items.require(candidate.work_item_id)
+                return PreparedRun(resumed_item, resumed_run, checkpoint, True)
             parent = await self.runs.retryable(session_id, resume_from_run_id)
             checkpoint = await self.journal.last_stable_step(parent.id)
             assert checkpoint is not None
@@ -117,3 +134,8 @@ class WorkflowService:
 
     async def settle_approval(self, session_id: str, run_id: str) -> AgentEvent | None:
         return await self.unit_of_work.settle_approval(session_id, run_id)
+
+    async def pause(
+        self, run_id: str, *, kind: str, payload: dict[str, Any]
+    ) -> AgentEvent:
+        return await self.unit_of_work.pause(run_id, kind=kind, payload=payload)

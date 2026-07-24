@@ -4,6 +4,37 @@
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-07-24
+
+### Added
+
+- 新增 Tool Runtime v2：工具契约、参数级策略、稳定 Catalog fingerprint、动态发现、富内容结果、artifact delivery 与有界并发调度。
+- 新增持久化 `ToolPause`、结构化 `ask_user` 与 `capslock input list|answer|cancel`；审批和用户输入可在重启后恢复同一 invocation。
+- 新增 `write_file`、`glob_files`、任务 CRUD/依赖、LSP 语义查询、MCP Resources、PDF/Notebook、session Worktree 和异步 Agent 控制等直接能力工具。
+- 新增通用 `shell`、`process_output` 和 `process_stop`；Shell 默认在 Linux Bubblewrap 或 macOS sandbox-exec 中断网运行，支持超时、进程组取消与 session 隔离后台任务。
+- 新增用户级、项目级、本地私有与 session 级结构化权限规则，以及可解释、可审计的权限决定。
+
+### Security
+
+- Shell 对提权、设备访问、沙箱逃逸和宽泛递归删除执行 hard deny；无法可靠分类的命令降级为询问，沙箱不可用时 fail closed。
+- Shell 快速分类器只能在默认断网沙箱、无显式 ask/deny 且置信度不低于 0.95 时自动放行，不能覆盖 hard deny 或授权宿主执行。
+- 插件 capability 必须是 manifest 总 grant 的子集；普通调用使用独立沙箱进程，session 生命周期需要单独授权。
+- MCP 只使用受管长连接，删除宿主单次 stdio fallback；过滤在工具进入 Catalog 前完成。
+
+### Changed
+
+- 模型工具全部使用小写直接能力名称；删除 `propose_*`、`task_list_update` 和 `task_status_update`，不提供旧名称兼容层。动态工具使用 `mcp__<server>__<tool>` 和 `plugin__<plugin>__<tool>`。
+- 工具异常、取消、超限与 artifact 写入失败统一关闭 invocation；执行状态与 delivery 状态分离，已产生的副作用不会被误报为未执行。
+- 工具 schema 按稳定名称排序，常驻 schema 预算默认为 8,000 tokens；插件、MCP、LSP 和大 schema 工具支持 deferred discovery。
+- LSP、MCP 和 Shell 拆分为独立能力包；新增中立 ports 和 composition factories，Catalog 与 Executor 分离，runtime 不再依赖具体集成 manager。
+- 文件搜索优先使用 ripgrep，保留等价的 Python fallback。
+
+### Compatibility
+
+- workspace schema 升至 8，config 升至 5，plugin manifest/protocol/grant 升至 4；memory schema 3、portable archive 3 和 JSONL schema 3 保持不变。
+- workspace schema v6/v7 在 WAL checkpoint 和 SQLite backup 后事务升级；config v3/v4 先原子备份再转换。失败时保留原数据与备份。
+- v3 插件升级后禁用并返回明确的 v4 升级错误；已删除的 Python Tool API 不提供 shim。
+
 ## [2.2.3] - 2026-07-23
 
 ### Fixed

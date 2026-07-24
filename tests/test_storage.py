@@ -206,7 +206,7 @@ def test_current_state_reopens_without_mutation(tmp_path: Path) -> None:
         try:
             workspace_version = (await workspace.fetch_one("PRAGMA user_version"))[0]
             memory_version = (await memory.fetch_one("PRAGMA user_version"))[0]
-            assert workspace_version == WORKSPACE_SCHEMA_VERSION == 6
+            assert workspace_version == WORKSPACE_SCHEMA_VERSION == 8
             assert memory_version == MEMORY_SCHEMA_VERSION == 3
         finally:
             await workspace.close()

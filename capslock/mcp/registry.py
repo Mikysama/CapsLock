@@ -3,26 +3,13 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .credentials import resolve_credential
-from .layout import ProjectLayout
-from .policy import PolicyError, WorkspacePolicy
-
-
-@dataclass(frozen=True)
-class McpServer:
-    name: str
-    command: str
-    args: tuple[str, ...]
-    cwd: str
-    description: str
-    allowed_tools: tuple[str, ...]
-    env: dict[str, str]
-    enabled: bool
-    scope: str
+from ..credentials import resolve_credential
+from ..layout import ProjectLayout
+from ..policy import PolicyError, WorkspacePolicy
+from ..ports.mcp import McpServer
 
 
 class McpRegistry:

@@ -136,7 +136,7 @@ def test_backup_verification_and_tamper_rejection(
             '{"servers":{"demo":{"env":{"TOKEN":"mcp-secret"}}}}',
             encoding="utf-8",
         )
-        assert _version(layout.database) == WORKSPACE_SCHEMA_VERSION == 6
+        assert _version(layout.database) == WORKSPACE_SCHEMA_VERSION == 8
         assert _version(layout.user.memory) == MEMORY_SCHEMA_VERSION == 3
         service = LifecycleService(layout)
         backup = service.backup_create(tmp_path / "state.clbackup")

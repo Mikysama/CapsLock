@@ -56,6 +56,19 @@ class WorkspacePolicy:
             ) from exc
         return path
 
+    def readable_binary_file(
+        self, requested_path: str, *, max_bytes: int | None = None
+    ) -> Path:
+        """Validate a bounded non-text file without attempting UTF-8 decoding."""
+        path = self.resolve(requested_path)
+        self._ensure_agent_readable(path)
+        if not path.is_file():
+            raise PolicyError(f"file does not exist: {path}")
+        limit = self.max_file_bytes if max_bytes is None else max_bytes
+        if path.stat().st_size > limit:
+            raise PolicyError(f"file exceeds the {limit} byte read limit: {path}")
+        return path
+
     def writable_file(self, requested_path: str, *, create: bool = False) -> Path:
         """Validate a controlled text-file write without performing it."""
         path = self.resolve(requested_path)

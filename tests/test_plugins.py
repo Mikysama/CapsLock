@@ -10,10 +10,11 @@ from rich.console import Console
 
 from capslock.cli.app import async_main
 from capslock.layout import ProjectLayout, UserLayout
-from capslock.domain import ActionType
+from capslock.domain import ActionStatus, ActionType
 from capslock.plugins import PluginProcessClient, PluginRegistry, PluginService
 from capslock.plugins.manifest import PluginValidationError, load_plugin_manifest
-from capslock.tooling.plugins import plugin_tools
+from capslock.tooling.contracts import null_reporter
+from capslock.tooling.tools.plugins import plugin_tools
 
 
 def _layout(tmp_path: Path) -> ProjectLayout:
@@ -24,17 +25,24 @@ def _layout(tmp_path: Path) -> ProjectLayout:
     )
 
 
-def _plugin(tmp_path: Path, *, version: str = "1.0.0", read_access: bool = False) -> Path:
+def _plugin(
+    tmp_path: Path,
+    *,
+    version: str = "1.0.0",
+    read_access: bool = False,
+    lifecycle: str = "invocation",
+) -> Path:
     root = tmp_path / f"source-{version}"
     root.mkdir()
     read_paths = '["**"]' if read_access else "[]"
     (root / "capslock-plugin.toml").write_text(
-        f'''manifest_version = 3
-protocol_version = 3
+        f'''manifest_version = 4
+protocol_version = 4
 name = "echo-plugin"
 version = "{version}"
 description = "Echo arguments"
 entrypoint = ["plugin.py"]
+lifecycle = "{lifecycle}"
 
 [capabilities]
 workspace_read = {read_paths}
@@ -46,7 +54,12 @@ credentials = []
 [[tools]]
 name = "echo"
 description = "Echo arguments"
-parameters = {{type = "object", additionalProperties = true}}
+input_schema = {{type = "object", additionalProperties = true}}
+output_schema = {{type = "object"}}
+search_hint = "echo arguments"
+deferred = true
+annotations = {{read_only = true}}
+capabilities = {{workspace_read = [], workspace_write = [], network_hosts = [], process_templates = [], credentials = []}}
 ''',
         encoding="utf-8",
     )
@@ -58,14 +71,14 @@ for line in sys.stdin:
     request = json.loads(line)
     method = request["method"]
     if method == "initialize":
-        result = {"protocol_version": 3}
+        result = {"protocol_version": 4}
     elif method == "list_tools":
-        result = {"tools": [{"name": "echo"}]}
+        result = {"tools": [{"name": "echo", "input_schema": {"type": "object", "additionalProperties": True}, "output_schema": {"type": "object"}}]}
     elif method == "call_tool":
         result = {"ok": True, "data": request["params"]["arguments"]}
     else:
         raise RuntimeError(method)
-    print(json.dumps({"protocol_version": 3, "id": request["id"], "ok": True, "result": result}), flush=True)
+    print(json.dumps({"protocol_version": 4, "id": request["id"], "ok": True, "result": result}), flush=True)
 """,
         encoding="utf-8",
     )
@@ -91,12 +104,26 @@ def test_plugin_protocol_verifies_and_calls(tmp_path: Path) -> None:
     }
 
 
+def test_session_lifecycle_reuses_and_closes_plugin_process(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        manifest = load_plugin_manifest(_plugin(tmp_path, lifecycle="session"))
+        client = PluginProcessClient(timeout_seconds=2)
+        first = await client.call(manifest, "echo", {"value": 1}, trusted_native=True)
+        session = client._sessions[manifest.digest]
+        second = await client.call(manifest, "echo", {"value": 2}, trusted_native=True)
+        assert first["data"] == {"value": 1}
+        assert second["data"] == {"value": 2}
+        assert client._sessions[manifest.digest] is session
+        await client.close()
+        assert session.process.returncode is not None
+
+    asyncio.run(scenario())
+
+
 def test_install_enable_and_uninstall_lifecycle(tmp_path: Path) -> None:
     layout = _layout(tmp_path)
     service = PluginService(layout, client=PluginProcessClient(timeout_seconds=2))
-    installed = asyncio.run(
-        service.install(_plugin(tmp_path, read_access=True))
-    )
+    installed = asyncio.run(service.install(_plugin(tmp_path, read_access=True)))
     assert installed.name == "echo-plugin"
     assert not service.entries()[0].enabled
 
@@ -104,7 +131,7 @@ def test_install_enable_and_uninstall_lifecycle(tmp_path: Path) -> None:
     entry = service.entries()[0]
     assert entry.enabled
     assert [tool.name for tool in plugin_tools(PluginRegistry(layout))] == [
-        "plugin_echo_plugin_echo"
+        "plugin__echo_plugin__echo"
     ]
 
     with pytest.raises(PluginValidationError, match="still enabled"):
@@ -151,7 +178,7 @@ def test_plugin_tool_uses_audited_external_action(tmp_path: Path) -> None:
                     "id": "action",
                     "type": action_type,
                     "summary": "plugin",
-                    "status": type("Status", (), {"value": "pending"})(),
+                    "status": ActionStatus.PENDING,
                     "result_kind": None,
                     "request": arguments,
                     "result": None,
@@ -167,8 +194,9 @@ def test_plugin_tool_uses_audited_external_action(tmp_path: Path) -> None:
         actions = Actions()
         tool = plugin_tools(PluginRegistry(layout))[0]
         context = type("Context", (), {"actions": actions})()
-        result = await tool.execute(context, {"value": 4})
-        assert result.ok
+        result = await tool.execute(context, {"value": 4}, null_reporter)
+        assert result.kind == "approval"
+        assert result.request_id == "action"
         assert actions.calls == [
             (
                 ActionType.MCP_CALL,

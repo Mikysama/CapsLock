@@ -213,7 +213,7 @@ class ActionRepository(Repository):
 
     async def last_completed_file_action(self, session_id: str) -> ActionRecord | None:
         row = await self.one(
-            """SELECT * FROM actions WHERE session_id=? AND action_type IN ('file_edit','file_create')
+            """SELECT * FROM actions WHERE session_id=? AND action_type IN ('file_edit','file_create','notebook_edit')
                AND status='completed' AND result_kind='applied' AND reversed_at IS NULL
                AND historical_only=0
                ORDER BY finished_at DESC LIMIT 1""",

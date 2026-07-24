@@ -90,14 +90,26 @@ class PluginService:
         return entry.manifest
 
     def enable(
-        self, name: str, *, trusted_native: bool = False
+        self,
+        name: str,
+        *,
+        trusted_native: bool = False,
+        allow_session_lifecycle: bool = False,
     ) -> PluginManifest:
         entry = self.registry.get(name, require_enabled=False)
+        if entry.manifest.lifecycle == "session" and not allow_session_lifecycle:
+            raise PluginValidationError(
+                "session-lifecycle plugins require separate --session-lifecycle authorization"
+            )
         if self.client.sandbox is None and not trusted_native:
             raise SandboxUnavailableError(
                 "no plugin sandbox backend is available; use --trusted-native explicitly"
             )
-        self.registry.enable(entry.manifest, trusted_native=trusted_native)
+        self.registry.enable(
+            entry.manifest,
+            trusted_native=trusted_native,
+            allow_session_lifecycle=allow_session_lifecycle,
+        )
         append_plugin_audit(
             self.layout.user,
             {
@@ -110,6 +122,7 @@ class PluginService:
                 ),
                 "capabilities": entry.manifest.capabilities.as_dict(),
                 "mode": "trusted-native" if trusted_native else "sandboxed",
+                "lifecycle": entry.manifest.lifecycle,
                 "workspace": str(self.layout.workspace),
                 "result": "completed",
             },

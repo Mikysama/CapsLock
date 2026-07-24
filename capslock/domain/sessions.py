@@ -64,7 +64,17 @@ class SourceInfo:
 class TaskInfo:
     id: str
     session_id: str
-    text: str
+    subject: str
     status: str
     run_id: str | None = None
     position: int = 0
+    description: str = ""
+    owner: str | None = None
+    active_form: str | None = None
+    metadata: dict[str, object] | None = None
+    blocked_by: tuple[str, ...] = ()
+
+    @property
+    def text(self) -> str:
+        """Storage compatibility for non-tool callers migrating to subject."""
+        return self.subject

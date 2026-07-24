@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
@@ -147,7 +148,10 @@ class AsyncOpenAIChatModel:
         messages: list[dict[str, object]],
         tools: list[dict[str, object]],
     ) -> ModelResponse:
-        arguments: dict[str, object] = {"model": model, "messages": messages}
+        arguments: dict[str, object] = {
+            "model": model,
+            "messages": _openai_messages(messages),
+        }
         if tools:
             arguments["tools"] = tools
         if model in self.max_output_tokens:
@@ -164,7 +168,7 @@ class AsyncOpenAIChatModel:
     ) -> AsyncIterator[ModelDelta]:
         arguments: dict[str, object] = {
             "model": model,
-            "messages": messages,
+            "messages": _openai_messages(messages),
             "stream": True,
             "stream_options": {"include_usage": True},
         }
@@ -268,3 +272,56 @@ def _usage(raw: Any) -> ModelUsage:
         int(getattr(raw, "prompt_tokens", 0) or 0),
         int(getattr(raw, "completion_tokens", 0) or 0),
     )
+
+
+def _openai_messages(
+    messages: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Map provider-neutral rich tool blocks to OpenAI-compatible content parts."""
+    output: list[dict[str, object]] = []
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            output.append(message)
+            continue
+        parts: list[dict[str, object]] = []
+        for block in content:
+            if not isinstance(block, dict):
+                parts.append({"type": "text", "text": str(block)})
+                continue
+            kind, value = block.get("type"), block.get("value")
+            if kind == "text":
+                parts.append({"type": "text", "text": str(value or "")})
+            elif kind == "image":
+                if isinstance(value, str):
+                    url, detail = value, None
+                elif isinstance(value, dict):
+                    url = value.get("url", value.get("image_url", value.get("data")))
+                    detail = value.get("detail")
+                else:
+                    url, detail = None, None
+                if isinstance(url, str):
+                    image_url: dict[str, object] = {"url": url}
+                    if detail in {"auto", "low", "high"}:
+                        image_url["detail"] = detail
+                    parts.append({"type": "image_url", "image_url": image_url})
+                else:
+                    parts.append(
+                        {
+                            "type": "text",
+                            "text": json.dumps(value, ensure_ascii=False, default=str),
+                        }
+                    )
+            else:
+                parts.append(
+                    {
+                        "type": "text",
+                        "text": json.dumps(
+                            {"type": kind, "value": value},
+                            ensure_ascii=False,
+                            default=str,
+                        ),
+                    }
+                )
+        output.append({**message, "content": parts})
+    return output

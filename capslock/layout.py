@@ -47,6 +47,10 @@ class UserLayout:
         return self.home / "state" / "plugin-audit.jsonl"
 
     @property
+    def permissions(self) -> Path:
+        return self.home / "permissions.toml"
+
+    @property
     def canonical_memory(self) -> Path:
         return self.home / "state" / "memory.sqlite3"
 
@@ -87,6 +91,16 @@ class ProjectLayout:
     @property
     def local_mcp(self) -> Path:
         return self._managed(self.root / "local" / "mcp.json", "local MCP config")
+
+    @property
+    def project_permissions(self) -> Path:
+        return self._managed(self.root / "permissions.toml", "project permissions")
+
+    @property
+    def local_permissions(self) -> Path:
+        return self._managed(
+            self.root / "local" / "permissions.toml", "local permissions"
+        )
 
     @property
     def skills(self) -> Path:

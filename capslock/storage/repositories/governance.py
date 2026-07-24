@@ -19,6 +19,10 @@ class GovernanceRepository(Repository):
         mode: RunMode,
         limits: RunLimits,
     ) -> tuple[BudgetSnapshot, list[dict[str, Any]]]:
+        existing = await self.load(run_id)
+        if existing is not None:
+            snapshot, history = existing
+            return replace(snapshot, mode=mode), history
         parent = await self._row(parent_run_id) if parent_run_id else None
         if parent is None:
             snapshot = BudgetSnapshot(mode, run_id, limits)

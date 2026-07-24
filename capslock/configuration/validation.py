@@ -14,9 +14,19 @@ from .rules import (
 from .types import ConfigIssue
 
 
-CONFIG_VERSION = 3
+CONFIG_VERSION = 5
 _GROUP_FIELDS = {
     "runtime": {"max_tool_rounds", "permission_mode"},
+    "tools": {"schema_budget_tokens", "max_read_concurrency", "aggregate_result_bytes"},
+    "shell": {
+        "enabled",
+        "default_timeout_seconds",
+        "max_timeout_seconds",
+        "classifier_enabled",
+        "classifier_threshold",
+        "background_enabled",
+        "output_bytes",
+    },
     "context": {
         "auto_compact",
         "trigger_ratio",
@@ -32,7 +42,23 @@ _GROUP_FIELDS = {
         "max_concurrency",
         "max_depth",
         "max_child_tool_rounds",
+        "background_enabled",
     },
+    "lsp": {
+        "enabled",
+        "startup_timeout_seconds",
+        "request_timeout_seconds",
+        "idle_timeout_seconds",
+        "servers",
+    },
+    "documents": {
+        "max_pdf_bytes",
+        "max_pdf_pages",
+        "max_notebook_bytes",
+        "max_notebook_cells",
+        "max_cell_output_bytes",
+    },
+    "worktree": {"enabled", "max_per_session"},
     "command": {"command_timeout_seconds", "command_output_bytes"},
     "web": {
         "tavily_api_key",
@@ -174,10 +200,73 @@ def validate_semantics(document: dict[str, object]) -> None:
     agents = document.get("agents", {})
     if isinstance(agents, dict):
         agent_settings(agents)
+    lsp = document.get("lsp", {})
+    if isinstance(lsp, dict):
+        boolean(lsp.get("enabled", True))
+        for field, default in (
+            ("startup_timeout_seconds", 10),
+            ("request_timeout_seconds", 15),
+            ("idle_timeout_seconds", 300),
+        ):
+            if float(lsp.get(field, default)) <= 0:
+                raise ValueError(f"lsp.{field} must be positive")
+        servers = lsp.get("servers", {})
+        if not isinstance(servers, dict):
+            raise ValueError("lsp.servers must be a table")
+        for name, server in servers.items():
+            if not isinstance(server, dict):
+                raise ValueError(f"lsp.servers.{name} must be a table")
+            unknown = set(server) - {"command", "extensions", "root_markers"}
+            if unknown:
+                raise ValueError(f"unknown lsp server field: {sorted(unknown)[0]}")
+            if not isinstance(server.get("command"), list) or not server["command"]:
+                raise ValueError(
+                    f"lsp.servers.{name}.command must be a non-empty array"
+                )
+            if not isinstance(server.get("extensions"), list) or not server["extensions"]:
+                raise ValueError(
+                    f"lsp.servers.{name}.extensions must be a non-empty array"
+                )
+    documents = document.get("documents", {})
+    if isinstance(documents, dict):
+        for field, default in (
+            ("max_pdf_bytes", 50 * 1024 * 1024),
+            ("max_pdf_pages", 10),
+            ("max_notebook_bytes", 10 * 1024 * 1024),
+            ("max_notebook_cells", 50),
+            ("max_cell_output_bytes", 65_536),
+        ):
+            if int(documents.get(field, default)) <= 0:
+                raise ValueError(f"documents.{field} must be positive")
+    worktree = document.get("worktree", {})
+    if isinstance(worktree, dict):
+        boolean(worktree.get("enabled", True))
+        if not 1 <= int(worktree.get("max_per_session", 4)) <= 32:
+            raise ValueError("worktree.max_per_session must be between 1 and 32")
     runtime = document.get("runtime", {})
     if isinstance(runtime, dict):
         if int(runtime.get("max_tool_rounds", DEFAULT_MAX_TOOL_ROUNDS)) <= 0:
             raise ValueError("runtime.max_tool_rounds must be positive")
+    tools = document.get("tools", {})
+    if isinstance(tools, dict):
+        if int(tools.get("schema_budget_tokens", 8_000)) <= 0:
+            raise ValueError("tools.schema_budget_tokens must be positive")
+        concurrency = int(tools.get("max_read_concurrency", 4))
+        if concurrency < 1 or concurrency > 32:
+            raise ValueError("tools.max_read_concurrency must be between 1 and 32")
+        if int(tools.get("aggregate_result_bytes", 65_536)) < 1024:
+            raise ValueError("tools.aggregate_result_bytes must be at least 1024")
+    shell = document.get("shell", {})
+    if isinstance(shell, dict):
+        default_timeout = float(shell.get("default_timeout_seconds", 120))
+        max_timeout = float(shell.get("max_timeout_seconds", 600))
+        threshold = float(shell.get("classifier_threshold", 0.95))
+        if default_timeout <= 0 or max_timeout < default_timeout:
+            raise ValueError("shell timeout limits are invalid")
+        if threshold < 0.95 or threshold > 1:
+            raise ValueError("shell.classifier_threshold must be between 0.95 and 1")
+        if int(shell.get("output_bytes", 100_000)) <= 0:
+            raise ValueError("shell.output_bytes must be positive")
         if str(runtime.get("permission_mode", "approve_for_me")) not in {
             "full_access",
             "approve_for_me",

@@ -159,6 +159,11 @@ def reduce_event(state: TuiState, event: AgentEvent) -> TuiState:
         return replace(state, activity="Thinking")
     if event.kind in {AgentEventKind.BUDGET_UPDATED}:
         return state
+    if event.kind in {
+        AgentEventKind.WAITING_APPROVAL,
+        AgentEventKind.WAITING_INPUT,
+    }:
+        return _paused(state, event)
     if event.terminal:
         return _terminal(state, event)
     return state
@@ -279,6 +284,35 @@ def _collapse_reasoning(state: TuiState, run_id: str) -> TuiState:
         for message in state.messages
     )
     return replace(state, messages=messages)
+
+
+def _paused(state: TuiState, event: AgentEvent) -> TuiState:
+    """Render a resumable pause without marking the run as terminal."""
+    status = event.kind.value
+    activity = (
+        "Waiting for approval"
+        if event.kind is AgentEventKind.WAITING_APPROVAL
+        else "Waiting for input"
+    )
+    messages = tuple(
+        replace(
+            message,
+            tools=tuple(
+                replace(tool, status=status) if tool.status == "running" else tool
+                for tool in message.tools
+            ),
+        )
+        if message.kind is MessageKind.TOOLS and message.run_id == event.run_id
+        else message
+        for message in _collapse_reasoning(state, event.run_id).messages
+    )
+    return replace(
+        state,
+        messages=messages,
+        active_run_id=event.run_id,
+        activity=activity,
+        notification=activity,
+    )
 
 
 def _terminal(state: TuiState, event: AgentEvent) -> TuiState:

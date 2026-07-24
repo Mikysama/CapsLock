@@ -16,14 +16,12 @@ from ...external import (
     is_suspicious,
     validate_public_url,
 )
-from ...layout import ProjectLayout
-from ...mcp import McpRegistry
 from ...policy import PolicyError, WorkspacePolicy
 from ...plugins import PluginProcessClient, PluginRegistry
 from ...plugins.broker import BrokerCallbacks
-from ...ports import SourcePort
+from ...ports import McpClientPort, SourcePort
 from .core import ActionExecution, ActionProposal
-from .executors import McpStdioExecutor, PluginActionExecutor
+from .executors import McpActionExecutor, PluginActionExecutor
 
 
 class WebActionHandler:
@@ -55,12 +53,16 @@ class WebActionHandler:
                 raise ValueError("query must be a non-empty string")
             if not self.key:
                 raise ValueError("Tavily API key is not configured")
-            return ActionProposal(f"Search Tavily for: {query}", {"query": query})
+            request = {"query": query}
+            _preserve_manual_approval(payload, request)
+            return ActionProposal(f"Search Tavily for: {query}", request)
         url = payload.get("url")
         if not isinstance(url, str):
             raise ValueError("url must be a string")
         await asyncio.to_thread(validate_public_url, url)
-        return ActionProposal(f"Fetch external URL: {url}", {"url": url})
+        request = {"url": url}
+        _preserve_manual_approval(payload, request)
+        return ActionProposal(f"Fetch external URL: {url}", request)
 
     async def execute(self, action: ActionRecord) -> ActionExecution:
         async with self.client_factory(
@@ -177,17 +179,16 @@ class McpActionHandler:
         self,
         policy: WorkspacePolicy,
         *,
-        timeout_seconds: float,
         output_limit_bytes: int,
-        layout: ProjectLayout,
+        timeout_seconds: float = 30,
         plugin_registry: PluginRegistry | None = None,
         plugin_client: PluginProcessClient | None = None,
         broker_callbacks: Callable[[ActionRecord], BrokerCallbacks] | None = None,
+        mcp_client: McpClientPort,
     ) -> None:
         self.policy = policy
-        self.timeout_seconds = timeout_seconds
         self.output_limit_bytes = output_limit_bytes
-        self.registry = McpRegistry(policy, layout=layout)
+        self.mcp_client = mcp_client
         self.plugin_registry = plugin_registry
         self.plugin_client = plugin_client or PluginProcessClient(
             timeout_seconds=timeout_seconds,
@@ -200,10 +201,8 @@ class McpActionHandler:
             policy=policy,
             broker_callbacks=broker_callbacks,
         )
-        self.mcp_executor = McpStdioExecutor(
-            policy,
-            self.registry,
-            timeout_seconds=timeout_seconds,
+        self.mcp_executor = McpActionExecutor(
+            mcp_client,
             output_limit_bytes=output_limit_bytes,
         )
 
@@ -226,30 +225,30 @@ class McpActionHandler:
                 raise ValueError("tool and arguments must be provided")
             if tool not in {item.name for item in entry.manifest.tools}:
                 raise PolicyError(f"plugin tool is not declared: {plugin_name}.{tool}")
+            request = {
+                "plugin": plugin_name,
+                "tool": tool,
+                "arguments": arguments,
+                "digest": entry.manifest.digest,
+                "permissions": sorted(
+                    item.value for item in entry.manifest.permissions
+                ),
+                "capabilities": entry.granted_capabilities.as_dict(),
+                "trusted_native": entry.trusted_native,
+                "force_manual_approval": bool(
+                    entry.trusted_native or payload.get("force_manual_approval")
+                ),
+            }
             return ActionProposal(
                 f"Call plugin {plugin_name}.{tool}",
-                {
-                    "plugin": plugin_name,
-                    "tool": tool,
-                    "arguments": arguments,
-                    "digest": entry.manifest.digest,
-                    "permissions": sorted(
-                        item.value for item in entry.manifest.permissions
-                    ),
-                    "capabilities": entry.granted_capabilities.as_dict(),
-                    "trusted_native": entry.trusted_native,
-                    "force_manual_approval": entry.trusted_native,
-                },
+                request,
             )
         server_name = payload.get("server")
         if not isinstance(server_name, str):
             raise ValueError("server must be a string")
-        server = await asyncio.to_thread(self.registry.get, server_name)
+        server = self.mcp_client.server(server_name)
         if action_type is ActionType.MCP_CONNECT:
-            return ActionProposal(
-                f"Start MCP server {server.name} and list its allowed tools",
-                {"server": server.name},
-            )
+            raise ValueError("new MCP connect Actions are no longer supported")
         tool, arguments = payload.get("tool"), payload.get("arguments")
         if not isinstance(tool, str) or not isinstance(arguments, dict):
             raise ValueError("tool and arguments must be provided")
@@ -257,9 +256,11 @@ class McpActionHandler:
             raise PolicyError(
                 f"MCP tool is not allowed for server {server.name}: {tool}"
             )
+        request = {"server": server.name, "tool": tool, "arguments": arguments}
+        _preserve_manual_approval(payload, request)
         return ActionProposal(
             f"Call MCP {server.name}.{tool}",
-            {"server": server.name, "tool": tool, "arguments": arguments},
+            request,
         )
 
     async def execute(self, action: ActionRecord) -> ActionExecution:
@@ -267,12 +268,23 @@ class McpActionHandler:
         if plugin_name is not None:
             result = await self.plugin_executor.execute(action)
         else:
-            self.mcp_executor.registry = self.registry
             result = await self.mcp_executor.execute(action)
         return ActionExecution(result, ActionResultKind.SUCCESS)
 
     async def revalidate(self, action: ActionRecord) -> ActionProposal:
+        if action.type is ActionType.MCP_CONNECT:
+            server = self.mcp_client.server(str(action.request["server"]))
+            request = {"server": server.name}
+            _preserve_manual_approval(action.request, request)
+            return ActionProposal(
+                f"Refresh historical MCP connection {server.name}", request
+            )
         return await self.propose(action.type, dict(action.request))
 
     async def reverse(self, action: ActionRecord) -> dict[str, Any]:
         raise ValueError("MCP actions cannot be reversed")
+
+
+def _preserve_manual_approval(source: dict[str, Any], target: dict[str, Any]) -> None:
+    if source.get("force_manual_approval") is True:
+        target["force_manual_approval"] = True

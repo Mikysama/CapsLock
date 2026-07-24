@@ -54,6 +54,7 @@ class WorkspaceRepositories:
         collaboration = CollaborationRepository(database)
         await collaboration.interrupt_active()
         journal = RunJournalRepository(database)
+        await journal.interrupt_active()
         runs = RunRepository(database, journal)
         return cls(
             database,

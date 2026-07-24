@@ -23,6 +23,7 @@ from ...domain import (
     ActionRecord,
     ActionStatus,
     ApprovalDecision,
+    AgentEventKind,
     BudgetRequest,
     BudgetSnapshot,
     SessionInfo,
@@ -49,6 +50,7 @@ from .screens import (
     ConfirmScreen,
     ContentScreen,
     HistorySearchScreen,
+    InputRequestScreen,
     ModelScreen,
     PermissionScreen,
     SessionPickerScreen,
@@ -418,6 +420,29 @@ class CapsLockApp(App[int]):
             self.state = set_queue_running(self.state, item.work_item_id)
         elif item.kind is ControllerEventKind.RUN_EVENT and item.event is not None:
             self.state = reduce_event(self.state, item.event)
+            if item.event.kind is AgentEventKind.WAITING_INPUT:
+                request = item.event.data.get("request", {})
+                questions = (
+                    request.get("questions", [])
+                    if isinstance(request, dict)
+                    else []
+                )
+                answers = await self._modal_wait(InputRequestScreen(questions))
+                if answers is not None:
+                    await self.context.session.journal.answer_input_request(
+                        str(item.event.data["request_id"]),
+                        self.context.session.session_id,
+                        answers,
+                    )
+                    run = await self.context.session.runs.require(
+                        item.event.run_id,
+                        session_id=self.context.session.session_id,
+                    )
+                    await self.controller.enqueue_item(
+                        item.event.work_item_id,
+                        run.question,
+                        item.event.run_id,
+                    )
         elif item.kind is ControllerEventKind.CANCELLED:
             self.state = add_system_message(self.state, "Cancelled", status="cancelled")
         elif item.kind is ControllerEventKind.FAILED:

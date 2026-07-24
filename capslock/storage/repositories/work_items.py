@@ -54,7 +54,10 @@ class WorkItemRepository(Repository):
     ) -> list[WorkItemInfo]:
         query = """SELECT w.*,(SELECT r.id FROM runs r WHERE r.work_item_id=w.id ORDER BY r.started_at DESC LIMIT 1) current_run_id FROM work_items w WHERE w.session_id=?"""
         if active_only:
-            query += " AND w.status IN ('queued','running','waiting_approval')"
+            query += (
+                " AND w.status IN "
+                "('queued','running','waiting_approval','waiting_input')"
+            )
         query += " ORDER BY w.position,w.created_at"
         return [work_item(row) for row in await self.all(query, (session_id,))]
 

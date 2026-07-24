@@ -55,18 +55,25 @@ async def plugin_command(console: Console, layout: ProjectLayout, args) -> int:
     _print_manifest(console, entry.manifest, enabled=entry.enabled)
     if (
         command == "enable"
-        and bool(getattr(args, "trusted_native", False))
+        and (
+            bool(getattr(args, "trusted_native", False))
+            or bool(getattr(args, "session_lifecycle", False))
+        )
         and not args.yes
     ):
         console.print(
-            "[warning]Trusted-native enable requires both --trusted-native and --yes.[/]"
+            "[warning]Trusted-native or session-lifecycle enable requires the flag and --yes.[/]"
         )
         return 3
     if not _confirmed(console, args.yes, f"{command} this plugin"):
         return 3
     if command == "enable":
         service.enable(
-            args.name, trusted_native=bool(getattr(args, "trusted_native", False))
+            args.name,
+            trusted_native=bool(getattr(args, "trusted_native", False)),
+            allow_session_lifecycle=bool(
+                getattr(args, "session_lifecycle", False)
+            ),
         )
     elif command == "disable":
         service.disable(args.name)

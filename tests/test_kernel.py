@@ -22,12 +22,28 @@ from capslock.storage.artifacts import ArtifactAccessError, ToolArtifactStore
 from capslock.storage.repositories import WorkspaceRepositories
 from capslock.tooling import (
     ExecutionContext,
-    Tool,
-    ToolCapabilities,
-    ToolRegistry,
-    ToolResult,
+    InterruptBehavior,
+    ResolvedToolPolicy,
+    ToolRuntime,
+    ToolOutcome,
+    define_tool,
 )
 from tests.helpers import FakeChatModel, answer, workflow_service, workspace_run
+
+ToolRegistry = ToolRuntime
+ToolCapabilities = ResolvedToolPolicy
+
+
+def Tool(name, description, schema, execute, *, capabilities=ResolvedToolPolicy()):
+    return define_tool(name, description, schema, execute, policy=capabilities)
+
+
+def ToolResult(ok, data, error=None):
+    return (
+        ToolOutcome.success(data)
+        if ok
+        else ToolOutcome.failure(error or "failed", data=data)
+    )
 
 
 def test_run_engine_serializes_requests() -> None:
@@ -132,6 +148,97 @@ def test_read_only_tools_run_concurrently_and_commit_in_call_order(
                 "first",
                 "second",
             ]
+        finally:
+            await repositories.close()
+
+    asyncio.run(scenario())
+
+
+def test_parallel_fail_fast_cancels_siblings_and_commits_results(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        repositories = await WorkspaceRepositories.open(
+            tmp_path / "state.sqlite3", workspace=tmp_path
+        )
+        try:
+            session, prepared = await workspace_run(repositories)
+            slow_started = asyncio.Event()
+            slow_cancelled = asyncio.Event()
+
+            async def execute(context, arguments):
+                if arguments["name"] == "fail":
+                    await slow_started.wait()
+                    return ToolOutcome.failure("failed deliberately")
+                slow_started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    slow_cancelled.set()
+                    raise
+
+            policy = ResolvedToolPolicy(
+                read_only=True,
+                concurrency_safe=True,
+                interrupt_behavior=InterruptBehavior.CANCEL,
+                fail_fast=True,
+            )
+            tools = ToolRuntime(
+                [
+                    define_tool(
+                        "read",
+                        "Read concurrently.",
+                        {
+                            "type": "object",
+                            "properties": {"name": {"type": "string"}},
+                            "required": ["name"],
+                        },
+                        execute,
+                        policy=policy,
+                    )
+                ]
+            )
+            model = FakeChatModel(
+                ModelResponse(
+                    ModelMessage(
+                        None,
+                        (
+                            ModelToolCall("first", "read", '{"name":"fail"}'),
+                            ModelToolCall("second", "read", '{"name":"slow"}'),
+                        ),
+                    )
+                ),
+                answer("done"),
+            )
+            loop = ToolLoop(
+                chat_model=model,
+                model="test-model",
+                tools=tools,
+                journal=repositories.run_journal,
+                max_tool_rounds=2,
+                context_factory=lambda run_id: ExecutionContext(
+                    session_id=session.id,
+                    run_id=run_id,
+                    policy=WorkspacePolicy(tmp_path),
+                    event=lambda *args, **kwargs: None,
+                    actions=object(),
+                ),
+            )
+            messages = [{"role": "user", "content": "read"}]
+            result = await loop.run(
+                messages,
+                prepared.run.id,
+                emit=lambda kind, data: asyncio.sleep(0),
+            )
+            assert result.text == "done"
+            assert slow_cancelled.is_set()
+            tool_messages = [item for item in messages if item["role"] == "tool"]
+            assert [item["tool_call_id"] for item in tool_messages] == [
+                "first",
+                "second",
+            ]
+            assert '"status": "failed"' in tool_messages[0]["content"]
+            assert '"status": "cancelled"' in tool_messages[1]["content"]
         finally:
             await repositories.close()
 
@@ -315,9 +422,7 @@ def test_plugin_broker_enforces_scopes_and_missing_approvals(tmp_path: Path) -> 
                 }
             )
         with pytest.raises(PolicyError, match="approval"):
-            await broker.request(
-                {"capability": "credential", "name": "MODEL_KEY"}
-            )
+            await broker.request({"capability": "credential", "name": "MODEL_KEY"})
 
     asyncio.run(scenario())
 

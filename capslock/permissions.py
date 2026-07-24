@@ -40,11 +40,21 @@ class RiskAssessment:
 
 class ApprovalPolicy:
     def assess(self, action: ActionType) -> RiskAssessment:
-        if action in {ActionType.FILE_EDIT, ActionType.FILE_CREATE}:
+        if action in {
+            ActionType.FILE_EDIT,
+            ActionType.FILE_CREATE,
+            ActionType.NOTEBOOK_EDIT,
+        }:
             return RiskAssessment(
                 "high",
                 "Modifies workspace files.",
                 "CapsLock records original content; use /undo while the file is unchanged.",
+            )
+        if action in {ActionType.WORKTREE_CREATE, ActionType.WORKTREE_EXIT}:
+            return RiskAssessment(
+                "high",
+                "Changes the active Git workspace and may create or remove a branch.",
+                "Keep preserves the worktree; removal is allowed only for this session's worktrees.",
             )
         if action is ActionType.COMMAND:
             return RiskAssessment(
@@ -56,7 +66,7 @@ class ApprovalPolicy:
             return RiskAssessment(
                 "high",
                 "Starts an external local server or invokes a third-party tool.",
-                "The stdio server is short-lived; CapsLock cannot reverse third-party side effects.",
+                "The managed stdio connection is session-scoped; CapsLock cannot reverse third-party side effects.",
             )
         if action is ActionType.CREDENTIAL_ACCESS:
             return RiskAssessment(
@@ -75,6 +85,8 @@ class ApprovalPolicy:
         )
 
     def requires_approval(self, mode: PermissionMode, action: ActionType) -> bool:
+        if action is ActionType.WORKTREE_EXIT:
+            return True
         assessment = self.assess(action)
         if mode is PermissionMode.FULL_ACCESS:
             return False

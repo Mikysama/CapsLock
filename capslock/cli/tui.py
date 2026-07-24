@@ -145,6 +145,19 @@ async def run_tui(context: CliContext, *, status_enabled: bool = True) -> int:
             and isinstance(renderer, _RunRenderer)
         ):
             await renderer.handle(item.event)
+            if item.event.kind is AgentEventKind.WAITING_INPUT:
+                answered = await _answer_input_request(
+                    context, item.event, run_in_terminal
+                )
+                if answered:
+                    run = await agent.runs.require(
+                        item.event.run_id, session_id=agent.session_id
+                    )
+                    await controller.enqueue_item(
+                        item.event.work_item_id,
+                        run.question,
+                        item.event.run_id,
+                    )
         elif item.kind is ControllerEventKind.CANCELLED and isinstance(
             renderer, _RunRenderer
         ):
@@ -616,3 +629,61 @@ async def _start_queued(
 ) -> None:
     item = await controller.start_queued(prefix)
     context.console.print(f"[waiting]Queued work activated:[/] {item.id[:8]}")
+
+
+async def _answer_input_request(
+    context: CliContext,
+    event: AgentEvent,
+    terminal_runner,
+) -> bool:
+    request = event.data.get("request", {})
+    questions = request.get("questions", []) if isinstance(request, dict) else []
+    if not isinstance(questions, list):
+        return False
+    answers: dict[str, object] = {}
+    for raw in questions:
+        if not isinstance(raw, dict):
+            continue
+        identifier = str(raw.get("id", ""))
+        prompt = str(raw.get("question", "Question"))
+        options = raw.get("options", [])
+        labels = [
+            str(option.get("label"))
+            for option in options
+            if isinstance(option, dict) and option.get("label")
+        ]
+        values = [
+            str(option.get("value", option.get("label")))
+            for option in options
+            if isinstance(option, dict) and option.get("label")
+        ]
+        menu = "\n".join(
+            f"  {index}. {label}" for index, label in enumerate(labels, 1)
+        )
+        suffix = "comma-separated choices or free text" if raw.get("multiple") else "choice number or free text"
+        answer = await terminal_runner(
+            lambda: context.console.input(f"{prompt}\n{menu}\n{suffix}: ")
+        )
+        entered = str(answer).strip()
+        if not entered:
+            return False
+        if raw.get("multiple"):
+            selected = []
+            for part in entered.split(","):
+                token = part.strip()
+                selected.append(
+                    values[int(token) - 1]
+                    if token.isdigit() and 1 <= int(token) <= len(values)
+                    else token
+                )
+            answers[identifier] = selected
+        else:
+            answers[identifier] = (
+                values[int(entered) - 1]
+                if entered.isdigit() and 1 <= int(entered) <= len(values)
+                else entered
+            )
+    await context.session.journal.answer_input_request(
+        str(event.data["request_id"]), context.session.session_id, answers
+    )
+    return True

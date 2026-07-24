@@ -98,6 +98,80 @@ class TextPromptScreen(ModalScreen[str | None]):
         self.dismiss(None)
 
 
+class InputRequestScreen(ModalScreen[dict[str, object] | None]):
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    def __init__(self, questions: list[dict[str, object]]) -> None:
+        super().__init__()
+        self.questions = questions
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="dialog", classes="content-dialog"):
+            yield Static("CapsLock needs your input", classes="dialog-title")
+            with VerticalScroll(classes="dialog-scroll"):
+                for index, question in enumerate(self.questions):
+                    options = question.get("options", [])
+                    labels = [
+                        str(item.get("label"))
+                        for item in options
+                        if isinstance(item, dict)
+                    ]
+                    yield Static(
+                        f"{question.get('question', 'Question')}\n"
+                        + " · ".join(
+                            f"{number}. {label}"
+                            for number, label in enumerate(labels, 1)
+                        ),
+                        markup=False,
+                    )
+                    yield Input(
+                        placeholder=(
+                            "Comma-separated choices or free text"
+                            if question.get("multiple")
+                            else "Choice number or free text"
+                        ),
+                        id=f"input-answer-{index}",
+                    )
+            with Horizontal(classes="dialog-actions"):
+                yield Button("Cancel", id="cancel", variant="default")
+                yield Button("Submit", id="submit", variant="primary")
+            yield Static("All questions require an answer · Esc cancel", classes="input-guide")
+
+    def on_mount(self) -> None:
+        self.query_one("#input-answer-0", Input).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "cancel":
+            self.dismiss(None)
+            return
+        answers: dict[str, object] = {}
+        for index, question in enumerate(self.questions):
+            entered = self.query_one(f"#input-answer-{index}", Input).value.strip()
+            if not entered:
+                return
+            options = question.get("options", [])
+            values = [
+                str(item.get("value", item.get("label")))
+                for item in options
+                if isinstance(item, dict)
+            ]
+            def resolve(token: str) -> str:
+                return (
+                    values[int(token) - 1]
+                    if token.isdigit() and 1 <= int(token) <= len(values)
+                    else token
+                )
+            answers[str(question.get("id"))] = (
+                [resolve(item.strip()) for item in entered.split(",")]
+                if question.get("multiple")
+                else resolve(entered)
+            )
+        self.dismiss(answers)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class ApprovalScreen(ModalScreen[ApprovalDecision]):
     BINDINGS = [
         Binding("escape", "reject", "Reject"),

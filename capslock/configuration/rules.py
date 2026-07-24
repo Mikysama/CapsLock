@@ -172,6 +172,7 @@ def agent_settings(raw: dict[str, object]) -> AgentSettings:
         max_concurrency=int(raw.get("max_concurrency", 2)),
         max_depth=int(raw.get("max_depth", 1)),
         max_child_tool_rounds=int(raw.get("max_child_tool_rounds", 16)),
+        background_enabled=boolean(raw.get("background_enabled", True)),
     )
     if values.max_children < 1 or values.max_children > 32:
         raise ValueError("agents.max_children must be between 1 and 32")

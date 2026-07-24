@@ -16,22 +16,26 @@ class ChildCapabilityPolicy:
     def tool_allowlist(self) -> set[str]:
         allowed = {
             "list_files",
+            "glob_files",
             "read_file",
             "search_files",
             "git_status",
             "git_diff",
-            "task_list_update",
-            "task_status_update",
+            "create_task",
+            "list_tasks",
+            "get_task",
+            "update_task",
         }
         kinds = {item.kind for item in self.grants}
         if CapabilityKind.WORKSPACE_WRITE in kinds:
-            allowed.update({"propose_file_edit", "propose_file_create"})
+            allowed.update({"edit_file", "create_file", "write_file"})
         if CapabilityKind.COMMAND in kinds:
-            allowed.add("propose_command")
+            allowed.update({"shell", "process_output", "process_stop"})
         if CapabilityKind.WEB in kinds:
-            allowed.update({"propose_web_search", "propose_web_fetch"})
+            allowed.update({"web_search", "web_fetch"})
         if CapabilityKind.MCP in kinds:
-            allowed.update({"propose_mcp_connect", "propose_mcp_call"})
+            # Concrete mcp__server__tool names are added from the parent catalog.
+            allowed.add("search_tools")
         return allowed
 
     def plugin_names(self) -> set[str]:
@@ -42,7 +46,11 @@ class ChildCapabilityPolicy:
         }
 
     def allows_action(self, action: ActionRecord) -> bool:
-        if action.type in {ActionType.FILE_EDIT, ActionType.FILE_CREATE}:
+        if action.type in {
+            ActionType.FILE_EDIT,
+            ActionType.FILE_CREATE,
+            ActionType.NOTEBOOK_EDIT,
+        }:
             return any(
                 item.kind is CapabilityKind.WORKSPACE_WRITE for item in self.grants
             )

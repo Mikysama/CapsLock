@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import shutil
-import signal
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,6 +12,13 @@ from typing import Any
 
 from ...domain import ActionRecord, ActionResultKind, ActionType
 from ...policy import PolicyError, WorkspacePolicy
+from ...shell import (
+    SandboxedCommand,
+    SessionProcessManager,
+    assess_shell,
+    sandboxed_command,
+    stop_process,
+)
 from .core import ActionExecution, ActionProposal
 
 
@@ -66,14 +71,20 @@ class CommandActionHandler:
         *,
         timeout_seconds: float,
         output_limit_bytes: int,
+        max_timeout_seconds: float = 600,
+        process_manager: SessionProcessManager | None = None,
     ) -> None:
         self.policy = policy
         self.timeout_seconds = timeout_seconds
         self.output_limit_bytes = output_limit_bytes
+        self.max_timeout_seconds = max_timeout_seconds
+        self.process_manager = process_manager
 
     async def propose(
         self, action_type: ActionType, payload: dict[str, Any]
     ) -> ActionProposal:
+        if "command" in payload:
+            return await self._propose_shell(payload)
         template_name = payload.get("template")
         target, cwd = payload.get("target"), payload.get("cwd", ".")
         if (
@@ -112,6 +123,64 @@ class CommandActionHandler:
             },
         )
 
+    async def _propose_shell(self, payload: dict[str, Any]) -> ActionProposal:
+        command = payload.get("command")
+        cwd = payload.get("cwd", ".")
+        sandbox = payload.get("sandbox", "default")
+        network = payload.get("network", [])
+        background = payload.get("background", False)
+        timeout = payload.get("timeout", self.timeout_seconds)
+        if not isinstance(command, str) or not isinstance(cwd, str):
+            raise ValueError("shell command and cwd must be strings")
+        if sandbox != "default":
+            raise PolicyError("only the default OS sandbox is supported")
+        if not isinstance(network, list) or not all(
+            isinstance(item, str) for item in network
+        ):
+            raise ValueError("shell network must be an array of host scopes")
+        if not isinstance(background, bool):
+            raise ValueError("shell background must be a boolean")
+        timeout = float(timeout)
+        if timeout <= 0 or timeout > self.max_timeout_seconds:
+            raise ValueError(
+                f"shell timeout must be between 0 and {self.max_timeout_seconds:g} seconds"
+            )
+        assessment = assess_shell(command)
+        if assessment.behavior == "deny":
+            raise PolicyError(assessment.reason)
+        directory = self.policy.command_directory(cwd)
+        built = sandboxed_command(
+            command=command,
+            workspace=self.policy.root,
+            cwd=directory,
+            network=network,
+        )
+        force_approval = bool(
+            payload.get("force_manual_approval")
+            or assessment.behavior == "ask"
+            or network
+            or background
+        )
+        return ActionProposal(
+            f"Run sandboxed shell command: {command[:160]}",
+            {
+                "command": command,
+                "argv": list(built.argv),
+                "cwd": str(directory.relative_to(self.policy.root)),
+                "sandbox": "default",
+                "network": network,
+                "background": background,
+                "timeout_seconds": timeout,
+                "temporary": str(built.temporary),
+                "safety": {
+                    "behavior": assessment.behavior,
+                    "reason": assessment.reason,
+                    "parsed": list(assessment.parsed),
+                },
+                "force_manual_approval": force_approval,
+            },
+        )
+
     def _project_supports(self, template: CommandTemplate) -> bool:
         if template.requires and not (self.policy.root / template.requires).is_file():
             return False
@@ -129,6 +198,20 @@ class CommandActionHandler:
 
     async def revalidate(self, action: ActionRecord) -> ActionProposal:
         request = action.request
+        if "command" in request:
+            return await self._propose_shell(
+                {
+                    "command": request.get("command"),
+                    "cwd": request.get("cwd", "."),
+                    "sandbox": request.get("sandbox", "default"),
+                    "network": request.get("network", []),
+                    "background": request.get("background", False),
+                    "timeout": request.get("timeout_seconds", self.timeout_seconds),
+                    "force_manual_approval": request.get(
+                        "force_manual_approval", False
+                    ),
+                }
+            )
         name = str(request.get("template", ""))
         template = TEMPLATES.get(name)
         argv = request.get("argv", [])
@@ -144,6 +227,28 @@ class CommandActionHandler:
 
     async def execute(self, action: ActionRecord) -> ActionExecution:
         request = action.request
+        if request.get("background") is True:
+            if self.process_manager is None:
+                raise RuntimeError("background process manager is unavailable")
+            job = await self.process_manager.start(
+                action.session_id,
+                SandboxedCommand(
+                    tuple(str(item) for item in request["argv"]),
+                    self.policy.root,
+                    Path(str(request["temporary"])),
+                ),
+            )
+            return ActionExecution(
+                {
+                    "process_id": job.id,
+                    "status": job.status,
+                    "stdout": "",
+                    "stderr": "",
+                    "truncated": False,
+                    "timed_out": False,
+                },
+                ActionResultKind.EXIT_ZERO,
+            )
         process = await asyncio.create_subprocess_exec(
             *[str(item) for item in request["argv"]],
             cwd=self.policy.resolve(str(request["cwd"])),
@@ -164,6 +269,10 @@ class CommandActionHandler:
             cleanup = asyncio.create_task(self._cancel_process(process))
             await _await_cleanup(cleanup)
             raise
+        finally:
+            temporary = request.get("temporary")
+            if isinstance(temporary, str):
+                shutil.rmtree(temporary, ignore_errors=True)
         return self._result(process.returncode, stdout_bytes, stderr_bytes)
 
     def _result(
@@ -198,17 +307,7 @@ class CommandActionHandler:
 
     @staticmethod
     async def _stop(process: asyncio.subprocess.Process) -> None:
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            return
-        try:
-            await asyncio.wait_for(process.wait(), timeout=2)
-        except TimeoutError:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+        await stop_process(process)
 
     async def _cancel_process(self, process: asyncio.subprocess.Process) -> None:
         await self._stop(process)

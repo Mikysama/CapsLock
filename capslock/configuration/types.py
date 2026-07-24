@@ -59,6 +59,24 @@ class RuntimeSettings:
 
 
 @dataclass(frozen=True)
+class ToolSettings:
+    schema_budget_tokens: int = 8_000
+    max_read_concurrency: int = 4
+    aggregate_result_bytes: int = 65_536
+
+
+@dataclass(frozen=True)
+class ShellSettings:
+    enabled: bool = True
+    default_timeout_seconds: float = 120
+    max_timeout_seconds: float = 600
+    classifier_enabled: bool = True
+    classifier_threshold: float = 0.95
+    background_enabled: bool = True
+    output_bytes: int = 100_000
+
+
+@dataclass(frozen=True)
 class ContextSettings:
     auto_compact: bool = True
     trigger_ratio: float = 0.80
@@ -76,6 +94,38 @@ class AgentSettings:
     max_concurrency: int = 2
     max_depth: int = 1
     max_child_tool_rounds: int = 16
+    background_enabled: bool = True
+
+
+@dataclass(frozen=True)
+class LspServerSettings:
+    command: tuple[str, ...]
+    extensions: tuple[str, ...]
+    root_markers: tuple[str, ...] = (".git",)
+
+
+@dataclass(frozen=True)
+class LspSettings:
+    enabled: bool = True
+    startup_timeout_seconds: float = 10
+    request_timeout_seconds: float = 15
+    idle_timeout_seconds: float = 300
+    servers: dict[str, LspServerSettings] | None = None
+
+
+@dataclass(frozen=True)
+class DocumentSettings:
+    max_pdf_bytes: int = 50 * 1024 * 1024
+    max_pdf_pages: int = 10
+    max_notebook_bytes: int = 10 * 1024 * 1024
+    max_notebook_cells: int = 50
+    max_cell_output_bytes: int = 65_536
+
+
+@dataclass(frozen=True)
+class WorktreeSettings:
+    enabled: bool = True
+    max_per_session: int = 4
 
 
 @dataclass(frozen=True)

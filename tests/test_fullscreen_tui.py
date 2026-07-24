@@ -51,18 +51,14 @@ def _event(kind: AgentEventKind, data: dict, sequence: int = 1) -> AgentEvent:
 
 def test_tool_presentation_is_allowlisted_and_redacted() -> None:
     view = tool_presentation(
-        "propose_mcp_call",
-        {
-            "server": "local",
-            "tool": "lookup",
-            "arguments": {"password": "do-not-emit", "payload": "private"},
-        },
+        "mcp__local__lookup",
+        {"password": "do-not-emit", "payload": "private"},
     )
     assert view == {
         "version": 1,
         "category": "mcp",
-        "title": "Propose MCP call",
-        "detail": "local/lookup",
+        "title": "MCP local lookup",
+        "detail": "mcp__local__lookup",
     }
     assert "do-not-emit" not in str(view)
     assert "private" not in str(view)
@@ -136,6 +132,28 @@ def test_reducer_groups_read_tools_and_collapses_completed_reasoning() -> None:
         for item in expanded.messages
         if item.kind in {MessageKind.REASONING, MessageKind.TOOLS}
     )
+
+
+def test_reducer_keeps_paused_run_resumable() -> None:
+    state = reduce_event(
+        TuiState(),
+        _event(
+            AgentEventKind.TOOL_RUNNING,
+            {"name": "ask_user", "tool_call_id": "ask"},
+        ),
+    )
+    state = reduce_event(
+        state,
+        _event(AgentEventKind.WAITING_INPUT, {"request_id": "input"}, 2),
+    )
+    assert "run" not in state.terminal_runs
+    assert state.activity == "Waiting for input"
+    assert state.messages[-1].tools[0].status == "waiting_input"
+    resumed = reduce_event(
+        state,
+        _event(AgentEventKind.THINKING, {"text": "resume"}, 3),
+    )
+    assert resumed.messages[-1].text == "resume"
 
 
 def test_transparent_background_preserves_font_style() -> None:

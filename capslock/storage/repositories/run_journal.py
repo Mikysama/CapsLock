@@ -18,7 +18,189 @@ from .core import Repository, now
 from .workflow_records import event, run, step
 
 
+def _validate_input_answers(questions: object, answers: object) -> None:
+    if not isinstance(questions, list) or not isinstance(answers, dict):
+        raise ValueError("answers must be an object keyed by question id")
+    expected = {
+        str(question.get("id")): question
+        for question in questions
+        if isinstance(question, dict) and isinstance(question.get("id"), str)
+    }
+    if set(answers) != set(expected):
+        raise ValueError("answers must contain exactly one entry per question")
+    for identifier, answer in answers.items():
+        question = expected[identifier]
+        multiple = bool(question.get("multiple", False))
+        values = answer if isinstance(answer, list) else [answer]
+        if multiple != isinstance(answer, list) or not values:
+            raise ValueError(f"invalid answer shape for question {identifier}")
+        if not all(isinstance(value, str) and value.strip() for value in values):
+            raise ValueError(f"answers for question {identifier} must be text")
+        options = {
+            str(option.get("value", option.get("label")))
+            for option in question.get("options", [])
+            if isinstance(option, dict)
+        }
+        allow_free = bool(question.get("allow_free_text", True))
+        if not allow_free and any(value not in options for value in values):
+            raise ValueError(f"answer is not an allowed option for question {identifier}")
+
+
 class RunJournalRepository(Repository):
+    async def interrupt_active(self) -> None:
+        """Close crash-left journal records before accepting new workspace work."""
+        timestamp = now()
+        preview = json.dumps(
+            {
+                "status": "cancelled",
+                "ok": False,
+                "executed": False,
+                "delivery_status": "inline",
+                "data": {},
+                "content": [],
+                "error": "workspace process ended during tool execution",
+                "error_code": "process_interrupted",
+            }
+        )
+        async with self.database.transaction() as connection:
+            await connection.execute(
+                """UPDATE tool_invocations
+                   SET status='cancelled',execution_status='cancelled',delivery_status='inline',
+                       result_preview=?,error_code='process_interrupted',finished_at=?,
+                       duration_ms=coalesce(duration_ms,0)
+                   WHERE status IN ('received','validating','authorizing','queued','running')""",
+                (preview, timestamp),
+            )
+            await connection.execute(
+                """UPDATE run_steps SET status='cancelled',finished_at=?,
+                       error=coalesce(error,'workspace process interrupted')
+                   WHERE status='running'""",
+                (timestamp,),
+            )
+
+    async def record_permission_decision(
+        self,
+        *,
+        invocation_id: str,
+        behavior: str,
+        source: str,
+        reason: str,
+        rule: dict[str, Any] | None = None,
+        classifier: dict[str, Any] | None = None,
+        decided_by: str | None = None,
+    ) -> str:
+        identifier = f"perm_{uuid.uuid4().hex}"
+        await self.execute(
+            """INSERT INTO permission_decisions
+               (id,invocation_id,behavior,source,reason,rule_json,classifier_json,decided_by,created_at)
+               VALUES(?,?,?,?,?,?,?,?,?)""",
+            (
+                identifier,
+                invocation_id,
+                behavior,
+                source,
+                reason,
+                json.dumps(rule, ensure_ascii=False) if rule is not None else None,
+                json.dumps(classifier, ensure_ascii=False)
+                if classifier is not None
+                else None,
+                decided_by,
+                now(),
+            ),
+        )
+        return identifier
+
+    async def session_permission_rules(self, session_id: str) -> list[dict[str, Any]]:
+        rows = await self.all(
+            "SELECT * FROM permission_rules WHERE session_id=? ORDER BY created_at,id",
+            (session_id,),
+        )
+        return [
+            {
+                "id": str(row["id"]),
+                "behavior": str(row["behavior"]),
+                "tool": str(row["tool"]),
+                "constraints": json.loads(row["constraints_json"]),
+                "source": "session",
+            }
+            for row in rows
+        ]
+
+    async def add_session_permission_rule(
+        self,
+        session_id: str,
+        *,
+        behavior: str,
+        tool: str,
+        constraints: dict[str, Any] | None = None,
+    ) -> str:
+        identifier = f"rule_{uuid.uuid4().hex}"
+        await self.execute(
+            "INSERT INTO permission_rules(id,session_id,behavior,tool,constraints_json,source,created_at) VALUES(?,?,?,?,?,'session',?)",
+            (
+                identifier,
+                session_id,
+                behavior,
+                tool,
+                json.dumps(constraints or {}, ensure_ascii=False),
+                now(),
+            ),
+        )
+        return identifier
+
+    async def record_tool_discoveries(
+        self, session_id: str, names: list[str], generation: int
+    ) -> None:
+        if not names:
+            return
+        async with self.database.transaction() as connection:
+            await connection.executemany(
+                "INSERT INTO tool_discoveries(session_id,tool_name,catalog_generation,created_at) VALUES(?,?,?,?) ON CONFLICT(session_id,tool_name) DO UPDATE SET catalog_generation=excluded.catalog_generation",
+                [(session_id, name, generation, now()) for name in names],
+            )
+
+    async def tool_discoveries(self, session_id: str) -> list[str]:
+        rows = await self.all(
+            "SELECT tool_name FROM tool_discoveries WHERE session_id=? ORDER BY tool_name",
+            (session_id,),
+        )
+        return [str(row["tool_name"]) for row in rows]
+
+    async def store_result_replacement(
+        self,
+        *,
+        tool_call_id: str,
+        session_id: str,
+        invocation_id: str,
+        delivery_status: str,
+        replacement: dict[str, Any],
+    ) -> None:
+        await self.execute(
+            """INSERT INTO tool_result_replacements
+               (tool_call_id,session_id,invocation_id,delivery_status,replacement_json,created_at)
+               VALUES(?,?,?,?,?,?) ON CONFLICT(tool_call_id) DO NOTHING""",
+            (
+                tool_call_id,
+                session_id,
+                invocation_id,
+                delivery_status,
+                json.dumps(replacement, ensure_ascii=False),
+                now(),
+            ),
+        )
+
+    async def replace_tool_delivery(
+        self,
+        identifier: str,
+        *,
+        delivery_status: str,
+        result_preview: str,
+        artifact_id: str | None,
+    ) -> None:
+        await self.execute(
+            "UPDATE tool_invocations SET delivery_status=?,result_preview=?,artifact_id=? WHERE id=?",
+            (delivery_status, result_preview[:4096], artifact_id, identifier),
+        )
     async def event_state(self, run_id: str) -> tuple[int, str, str, str]:
         row = await self.one(
             """SELECT r.session_id,r.work_item_id,
@@ -101,7 +283,9 @@ class RunJournalRepository(Repository):
         self,
         identifier: str,
         *,
-        ok: bool,
+        status: str,
+        execution_status: str,
+        delivery_status: str,
         result_preview: str,
         duration_ms: int,
         artifact_id: str | None = None,
@@ -109,10 +293,12 @@ class RunJournalRepository(Repository):
     ) -> None:
         await self.execute(
             """UPDATE tool_invocations
-               SET status=?,result_preview=?,artifact_id=?,error_code=?,finished_at=?,duration_ms=?
-               WHERE id=? AND status IN ('validating','authorizing','running')""",
+               SET status=?,execution_status=?,delivery_status=?,result_preview=?,artifact_id=?,error_code=?,finished_at=?,duration_ms=?
+               WHERE id=? AND status IN ('received','validating','authorizing','queued','running')""",
             (
-                "completed" if ok else "failed",
+                status,
+                execution_status,
+                delivery_status,
                 result_preview[:4096],
                 artifact_id,
                 error_code,
@@ -121,6 +307,171 @@ class RunJournalRepository(Repository):
                 identifier,
             ),
         )
+
+    async def update_tool_invocation(
+        self,
+        identifier: str,
+        *,
+        status: str | None = None,
+        policy: dict[str, Any] | None = None,
+        timings: dict[str, int] | None = None,
+    ) -> None:
+        values: list[object] = []
+        assignments: list[str] = []
+        if status is not None:
+            assignments.append("status=?")
+            values.append(status)
+        if policy is not None:
+            assignments.extend(("resolved_policy_json=?", "capabilities_json=?"))
+            encoded = json.dumps(policy, ensure_ascii=False)
+            values.extend((encoded, encoded))
+        if timings is not None:
+            assignments.append("timings_json=?")
+            values.append(json.dumps(timings, ensure_ascii=False))
+        if not assignments:
+            return
+        values.append(identifier)
+        await self.execute(
+            f"UPDATE tool_invocations SET {','.join(assignments)} WHERE id=?",
+            tuple(values),
+        )
+
+    async def pause_tool_invocation(
+        self,
+        identifier: str,
+        *,
+        kind: str,
+        request_id: str,
+        continuation: dict[str, Any],
+    ) -> None:
+        if kind not in {"approval", "user_input"}:
+            raise ValueError("invalid tool pause kind")
+        status = "waiting_approval" if kind == "approval" else "waiting_input"
+        updated = await self.execute(
+            """UPDATE tool_invocations
+               SET status=?,pause_kind=?,pause_request_id=?,continuation_json=?
+               WHERE id=? AND status IN ('received','validating','authorizing','queued','running')""",
+            (
+                status,
+                kind,
+                request_id,
+                json.dumps(continuation, ensure_ascii=False),
+                identifier,
+            ),
+        )
+        if not updated:
+            raise ValueError("tool invocation is not pausable")
+
+    async def pause_step(
+        self, identifier: str, *, kind: str, checkpoint: dict[str, Any]
+    ) -> None:
+        status = "waiting_approval" if kind == "approval" else "waiting_input"
+        updated = await self.execute(
+            "UPDATE run_steps SET status=?,checkpoint_json=? WHERE id=? AND status='running'",
+            (status, json.dumps(checkpoint, ensure_ascii=False), identifier),
+        )
+        if not updated:
+            raise ValueError("run step is not pausable")
+
+    async def update_step_checkpoint(
+        self, identifier: str, checkpoint: dict[str, Any]
+    ) -> None:
+        updated = await self.execute(
+            """UPDATE run_steps SET checkpoint_json=? WHERE id=?
+               AND status IN ('waiting_approval','waiting_input')""",
+            (json.dumps(checkpoint, ensure_ascii=False), identifier),
+        )
+        if not updated:
+            raise ValueError("paused run step does not exist")
+
+    async def create_input_request(
+        self,
+        *,
+        request_id: str,
+        session_id: str,
+        run_id: str,
+        invocation_id: str,
+        questions: object,
+        resume_data: dict[str, object],
+    ) -> None:
+        await self.execute(
+            """INSERT INTO tool_input_requests(
+                 id,session_id,run_id,invocation_id,status,questions_json,
+                 resume_data_json,created_at
+               ) VALUES(?,?,?,?, 'pending',?,?,?)""",
+            (
+                request_id,
+                session_id,
+                run_id,
+                invocation_id,
+                json.dumps(questions, ensure_ascii=False),
+                json.dumps(resume_data, ensure_ascii=False),
+                now(),
+            ),
+        )
+
+    async def list_input_requests(
+        self, session_id: str, *, status: str | None = "pending"
+    ) -> list[dict[str, Any]]:
+        query = "SELECT * FROM tool_input_requests WHERE session_id=?"
+        values: list[object] = [session_id]
+        if status is not None:
+            query += " AND status=?"
+            values.append(status)
+        query += " ORDER BY created_at,id"
+        return [
+            {
+                "id": str(row["id"]),
+                "session_id": str(row["session_id"]),
+                "run_id": str(row["run_id"]),
+                "invocation_id": str(row["invocation_id"]),
+                "status": str(row["status"]),
+                "questions": json.loads(row["questions_json"]),
+                "answers": json.loads(row["answers_json"])
+                if row["answers_json"] is not None
+                else None,
+                "created_at": str(row["created_at"]),
+            }
+            for row in await self.all(query, tuple(values))
+        ]
+
+    async def answer_input_request(
+        self, request_id: str, session_id: str, answers: object
+    ) -> dict[str, Any]:
+        row = await self.one(
+            "SELECT * FROM tool_input_requests WHERE id=? AND session_id=?",
+            (request_id, session_id),
+        )
+        if row is None:
+            raise ValueError("input request does not exist in this session")
+        if row["status"] != "pending":
+            raise ValueError("input request has already been resolved")
+        questions = json.loads(row["questions_json"])
+        _validate_input_answers(questions, answers)
+        await self.execute(
+            """UPDATE tool_input_requests SET status='answered',answers_json=?,answered_at=?
+               WHERE id=? AND session_id=? AND status='pending'""",
+            (json.dumps(answers, ensure_ascii=False), now(), request_id, session_id),
+        )
+        return {
+            "id": request_id,
+            "status": "answered",
+            "answers": answers,
+            "run_id": str(row["run_id"]),
+            "invocation_id": str(row["invocation_id"]),
+        }
+
+    async def cancel_input_request(
+        self, request_id: str, session_id: str
+    ) -> dict[str, Any]:
+        updated = await self.execute(
+            """UPDATE tool_input_requests SET status='cancelled',answered_at=?
+               WHERE id=? AND session_id=? AND status='pending'""",
+            (now(), request_id, session_id),
+        )
+        if not updated:
+            raise ValueError("pending input request does not exist in this session")
+        return {"id": request_id, "status": "cancelled"}
 
     async def get_run(
         self, run_id: str, *, session_id: str | None = None

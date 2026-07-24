@@ -48,6 +48,8 @@ class WorkflowPort(Protocol):
     async def settle_approval(
         self, session_id: str, run_id: str
     ) -> AgentEvent | None: ...
+    async def pause(self, run_id: str, **values: Any) -> AgentEvent: ...
+    async def resume_paused(self, session_id: str, run_id: str) -> None: ...
 
 
 class WorkItemRepositoryPort(Protocol):
@@ -91,6 +93,7 @@ class WorkflowUnitOfWorkPort(Protocol):
         resume_from_step_id: str | None = None,
     ) -> RunInfo: ...
     async def finalize(self, run_id: str, **values: Any) -> AgentEvent: ...
+    async def pause(self, run_id: str, **values: Any) -> AgentEvent: ...
     async def settle_approval(
         self, session_id: str, run_id: str
     ) -> AgentEvent | None: ...
@@ -113,6 +116,44 @@ class RunJournal(Protocol):
     async def append_event(
         self, run_id: str, kind: AgentEventKind, payload: dict[str, Any]
     ) -> AgentEvent: ...
+    async def start_tool_invocation(
+        self,
+        *,
+        run_id: str,
+        session_id: str,
+        tool_call_id: str,
+        name: str,
+        spec: dict[str, Any],
+        capabilities: dict[str, Any],
+        arguments: dict[str, Any],
+        status: str = "received",
+    ) -> str: ...
+    async def update_tool_invocation(
+        self,
+        identifier: str,
+        *,
+        status: str | None = None,
+        policy: dict[str, Any] | None = None,
+        timings: dict[str, int] | None = None,
+    ) -> None: ...
+    async def pause_tool_invocation(self, identifier: str, **values: Any) -> None: ...
+    async def pause_step(self, identifier: str, **values: Any) -> None: ...
+    async def update_step_checkpoint(
+        self, identifier: str, checkpoint: dict[str, Any]
+    ) -> None: ...
+    async def create_input_request(self, **values: Any) -> None: ...
+    async def finish_tool_invocation(
+        self,
+        identifier: str,
+        *,
+        status: str,
+        execution_status: str,
+        delivery_status: str,
+        result_preview: str,
+        duration_ms: int,
+        artifact_id: str | None = None,
+        error_code: str | None = None,
+    ) -> None: ...
     async def record_tool_call(
         self,
         run_id: str,
@@ -126,6 +167,12 @@ class RunJournal(Protocol):
 
 
 class TaskPort(Protocol):
+    async def create(self, session_id: str, **values: Any) -> TaskInfo: ...
+    async def list(self, session_id: str, **values: Any) -> list[TaskInfo]: ...
+    async def get(
+        self, task_id: str, *, session_id: str | None = None
+    ) -> TaskInfo | None: ...
+    async def update(self, task_id: str, session_id: str, **values: Any) -> TaskInfo: ...
     async def replace(
         self, session_id: str, items: list[str], *, run_id: str | None = None
     ) -> list[TaskInfo]: ...

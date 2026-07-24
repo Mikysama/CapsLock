@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -18,15 +19,23 @@ def content_hash(content: str) -> str:
 
 
 class FileActionHandler:
-    types = frozenset({ActionType.FILE_EDIT, ActionType.FILE_CREATE})
+    types = frozenset(
+        {ActionType.FILE_EDIT, ActionType.FILE_CREATE, ActionType.NOTEBOOK_EDIT}
+    )
 
-    def __init__(self, policy: WorkspacePolicy) -> None:
+    def __init__(
+        self,
+        policy: WorkspacePolicy,
+        *,
+        did_change: Callable[[str], Awaitable[None]] | None = None,
+    ) -> None:
         self.policy = policy
+        self.did_change = did_change
 
     async def propose(
         self, action_type: ActionType, payload: dict[str, Any]
     ) -> ActionProposal:
-        if action_type is ActionType.FILE_EDIT:
+        if action_type in {ActionType.FILE_EDIT, ActionType.NOTEBOOK_EDIT}:
             if "replace_content" in payload:
                 return await asyncio.to_thread(self._propose_replace, payload)
             return await asyncio.to_thread(self._propose_edit, payload)
@@ -37,18 +46,25 @@ class FileActionHandler:
         after = _string(payload, "replace_content")
         path = self.policy.writable_file(path_text)
         before = path.read_text(encoding="utf-8")
+        supplied_hash = payload.get("expected_sha256")
+        if supplied_hash is not None and supplied_hash != content_hash(before):
+            raise ValueError("file hash does not match expected_sha256")
         self.policy.validate_write_content(after)
         relative = str(path.relative_to(self.policy.root))
+        request = {
+            "path": relative,
+            "operation": "edit",
+            "expected_hash": content_hash(before),
+            "before_content": before,
+            "after_content": after,
+            "diff": make_diff(Path(relative), before, after),
+        }
+        if isinstance(payload.get("cell_summary"), dict):
+            request["cell_summary"] = dict(payload["cell_summary"])
+        _preserve_manual_approval(payload, request)
         return ActionProposal(
             str(payload.get("summary") or "Replace file contents"),
-            {
-                "path": relative,
-                "operation": "edit",
-                "expected_hash": content_hash(before),
-                "before_content": before,
-                "after_content": after,
-                "diff": make_diff(Path(relative), before, after),
-            },
+            request,
         )
 
     def _propose_edit(self, payload: dict[str, Any]) -> ActionProposal:
@@ -65,16 +81,18 @@ class FileActionHandler:
         after = before.replace(old_text, new_text, 1)
         self.policy.validate_write_content(after)
         relative = str(path.relative_to(self.policy.root))
+        request = {
+            "path": relative,
+            "operation": "edit",
+            "expected_hash": content_hash(before),
+            "before_content": before,
+            "after_content": after,
+            "diff": make_diff(Path(relative), before, after),
+        }
+        _preserve_manual_approval(payload, request)
         return ActionProposal(
             str(payload.get("summary") or "Edit file"),
-            {
-                "path": relative,
-                "operation": "edit",
-                "expected_hash": content_hash(before),
-                "before_content": before,
-                "after_content": after,
-                "diff": make_diff(Path(relative), before, after),
-            },
+            request,
         )
 
     def _propose_create(self, payload: dict[str, Any]) -> ActionProposal:
@@ -84,22 +102,36 @@ class FileActionHandler:
             raise ValueError("file already exists; use file edit")
         self.policy.validate_write_content(content)
         relative = str(path.relative_to(self.policy.root))
+        request = {
+            "path": relative,
+            "operation": "create",
+            "expected_hash": None,
+            "before_content": None,
+            "after_content": content,
+            "diff": make_diff(Path(relative), None, content),
+        }
+        _preserve_manual_approval(payload, request)
         return ActionProposal(
             str(payload.get("summary") or "Create file"),
-            {
-                "path": relative,
-                "operation": "create",
-                "expected_hash": None,
-                "before_content": None,
-                "after_content": content,
-                "diff": make_diff(Path(relative), None, content),
-            },
+            request,
         )
 
     async def execute(self, action: ActionRecord) -> ActionExecution:
         await asyncio.to_thread(self._apply, action)
+        result = {
+            "path": action.request["path"],
+            "operation": action.request["operation"],
+        }
+        if self.did_change is not None:
+            try:
+                await self.did_change(str(action.request["path"]))
+            except Exception as exc:
+                # The file mutation is already committed. A secondary LSP
+                # notification must never rewrite that execution truth.
+                result["lsp_notification"] = "failed"
+                result["lsp_error"] = str(exc) or type(exc).__name__
         return ActionExecution(
-            {"path": action.request["path"], "operation": action.request["operation"]},
+            result,
             ActionResultKind.APPLIED,
         )
 
@@ -111,13 +143,22 @@ class FileActionHandler:
                 "content": request.get("after_content"),
                 "summary": action.summary,
             }
-        else:
+        elif action.type is ActionType.FILE_EDIT:
             payload = {
                 "path": request.get("path"),
                 "old_text": request.get("before_content"),
                 "new_text": request.get("after_content"),
                 "summary": action.summary,
             }
+        else:
+            payload = {
+                "path": request.get("path"),
+                "replace_content": request.get("after_content"),
+                "expected_sha256": request.get("expected_hash"),
+                "summary": action.summary,
+                "cell_summary": request.get("cell_summary"),
+            }
+        _preserve_manual_approval(request, payload)
         return await self.propose(action.type, payload)
 
     def _apply(self, action: ActionRecord) -> None:
@@ -160,3 +201,10 @@ def _string(payload: dict[str, Any], key: str) -> str:
     if not isinstance(value, str):
         raise ValueError(f"{key} must be a string")
     return value
+
+
+def _preserve_manual_approval(
+    source: dict[str, Any], target: dict[str, Any]
+) -> None:
+    if source.get("force_manual_approval") is True:
+        target["force_manual_approval"] = True

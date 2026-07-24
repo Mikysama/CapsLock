@@ -5,17 +5,38 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any
 
-from ..collaboration.models import (
+from ...collaboration.models import (
     AgentTaskContract,
     CapabilityGrant,
     CapabilityKind,
     VerificationRequirement,
 )
-from .async_core import ExecutionContext, Tool, ToolResult
+from ..contracts import (
+    ExecutionContext,
+    InterruptBehavior,
+    ResolvedToolPolicy,
+    ToolDefinition,
+    ToolOutcome,
+    ToolOutcomeStatus,
+    define_tool,
+)
 
 
-def delegation_tool() -> Tool:
-    return Tool(
+def _outcome(
+    ok: bool, data: object, error: str | None = None, **values: Any
+) -> ToolOutcome:
+    return ToolOutcome(
+        ToolOutcomeStatus.SUCCEEDED if ok else ToolOutcomeStatus.FAILED,
+        ok,
+        data=data,
+        error=error,
+        error_code=None if ok else "tool_failed",
+        **values,
+    )
+
+
+def delegation_tool() -> ToolDefinition:
+    return define_tool(
         "delegate_agents",
         "Delegate up to four independent, explicitly scoped child Agent tasks and return only verified outputs.",
         {
@@ -75,24 +96,30 @@ def delegation_tool() -> Tool:
                         "required": ["objective"],
                         "additionalProperties": False,
                     },
-                }
+                },
+                "background": {"type": "boolean"},
             },
             "required": ["tasks"],
             "additionalProperties": False,
         },
         _delegate,
+        policy=ResolvedToolPolicy(
+            context_mutation=True,
+            external_side_effects=True,
+            interrupt_behavior=InterruptBehavior.COMPLETE,
+        ),
     )
 
 
 async def _delegate(
     context: ExecutionContext, arguments: dict[str, Any]
-) -> ToolResult:
+) -> ToolOutcome:
     service = context.collaboration
     if service is None:
-        return ToolResult(False, {}, "multi-Agent collaboration is not configured")
+        return _outcome(False, {}, "multi-Agent collaboration is not configured")
     raw_tasks = arguments.get("tasks")
     if not isinstance(raw_tasks, list):
-        return ToolResult(False, {}, "tasks must be an array")
+        return _outcome(False, {}, "tasks must be an array")
     contracts: list[AgentTaskContract] = []
     try:
         for item in raw_tasks:
@@ -124,10 +151,14 @@ async def _delegate(
                 )
             )
         contracts = await _reserve_parent_budget(context, contracts)
-        outputs = await service.delegate(contracts)
+        background = bool(arguments.get("background", False))
+        outputs = await service.delegate(contracts, background=background)
     except (KeyError, TypeError, ValueError, RuntimeError) as exc:
-        return ToolResult(False, {}, str(exc))
-    data = {"tasks": [output.as_dict() for output in outputs]}
+        return _outcome(False, {}, str(exc))
+    data = {
+        "tasks": [output.as_dict() for output in outputs],
+        "background": background,
+    }
     usage = {
         name: sum(float(output.usage.get(name, 0)) for output in outputs)
         for name in ("cost_usd",)
@@ -138,7 +169,7 @@ async def _delegate(
             for name in ("input_tokens", "output_tokens", "tool_rounds", "tool_calls")
         }
     )
-    return ToolResult(
+    return _outcome(
         True,
         data,
         event_data={
@@ -155,6 +186,80 @@ async def _delegate(
         },
         external_usage=usage,
     )
+
+
+def agent_control_tools() -> list[ToolDefinition]:
+    safe_read = ResolvedToolPolicy(
+        read_only=True,
+        interrupt_behavior=InterruptBehavior.CANCEL,
+    )
+    return [
+        define_tool(
+            "get_agent_task",
+            "Read or briefly wait for one background child Agent task.",
+            {
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string"},
+                    "wait": {"type": "boolean"},
+                    "timeout": {"type": "number", "minimum": 0.1, "maximum": 60},
+                },
+                "required": ["task_id"],
+                "additionalProperties": False,
+            },
+            _get_agent_task,
+            policy=safe_read,
+            deferred=True,
+            search_hint="background child Agent status wait result",
+        ),
+        define_tool(
+            "stop_agent_task",
+            "Cancel an active child Agent task owned by this run.",
+            {
+                "type": "object",
+                "properties": {"task_id": {"type": "string"}},
+                "required": ["task_id"],
+                "additionalProperties": False,
+            },
+            _stop_agent_task,
+            policy=ResolvedToolPolicy(
+                context_mutation=True,
+                interrupt_behavior=InterruptBehavior.COMPLETE,
+            ),
+            deferred=True,
+            search_hint="cancel stop background child Agent",
+        ),
+    ]
+
+
+async def _get_agent_task(
+    context: ExecutionContext, arguments: dict[str, Any]
+) -> ToolOutcome:
+    if context.collaboration is None:
+        return ToolOutcome.failure(
+            "multi-Agent collaboration is not configured", code="agents_unavailable"
+        )
+    value = await context.collaboration.status(
+        str(arguments["task_id"]),
+        session_id=context.session_id,
+        wait=bool(arguments.get("wait", False)),
+        timeout=float(arguments.get("timeout", 60)),
+    )
+    return ToolOutcome.success(value)
+
+
+async def _stop_agent_task(
+    context: ExecutionContext, arguments: dict[str, Any]
+) -> ToolOutcome:
+    if context.collaboration is None:
+        return ToolOutcome.failure(
+            "multi-Agent collaboration is not configured", code="agents_unavailable"
+        )
+    task_id = str(arguments["task_id"])
+    await context.collaboration.status(task_id, session_id=context.session_id)
+    await context.collaboration.cancel(task_id)
+    value = await context.collaboration.status(task_id, session_id=context.session_id)
+    return ToolOutcome.success(value)
 
 
 async def _reserve_parent_budget(

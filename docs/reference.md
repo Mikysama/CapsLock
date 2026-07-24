@@ -4,7 +4,7 @@
 
 ## 稳定契约
 
-CapsLock 2.2.4 支持 Linux/macOS 与 Python 3.12。当前协议为 `config_version = 3`、workspace schema 6、memory schema 3、portable archive 3、JSONL schema 3 和插件 manifest/protocol/grant 3。非当前格式与已删除的 Python 接口直接拒绝，不提供兼容入口或转换命令。
+CapsLock 2.3.0 支持 Linux/macOS 与 Python 3.12。当前开发协议为 `config_version = 5`、workspace schema 8、memory schema 3、portable archive 3、JSONL schema 3 和插件 manifest/protocol/grant 4。config v3/v4 与 workspace schema v6/v7 使用 backup-first 自动迁移；删除的 Python 接口不提供兼容入口。
 
 公开运行入口为 `AgentSession.run_stream(RunRequest)`。CLI 通过应用查询面读取状态，不应依赖 repository 聚合对象。
 
@@ -20,36 +20,33 @@ CapsLock 2.2.4 支持 Linux/macOS 与 Python 3.12。当前协议为 `config_vers
 
 ## 模型工具
 
-所有工具通过同一个异步 registry 调用。文件读取放入工作线程，Git 与命令使用异步子进程，Web 使用 `httpx.AsyncClient`，MCP 保持原生异步。
+所有工具通过同一个 `ToolRuntime` 调用。`ToolCatalog` 负责稳定元数据、动态发现和 schema 预算，`ToolExecutor` 负责校验、授权、执行、恢复与结果编码。
 
 | 工具 | 功能 | 边界 |
 | --- | --- | --- |
-| `list_files` | 列出工作区文件。 | 只读；路径限制在工作区。 |
-| `read_file` | 分段读取 UTF-8 文件并返回行号 Evidence。 | 只读；拒绝越界、符号链接和超限文件。 |
-| `search_files` | 搜索工作区文本并返回 Evidence。 | 只读。 |
-| `git_status` / `git_diff` | 查询固定 Git 状态或差异。 | 只读；不接受任意 Git 参数。 |
-| `task_list_update` | 替换当前会话任务列表。 | session repository 写入。 |
-| `task_status_update` | 更新任务状态。 | 状态枚举校验。 |
-| `list_external_sources` | 查看当前会话保存的 Web 来源。 | 来源始终不可信。 |
-| `search_memories` | 搜索可见且未过期的记忆。 | 只读；作用域隔离。 |
-| `get_memory` | 按 ID 获取可见记忆并记录访问。 | 只读；用于来源失效隔离。 |
-| `load_skill` | 加载已启用 Skill 的正文和资源清单。 | 正文是不可信上下文。 |
-| `read_skill_resource` | 读取本 run 已加载的 Skill 资源快照。 | 只读；拒绝越界、二进制和符号链接。 |
-| `propose_file_edit` | 创建精确文本替换提案。 | 未获批准不写用户文件。 |
-| `propose_file_create` | 创建新文件提案。 | 未获批准不写用户文件。 |
-| `propose_command` | 创建固定命令模板提案。 | 未获批准不启动进程。 |
-| `propose_web_search` | 创建 Tavily 搜索动作。 | 外部请求与来源审计。 |
-| `propose_web_fetch` | 创建公开 URL 抓取动作。 | SSRF、重定向、类型和大小限制。 |
-| `propose_mcp_connect` | 创建 MCP server 连接与工具发现动作。 | 仅本地 stdio。 |
-| `propose_mcp_call` | 创建 allowlist 内 MCP 工具调用动作。 | 第三方副作用不可自动撤销。 |
-| `plugin_<plugin>_<tool>` | 调用已安装且获当前工作区授权的本地插件工具。 | 使用高风险 `mcp_call` 审批通道；结果始终不可信。 |
-| `delegate_agents` | 批量运行最多四个显式子任务并返回验证结果。 | 仅父 Agent 可见；默认并发 2、最大深度 1。 |
+| `list_files` / `glob_files` | 列出或按 glob 查找工作区文件。 | 只读；遵循路径边界和 `.gitignore`。 |
+| `read_file` / `read_image` | 读取文本或富图片内容。 | 只读；文件大小、类型、符号链接和路径受限。 |
+| `search_files` | 使用 ripgrep 搜索文本并返回 Evidence。 | 只读；有稳定排序和结果上限。 |
+| `edit_file` / `create_file` / `write_file` | 通过 Action 修改文件。 | 审批、hash revalidate、diff 和 undo。 |
+| `git_status` / `git_diff` | 查询 Git 状态或差异。 | 只读；不接受任意 Git 参数。 |
+| `shell` | 在 OS 沙箱运行命令。 | 工作区可写、默认断网；危险命令 hard deny。 |
+| `process_output` / `process_stop` | 管理 session 隔离的后台进程。 | 有界输出和 TERM→KILL 取消。 |
+| `ask_user` | 创建可持久化结构化问题。 | 暂停同一 invocation，可跨进程回答。 |
+| `create_task` / `list_tasks` / `get_task` / `update_task` | 管理任务与依赖关系。 | session 隔离并拒绝依赖环。 |
+| `read_pdf` / `read_notebook` / `edit_notebook` | 读取 PDF/Notebook 或编辑 cell。 | 有界读取；Notebook 编辑使用独立 Action。 |
+| LSP 语义工具 | 定义、引用、符号、实现和调用层级查询。 | 仅已安装/配置 server；只读、禁网沙箱。 |
+| `list_mcp_resources` / `read_mcp_resource` | 发现和读取 MCP Resources。 | server/URI 权限；二进制写 artifact。 |
+| `mcp__<server>__<tool>` | 调用动态发现的 MCP 工具。 | 唯一受管理长连接路径，调用仍经 Action。 |
+| `plugin__<plugin>__<tool>` | 调用获授权的本地插件工具。 | capability broker、沙箱、审批和结果脱敏。 |
+| `web_search` / `web_fetch` | 搜索或抓取公开 Web 内容。 | SSRF、重定向、类型、大小和来源审计。 |
+| Memory / Skill 工具 | 查询记忆或加载 Skill 快照。 | 作用域隔离，只读，不可信上下文。 |
+| Worktree / Agent 工具 | 切换 session worktree 或控制子 Agent。 | context mutation 独占执行，跨 session 拒绝。 |
 
-模型只提交提案；统一 `ActionCoordinator` 决定是否等待批准或自动执行。TUI 为 Coordinator 安装阻塞式审批器：越过权限边界时显示动作类型、风险、目标，以及最多 40 行、4 KiB 的本机脱敏命令或 diff 预览，用户只能拒绝或执行且默认选择拒绝；原始参数、完整输出、文件正文和凭据不会进入展示事件。最终动作状态返回同一个模型工具调用，run 随后继续。非交互 `exec` 不安装审批器，仍保留 pending action、`waiting_approval` 终止事件和退出码 `3`。动作记录只使用 `request_json` 与 `result_json`，新增动作类型不需要 subtype 表。
+模型直接调用业务能力工具；需要副作用的工具由运行时创建 Action，统一 `ActionCoordinator` 决定是否等待批准或自动执行。TUI 为 Coordinator 安装阻塞式审批器：越过权限边界时显示动作类型、风险、目标，以及最多 40 行、4 KiB 的本机脱敏命令或 diff 预览，用户只能拒绝或执行且默认选择拒绝；原始参数、完整输出、文件正文和凭据不会进入展示事件。最终动作状态返回同一个模型工具调用，run 随后继续。非交互 `exec` 不安装审批器，仍保留 pending action、`waiting_approval` 终止事件和退出码 `3`。动作记录只使用 `request_json` 与 `result_json`，新增动作类型不需要 subtype 表。
 
 ## 工具契约与 artifact
 
-每个工具提供 `ToolSpec`、输入/输出 JSON Schema、只读/并发/破坏性标记、取消行为、capability 与结果大小限制。执行顺序固定为校验、内置策略、授权、执行、脱敏、持久化和发布。连续的只读且并发安全调用使用有界并发执行，checkpoint 仍按模型 tool-call 顺序写入。
+`ToolContract`、`ToolDefinition` 和 `ResolvedToolPolicy` 声明输入/输出 JSON Schema、参数级只读/并发/破坏性属性、取消行为、capability 与结果限制。`ToolCatalog` 只负责稳定 schema、动态发现和 fingerprint；`ToolExecutor` 固定执行 normalize、validate、authorize、execute、输出校验和 middleware。连续的只读且并发安全调用使用有界并发执行，checkpoint 仍按模型 tool-call 顺序写入。
 
 超过 16 KiB 的结果写入 `.capslock/state/artifacts/sha256/`，单项最多 5 MiB。模型只收到脱敏预览和 artifact ID；`read_tool_artifact` 只能分块读取当前 session 的 artifact，session 删除会级联清理记录与文件。
 
@@ -59,7 +56,7 @@ CapsLock 2.2.4 支持 Linux/macOS 与 Python 3.12。当前协议为 `config_vers
 
 ## 插件隔离
 
-插件 manifest、stdio protocol 与 workspace grant 都使用协议 3。grant 只能收窄 manifest capability；版本、digest 或 capability 改变会使授权失效。Linux 使用 Bubblewrap，macOS 使用系统 sandbox profile，默认不挂载 workspace/home 且断网。插件通过双向 stdio 向宿主 broker 请求文件、网络、固定命令和命名 credential；宿主重新执行路径、SSRF、审批、脱敏和审计策略。
+插件 manifest、stdio protocol 与 workspace grant 都使用协议 4。grant 只能收窄 manifest capability；版本、digest 或 capability 改变会使授权失效。Linux 使用 Bubblewrap，macOS 使用系统 sandbox profile，默认不挂载 workspace/home 且断网。插件通过双向 stdio 向宿主 broker 请求文件、网络、固定命令和命名 credential；宿主重新执行路径、SSRF、审批、脱敏和审计策略。
 
 没有 sandbox backend 时插件默认拒绝。`--trusted-native --yes` 是逐工作区高风险授权，不受 `full_access` 自动批准，每次调用仍需要人工确认。
 
@@ -142,6 +139,9 @@ capslock sessions|session rename <SESSION> <TITLE>
 capslock sessions|session archive|unarchive <SESSION>
 capslock sessions|session export <SESSION> <WORKSPACE-RELATIVE-DIRECTORY>
 capslock sessions|session delete [SESSION] [--yes]
+capslock input list
+capslock input answer <REQUEST-ID> --answers-json <JSON>
+capslock input cancel <REQUEST-ID>
 capslock init [--non-interactive ...] [--update] [--check-provider]
 capslock config validate|migrate
 capslock credentials status|set|delete
@@ -154,7 +154,7 @@ capslock plugin|plugins enable|disable|uninstall <NAME> [--yes]
 capslock doctor [--json] [--strict] [--network] [--fix] [--yes]
 ```
 
-裸入口只允许 TTY。`exec` 可从 stdin 读取 prompt，不进行交互审批；产生待审批动作时保存 session/run/action 并返回退出码 3，预算或循环停止返回退出码 4。
+裸入口只允许 TTY。`exec` 可从 stdin 读取 prompt，不进行交互审批或问答；产生待审批动作时保存 session/run/action 并返回退出码 3，预算或循环停止返回 4，等待用户输入返回 5。`capslock input answer|cancel` 结算请求后恢复原 run。
 
 ## JSONL 事件
 
@@ -175,7 +175,7 @@ capslock doctor [--json] [--strict] [--network] [--fix] [--yes]
 | `terminal` | 是否为唯一终止事件。 |
 | `data` | 事件载荷。 |
 
-非终止事件：`queued`、`thinking`、`text_delta`、`tool_running`、`tool_completed`、`budget_updated`、`limit_reached`、`budget_extended`。
+非终止事件：`queued`、`thinking`、`text_delta`、`tool_queued`、`tool_running`、`tool_progress`、`tool_permission`、`tool_completed`、`tool_cancelled`、`budget_updated`、`limit_reached`、`budget_extended`。
 
 `thinking.data.text` 是模型提供方显式返回的 reasoning；`text_delta.data.text` 是最终回答的流式正文。TUI 分区渲染二者，`completed.data.answer` 只包含最终回答。
 
@@ -188,6 +188,7 @@ capslock doctor [--json] [--strict] [--network] [--fix] [--yes]
 
 - `completed`：`answer`、`citations`、`memory_recalls`、`usage`、`duration_ms`。
 - `waiting_approval`：`action_ids` 与数量。
+- `waiting_input`：持久化 input request ID 与结构化问题摘要。
 - `failed` / `cancelled`：`error.code` 与 `error.message`。
 - `stopped`：`stop_reason`、`budget` 和已用量；每个 run 仍只有一个终止事件。
 
@@ -205,7 +206,7 @@ ToolLoop 每个模型或工具阶段写 `run_steps`。只有 completed 且带 ch
 
 调度器按契约顺序返回结果，兄弟任务失败不会互相取消，父运行取消会传播到全部未完成子任务。子快照排除 `.git`、`.capslock`、环境文件和符号链接，并使用自己的 workspace/memory 数据库。`AgentOutputVerifier` 校验输出对象、allowlist 路径、必需检查、文件大小和 SHA-256；未通过的输出只返回失败诊断。
 
-workspace schema 6 使用 `agent_tasks`、`agent_workspaces`、`agent_capabilities`、`agent_messages` 和 `agent_outputs` 保存契约、状态、脱敏消息摘要和验证结果。portable archive 默认不包含 artifact 正文。
+workspace schema 8 使用 Agent、Tool invocation、input request、task dependency 和 session worktree 表保存可恢复状态、审计与验证结果。portable archive 默认不包含 artifact 正文。
 
 ## 记忆契约
 

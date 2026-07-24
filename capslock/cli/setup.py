@@ -227,6 +227,27 @@ def _initial_config(**values: object) -> str:
     document.add("routing", {"reasoning": ["primary"], "fast": ["primary"]})
     document.add("runtime", {"permission_mode": values["permission"]})
     document.add("memory", {"enabled": values["memory_enabled"]})
+    document.add(
+        "lsp",
+        {
+            "enabled": True,
+            "startup_timeout_seconds": 10,
+            "request_timeout_seconds": 15,
+            "idle_timeout_seconds": 300,
+        },
+    )
+    document.add(
+        "documents",
+        {
+            "max_pdf_bytes": 52428800,
+            "max_pdf_pages": 10,
+            "max_notebook_bytes": 10485760,
+            "max_notebook_cells": 50,
+            "max_cell_output_bytes": 65536,
+        },
+    )
+    document.add("worktree", {"enabled": True, "max_per_session": 4})
+    document.add("agents", {"background_enabled": True})
     if values.get("tavily_credential"):
         parse_reference(str(values["tavily_credential"]))
         document.add("web", {"tavily_credential": values["tavily_credential"]})

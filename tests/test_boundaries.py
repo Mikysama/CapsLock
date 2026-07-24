@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import inspect
 import io
@@ -21,7 +22,8 @@ from capslock.runtime import AgentSession, ModelRouter
 from capslock.runtime.tool_loop import ToolLoop
 from capslock.skills import SkillValidationError, load_skill_package
 from capslock.tooling import ExecutionContext
-from capslock.tooling.async_catalog import workspace_tools
+from capslock.tooling.tools import filesystem, shell, web
+from capslock.tooling.tools import workspace_tools
 
 
 def production_text() -> str:
@@ -32,6 +34,18 @@ def production_text() -> str:
         for path in directory.rglob("*.py")
         if "__pycache__" not in path.parts
     )
+
+
+def python_imports(path: Path) -> set[str]:
+    imports: set[str] = set()
+    for source_path in path.rglob("*.py") if path.is_dir() else (path,):
+        tree = ast.parse(source_path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imports.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imports.add(node.module)
+    return imports
 
 
 def test_python_names_do_not_encode_protocol_generations() -> None:
@@ -139,6 +153,69 @@ def test_runtime_and_tooling_depend_only_on_neutral_ports() -> None:
         assert forbidden not in neutral
 
 
+def test_integration_implementations_stay_outside_runtime_and_action_handlers() -> None:
+    root = Path(__file__).parents[1] / "capslock"
+    assert not {"shell", "lsp", "mcp"} & python_imports(root / "runtime")
+    action_imports = python_imports(root / "application" / "action_system")
+    assert not any(
+        name in {"mcp", "lsp"} or name.endswith(("mcp.manager", "lsp.manager"))
+        for name in action_imports
+    )
+    for removed in (
+        "lsp_runtime.py",
+        "mcp_runtime.py",
+        "shell.py",
+        "application/action_system/shell_runtime.py",
+        "tooling/async_core.py",
+        "tooling/async_catalog.py",
+        "tooling/async_adapters.py",
+        "tooling/permission_runtime.py",
+    ):
+        assert not (root / removed).exists(), removed
+
+
+def test_only_one_shell_assessment_and_composition_constructs_managers() -> None:
+    root = Path(__file__).parents[1] / "capslock"
+    definitions: list[str] = []
+    constructors: list[str] = []
+    for path in root.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        relative = str(path.relative_to(root))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name == "assess_shell"
+            ):
+                definitions.append(relative)
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id in {"LspManager", "McpManager"}
+            ):
+                constructors.append(relative)
+    assert definitions == ["shell/assessment.py"]
+    assert set(constructors) == {"composition/integrations.py"}
+
+
+def test_core_tool_schema_fingerprint_is_stable() -> None:
+    runtime = workspace_tools()
+    assert runtime.snapshot().fingerprint == (
+        "284617dd91e2ce795cf50c27371839de61b83a7209bbf18a3ca37465c3389f3a"
+    )
+
+
+def test_mcp_action_executor_has_no_short_connection_fallback() -> None:
+    source = (
+        Path(__file__).parents[1]
+        / "capslock"
+        / "application"
+        / "action_system"
+        / "executors.py"
+    ).read_text(encoding="utf-8")
+    for forbidden in ("stdio_client", "ClientSession", "StdioServerParameters"):
+        assert forbidden not in source
+
+
 def test_interactive_cli_does_not_reach_through_session_repositories() -> None:
     root = Path(__file__).parents[1] / "capslock" / "cli"
     source = "\n".join(path.read_text(encoding="utf-8") for path in root.rglob("*.py"))
@@ -213,8 +290,43 @@ def test_all_registered_tools_have_async_executors() -> None:
         }
         & registry.names
     )
-    for tool in registry._tools.values():
+    for name in registry.names:
+        tool = registry.get(name)
+        assert tool is not None
         assert inspect.iscoroutinefunction(tool.execute), tool.name
+
+
+def test_direct_capability_tools_do_not_expose_proposal_adapters() -> None:
+    registry = workspace_tools()
+    direct_tools = {
+        "shell",
+        "edit_file",
+        "create_file",
+        "web_search",
+        "web_fetch",
+    }
+    assert direct_tools <= registry.names
+    assert not {name for name in registry.names if name.startswith("propose_")}
+    for name in direct_tools:
+        executor = getattr(
+            shell
+            if name == "shell"
+            else web
+            if name.startswith("web_")
+            else filesystem,
+            name,
+        )
+        assert executor.__name__ == name
+    for removed in (
+        "propose_command",
+        "propose_file_edit",
+        "propose_file_create",
+        "propose_web_search",
+        "propose_web_fetch",
+        "propose_mcp_connect",
+        "propose_mcp_call",
+    ):
+        assert not any(hasattr(module, removed) for module in (filesystem, shell, web))
 
 
 def test_settings_use_explicit_groups(

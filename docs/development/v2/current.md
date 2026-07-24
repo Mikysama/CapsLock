@@ -1,41 +1,37 @@
 # 当前运行内核与安全边界
 
-本文描述 CapsLock 2.2.4 的开发边界。产品仍是本机前台运行、固定命令模板和单层子 Agent，不提供任意 Shell、远程控制、后台 daemon 或第三方可执行 Hook。
+本文描述 CapsLock 2.3.0 的开发边界。产品在本机运行，支持直接能力工具、可审批 Action、受沙箱保护的通用 Shell、session 隔离后台进程、受管理 MCP/LSP 和单层子 Agent；不提供远程控制、后台 daemon 或第三方可执行 Hook。
 
-## 运行内核
+## 模块边界
 
-公开执行入口只有 `AgentSession.run_stream(RunRequest)`。`RunEngine` 为每个 session 持有串行锁，统一准备、恢复、模型工具循环、取消传播和终止收尾；模型切换不能与活动 run 交叉。`WorkspaceApplication` 向 CLI 暴露 session 和只读 `WorkspaceQueries`，CLI 不穿透 session 访问 repository 聚合对象。
+- `runtime/` 只包含模型协议、Agent/Run 编排、ToolLoop、上下文、路由和治理。
+- `lsp/`、`mcp/`、`shell/` 分别拥有外部协议、子进程、沙箱和生命周期管理。
+- `tooling/` 提供 Tool contracts、纯元数据 Catalog、Executor、权限中间件和按能力拆分的模型工具。
+- runtime、tooling 与 Action handler 通过 `ports/` 使用 LSP/MCP；具体 manager 只由 `composition/` 和 `bootstrap` 构造。
+- `bootstrap.WorkspaceApplication.open()` 是唯一顶层组合根，负责资源所有权和 active-workspace 切换。
 
-运行内部顺序固定为校验、内置策略、授权、执行、脱敏、持久化和发布。Runtime 与 tooling 只依赖中立 ports；旧聚合 Agent、执行 service、repository bundle 和兼容别名已经删除。
+## Tool Runtime v2
 
-## 工具与上下文
+`ToolContract`、`ToolDefinition`、`ResolvedToolPolicy`、`ToolOutcome` 和 `ToolPause` 描述输入/输出 schema、参数级策略、取消行为、富结果及可恢复暂停。`ToolCatalog` 只负责稳定排序、schema fingerprint、deferred discovery 和动态刷新；`ToolExecutor` 固定执行 normalize、validate、authorize、execute、output validation 和 middleware；`ToolRuntime` 是 Agent/ToolLoop 使用的聚合接口。
 
-工具通过 `ToolSpec`、`ToolCapabilities` 和 `ExecutionContext` 声明输入/输出 JSON Schema、只读与并发属性、破坏性、副作用、取消行为和结果限制。连续的并发安全只读调用以最多四个任务并行，结果仍按模型 tool-call 顺序进入 checkpoint；写入、审批和上下文变更独占执行。
+只允许只读、并发安全且不改变上下文的调用并发，提交顺序保持模型 tool-call 顺序。审批和用户输入可跨进程恢复；副作用执行状态与结果 delivery 状态独立。单项超过 16 KiB 时使用 content-addressed artifact，批次结果受聚合预算限制。
 
-超过 16 KiB 的工具结果写入 `.capslock/state/artifacts/sha256/`，使用原子写入、0600 权限和 SHA-256 校验，单项上限 5 MiB。模型只收到脱敏预览和 artifact ID；分块读取按 session 隔离。
+## 外部执行
 
-`ContextBudgetManager` 按模型 context window 和最大输出计算输入预算，并计入 system prompt、Skill catalog、memory、工具 schema 与 checkpoint。达到阈值后先外置大型结果，再保留最近轮次并生成结构化摘要。摘要作为不可变 compaction artifact 持久化并按 source digest 复用；连续失败达到上限后返回稳定的 `context_budget_exceeded`。
+Shell 在 Linux Bubblewrap 或 macOS sandbox-exec 中执行，工作区可写、系统只读、默认断网；沙箱不可用时 fail closed。确定性规则可 hard deny 危险命令，快速分类器只能在默认无网络沙箱和高置信度边界内自动 allow。后台任务由 session-scoped process manager 管理并支持有界输出和 TERM→KILL 取消。
 
-## 插件安全
+MCP 使用唯一的受管理长连接路径，负责 tools/resources discovery、list-changed、重连、取消和 workspace 切换；不存在单次 stdio fallback。LSP 使用已安装或显式配置的 server，在只读、禁网沙箱中运行，支持请求取消、didOpen/didChange、崩溃恢复和空闲回收。
 
-插件 manifest、stdio protocol 和 workspace grant 使用当前协议 3。Grant 只能收窄 manifest 声明的 workspace path、network host、固定 process template 和 credential name；包版本、digest 或 capability 改变会使授权失效。
+## 权限与插件
 
-Linux 使用 Bubblewrap，macOS 使用系统 sandbox profile。插件目录只读、临时目录独立可写，不挂载 workspace/home 且默认断网；没有 sandbox backend 时拒绝执行。插件通过双向 stdio broker 请求能力，宿主重新执行路径、SSRF、真实 diff、ActionCoordinator 审批、脱敏和审计。命名 credential 单独审批，值不写入 action result、事件或错误；插件回显的已交付值会在持久化前递归脱敏。
+结构化权限来自用户、项目、本地和 session 规则，合并顺序为 hard deny、deny、ask、allow、permission mode。Action 继续提供审批、revalidate、undo 和持久化审计。
 
-`--trusted-native --yes` 是逐工作区高风险授权，每次插件调用仍强制人工批准，不能由 `full_access` 自动通过。
+插件 manifest、grant 和 stdio protocol 使用版本 4。普通调用使用独立沙箱进程；只有显式授权的 session 生命周期插件可以池化。插件 capability 必须是 manifest grant 的子集，宿主 broker 重新执行文件、网络、进程和 credential 边界。
 
-## 事件与存储
+## 当前数据协议
 
-`RunEventBus` 生成单调 sequence、全局 event ID 和 run trace ID。UI 立即消费；耐久 sink 按 50 ms 或 4 KiB 批量写入，终止事件前强制 flush，失败时停止 run。诊断 sink 使用有界队列，text delta 可合并且不能改变运行结果。
-
-Workspace SQLite 使用一个 writer 和两个只读连接；复合状态转换由 writer transaction 独占。当前 workspace schema 为 6，新增 context compaction、tool artifact 和完整 tool invocation 元数据。Memory schema 保持 3。
-
-## 当前协议与部署
-
-当前外部格式为 config 3、workspace schema 6、memory schema 3、JSONL 3、portable archive 3 和 plugin protocol 3。运行时代码不包含旧格式迁移、转换命令或兼容 host；非当前数据直接拒绝且不修改原文件。
-
-部署 2.2.4 前必须停止 CapsLock 进程并备份工作区状态。已有非当前数据库需要在部署步骤中离线转换并完成逐表行数、外键、事件 ID、artifact digest 和 `PRAGMA integrity_check` 校验；转换逻辑不进入运行时包。新部署直接创建当前 schema。
+当前格式为 config 5、workspace schema 8、memory schema 3、portable archive 3、JSONL schema 3 和 plugin protocol 4。workspace 启动支持 backup-first、事务化的 v6/v7→v8 升级；config v3/v4 自动备份并转换为 v5。迁移失败保留原库和备份，不继续部分升级。
 
 ## 发布门禁
 
-合并前执行 compileall、Ruff、全量 pytest、repository hygiene、确定性 Agent/Memory 评测、依赖审计、wheel/sdist 构建、Twine 检查、版本一致性和隔离 wheel 冒烟。Linux/macOS CI 必须使用 Python 3.12，并验证轻量 CLI 命令不会导入 TUI、OpenAI 或 MCP runtime。
+合并前运行 compileall、Ruff、全量 pytest、真实迁移 fixture、确定性 Agent/Memory 评测、依赖审计和 wheel/sdist 冒烟。边界测试必须验证 runtime/tooling 不依赖具体 LSP/MCP manager、旧 `*_runtime.py` 模块不存在、Shell 分类规则只有一个实现，并确保轻量 CLI 不导入 MCP SDK或启动集成进程。

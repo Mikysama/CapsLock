@@ -21,9 +21,9 @@ from capslock.collaboration import (
     VerificationRequirement,
 )
 from capslock.storage.repositories import WorkspaceRepositories
-from capslock.tooling.async_catalog import workspace_tools
-from capslock.tooling.async_core import ExecutionContext
-from capslock.tooling.collaboration import _reserve_parent_budget
+from capslock.tooling.contracts import ExecutionContext
+from capslock.tooling.tools import workspace_tools
+from capslock.tooling.tools.collaboration import _reserve_parent_budget
 from capslock.domain import BudgetSnapshot, RunLimits, RunMode
 from capslock.policy import WorkspacePolicy
 from tests.helpers import workspace_run
@@ -299,7 +299,7 @@ def test_fresh_workspace_contains_collaboration_tables(tmp_path: Path) -> None:
         )
         try:
             version = await repositories.database.fetch_one("PRAGMA user_version")
-            assert int(version[0]) == 6
+            assert int(version[0]) == 8
             tables = await repositories.database.fetch_all(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'agent_%'"
             )

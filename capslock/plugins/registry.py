@@ -56,13 +56,20 @@ class PluginRegistry:
             capabilities = _capabilities_from_record(
                 grant.get("capabilities", {}) if isinstance(grant, dict) else {}
             )
+            authorized = (
+                isinstance(grant, dict)
+                and grant.get("version") == manifest.version
+                and grant.get("digest") == manifest.digest
+                and manifest.capabilities.contains(capabilities)
+                and (
+                    manifest.lifecycle == "invocation"
+                    or grant.get("session_lifecycle_authorized") is True
+                )
+            )
             entries.append(
                 InstalledPlugin(
                     manifest,
-                    isinstance(grant, dict)
-                    and grant.get("version") == manifest.version
-                    and grant.get("digest") == manifest.digest
-                    and manifest.capabilities.contains(capabilities),
+                    authorized,
                     capabilities,
                     bool(grant.get("trusted_native", False))
                     if isinstance(grant, dict)
@@ -144,6 +151,7 @@ class PluginRegistry:
         *,
         capabilities: PluginCapabilities | None = None,
         trusted_native: bool = False,
+        allow_session_lifecycle: bool = False,
     ) -> None:
         granted = capabilities or manifest.capabilities
         if not manifest.capabilities.contains(granted):
@@ -156,6 +164,7 @@ class PluginRegistry:
             "digest": manifest.digest,
             "capabilities": granted.as_dict(),
             "trusted_native": trusted_native,
+            "session_lifecycle_authorized": allow_session_lifecycle,
             "enabled_at": _now(),
         }
         self._write(self.layout.local_plugins, document, mode=0o600)

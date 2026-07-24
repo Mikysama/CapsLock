@@ -51,6 +51,7 @@ def status_text(status: str) -> Text:
         "active": "success",
         "running": "running",
         "waiting_approval": "waiting",
+        "waiting_input": "waiting",
         "pending": "waiting",
         "failed": "error",
         "cancelled": "warning",

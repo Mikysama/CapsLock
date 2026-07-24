@@ -50,6 +50,7 @@ async def approve_action(context: CliContext, prefix: str) -> None:
         await context.session.workflow.settle_approval(
             context.session.session_id, action.run_id
         )
+        await _resume_paused_action(context, action.run_id)
     except ValueError as exc:
         context.console.print(f"[error]Error:[/] {exc}")
 
@@ -62,6 +63,7 @@ async def reject_action(context: CliContext, prefix: str) -> None:
         await context.session.workflow.settle_approval(
             context.session.session_id, action.run_id
         )
+        await _resume_paused_action(context, action.run_id)
         context.console.print(f"[warning]Rejected {action.type.value}.[/]")
     except ValueError as exc:
         context.console.print(f"[error]Error:[/] {exc}")
@@ -79,6 +81,7 @@ async def apply_action_decision(
         await context.session.workflow.settle_approval(
             context.session.session_id, action.run_id
         )
+        await _resume_paused_action(context, action.run_id)
         context.console.print(
             f"[warning]Rejected {action.type.value}:[/] {action.id[:12]}"
         )
@@ -92,6 +95,18 @@ async def apply_action_decision(
     await context.session.workflow.settle_approval(
         context.session.session_id, action.run_id
     )
+    await _resume_paused_action(context, action.run_id)
+
+
+async def _resume_paused_action(context: CliContext, run_id: str) -> None:
+    run = await context.session.runs.require(
+        run_id, session_id=context.session.session_id
+    )
+    if run.status != "waiting_approval":
+        return
+    async for event in context.session.resume_paused_stream(run_id):
+        if event.kind.value == "text_delta":
+            context.console.print(str(event.data.get("text", "")), end="")
 
 
 async def undo(context: CliContext) -> None:

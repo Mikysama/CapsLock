@@ -13,8 +13,8 @@ from typing import Any
 
 
 MANIFEST_NAME = "capslock-plugin.toml"
-MANIFEST_VERSION = 3
-PROTOCOL_VERSION = 3
+MANIFEST_VERSION = 4
+PROTOCOL_VERSION = 4
 NAME_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 TOOL_PATTERN = re.compile(r"^[a-z0-9]+(?:_[a-z0-9]+)*$")
 MAX_PACKAGE_BYTES = 20 * 1024 * 1024
@@ -82,7 +82,12 @@ class PluginCapabilities:
 class PluginToolSpec:
     name: str
     description: str
-    parameters: dict[str, object]
+    input_schema: dict[str, object]
+    output_schema: dict[str, object]
+    search_hint: str
+    deferred: bool
+    annotations: dict[str, object]
+    capabilities: PluginCapabilities
 
     def qualified_name(self, plugin_name: str) -> str:
         return f"plugin.{plugin_name}.{self.name}"
@@ -101,6 +106,7 @@ class PluginManifest:
     requires_capslock: str | None = None
     manifest_version: int = MANIFEST_VERSION
     protocol_version: int = PROTOCOL_VERSION
+    lifecycle: str = "invocation"
 
     @property
     def permissions(self) -> frozenset[PluginPermission]:
@@ -133,6 +139,7 @@ def load_plugin_manifest(root: Path) -> PluginManifest:
         "entrypoint",
         "capabilities",
         "tools",
+        "lifecycle",
     }
     unknown = sorted(set(document) - allowed)
     if unknown:
@@ -185,19 +192,28 @@ def load_plugin_manifest(root: Path) -> PluginManifest:
             f"plugin entrypoint does not exist: {entrypoint[0]}"
         )
     capabilities = _capabilities(document.get("capabilities", {}))
+    lifecycle = str(document.get("lifecycle", "invocation"))
+    if lifecycle not in {"invocation", "session"}:
+        raise PluginValidationError("plugin lifecycle must be invocation or session")
     tools_raw = document.get("tools")
     if not isinstance(tools_raw, list) or not tools_raw:
         raise PluginValidationError("plugin must declare at least one tool")
     tools: list[PluginToolSpec] = []
     names: set[str] = set()
     for raw in tools_raw:
-        if not isinstance(raw, dict) or set(raw) != {
+        required_fields = {
             "name",
             "description",
-            "parameters",
-        }:
+            "input_schema",
+            "output_schema",
+            "search_hint",
+            "deferred",
+            "annotations",
+            "capabilities",
+        }
+        if not isinstance(raw, dict) or set(raw) != required_fields:
             raise PluginValidationError(
-                "each plugin tool requires name, description, and parameters"
+                "each v4 plugin tool requires name, description, input_schema, output_schema, search_hint, deferred, annotations, and capabilities"
             )
         tool_name = _string(raw, "name")
         if not TOOL_PATTERN.fullmatch(tool_name) or len(tool_name) > 64:
@@ -206,14 +222,39 @@ def load_plugin_manifest(root: Path) -> PluginManifest:
             raise PluginValidationError(f"duplicate plugin tool name: {tool_name}")
         names.add(tool_name)
         tool_description = _string(raw, "description").strip()
-        parameters = raw.get("parameters")
+        input_schema = raw.get("input_schema")
+        output_schema = raw.get("output_schema")
+        search_hint = raw.get("search_hint")
+        deferred = raw.get("deferred")
+        annotations = raw.get("annotations")
+        tool_capabilities = _capabilities(raw.get("capabilities"))
         if (
             not tool_description
-            or not isinstance(parameters, dict)
-            or parameters.get("type") != "object"
+            or not isinstance(input_schema, dict)
+            or input_schema.get("type") != "object"
+            or not isinstance(output_schema, dict)
+            or not isinstance(search_hint, str)
+            or not search_hint.strip()
+            or not isinstance(deferred, bool)
+            or not isinstance(annotations, dict)
         ):
             raise PluginValidationError(f"invalid plugin tool declaration: {tool_name}")
-        tools.append(PluginToolSpec(tool_name, tool_description, parameters))
+        if not capabilities.contains(tool_capabilities):
+            raise PluginValidationError(
+                f"plugin tool capabilities exceed the plugin grant: {tool_name}"
+            )
+        tools.append(
+            PluginToolSpec(
+                tool_name,
+                tool_description,
+                input_schema,
+                output_schema,
+                search_hint,
+                deferred,
+                annotations,
+                tool_capabilities,
+            )
+        )
     return PluginManifest(
         root=root,
         name=name,
@@ -226,6 +267,7 @@ def load_plugin_manifest(root: Path) -> PluginManifest:
         requires_capslock=_optional_string(document, "requires_capslock"),
         manifest_version=manifest_version,
         protocol_version=protocol_version,
+        lifecycle=lifecycle,
     )
 
 
