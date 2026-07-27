@@ -21,12 +21,15 @@ class CommandOutcomeKind(StrEnum):
     EXIT = "exit"
     SWITCH_SESSION = "switch_session"
     NEW_SESSION = "new_session"
+    ENQUEUE = "enqueue"
 
 
 @dataclass(frozen=True)
 class CommandOutcome:
     kind: CommandOutcomeKind = CommandOutcomeKind.HANDLED
     session_id: str | None = None
+    work_item_id: str | None = None
+    question: str | None = None
 
     def __eq__(self, other: object) -> bool:
         if isinstance(other, str):
@@ -34,7 +37,12 @@ class CommandOutcome:
         if isinstance(other, int):
             return other == 0 and self.kind is CommandOutcomeKind.EXIT
         if isinstance(other, CommandOutcome):
-            return (self.kind, self.session_id) == (other.kind, other.session_id)
+            return (self.kind, self.session_id, self.work_item_id, self.question) == (
+                other.kind,
+                other.session_id,
+                other.work_item_id,
+                other.question,
+            )
         return NotImplemented
 
 
@@ -77,6 +85,13 @@ def _spec(
 
 COMMANDS = (
     _spec("/help", "Show commands"),
+    _spec(
+        "/plan",
+        "Enter, inspect, edit, submit, or exit Plan Mode",
+        "/plan [goal|show|open|submit|exit]",
+        "session",
+        CommandAvailability.IDLE_ONLY,
+    ),
     _spec("/status", "Show session, plan, queue, context, and usage"),
     _spec(
         "/resume",

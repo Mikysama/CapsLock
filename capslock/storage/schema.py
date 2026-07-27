@@ -2,7 +2,7 @@
 
 WORKSPACE_APPLICATION_ID = 0x434C4B32  # CLK2
 MEMORY_APPLICATION_ID = 0x434C4D32  # CLM2
-WORKSPACE_SCHEMA_VERSION = 10
+WORKSPACE_SCHEMA_VERSION = 12
 MEMORY_SCHEMA_VERSION = 4
 
 WORKSPACE_SCHEMA = """
@@ -245,8 +245,12 @@ CREATE TABLE permission_decisions (
   behavior TEXT NOT NULL CHECK(behavior IN ('allow','ask','deny')),
   source TEXT NOT NULL,
   reason TEXT NOT NULL,
+  reason_code TEXT NOT NULL,
+  mode TEXT NOT NULL CHECK(mode IN ('full_access','approve_for_me','ask_for_approval')),
+  arguments_sha256 TEXT NOT NULL,
   rule_json TEXT CHECK(rule_json IS NULL OR json_valid(rule_json)),
   classifier_json TEXT CHECK(classifier_json IS NULL OR json_valid(classifier_json)),
+  suggestions_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(suggestions_json)),
   decided_by TEXT,
   created_at TEXT NOT NULL
 ) STRICT;
@@ -258,9 +262,93 @@ CREATE TABLE permission_rules (
   tool TEXT NOT NULL,
   constraints_json TEXT NOT NULL CHECK(json_valid(constraints_json)),
   source TEXT NOT NULL CHECK(source='session'),
+  matcher_version INTEGER NOT NULL DEFAULT 2 CHECK(matcher_version IN (1,2)),
   created_at TEXT NOT NULL
 ) STRICT;
 CREATE INDEX idx_permission_rules_session ON permission_rules(session_id,tool);
+CREATE TABLE permission_requests (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  invocation_id TEXT NOT NULL UNIQUE REFERENCES tool_invocations(id) ON DELETE CASCADE,
+  tool TEXT NOT NULL,
+  arguments_sha256 TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  suggestions_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(suggestions_json)),
+  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','approved','rejected','cancelled')),
+  choice TEXT CHECK(choice IN ('approve_once','approve_session','approve_local','reject')),
+  selected_update_json TEXT CHECK(selected_update_json IS NULL OR json_valid(selected_update_json)),
+  feedback TEXT,
+  result_json TEXT CHECK(result_json IS NULL OR json_valid(result_json)),
+  created_at TEXT NOT NULL,
+  decided_at TEXT
+) STRICT;
+CREATE INDEX idx_permission_requests_session ON permission_requests(session_id,status,created_at);
+CREATE TABLE permission_grants (
+  id TEXT PRIMARY KEY,
+  permission_request_id TEXT NOT NULL UNIQUE REFERENCES permission_requests(id) ON DELETE CASCADE,
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  invocation_id TEXT NOT NULL UNIQUE REFERENCES tool_invocations(id) ON DELETE CASCADE,
+  tool TEXT NOT NULL,
+  arguments_sha256 TEXT NOT NULL,
+  consumed_at TEXT,
+  created_at TEXT NOT NULL
+) STRICT;
+CREATE TABLE session_plans (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  objective TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('draft','awaiting_approval','approved','implementing','implemented','implementation_failed','rejected','cancelled')),
+  entry_source TEXT NOT NULL CHECK(entry_source IN ('slash','model','resume','branch','rewind')),
+  base_permission_mode TEXT NOT NULL CHECK(base_permission_mode IN ('full_access','approve_for_me','ask_for_approval')),
+  current_revision_id TEXT,
+  parent_plan_id TEXT REFERENCES session_plans(id) ON DELETE SET NULL,
+  mirror_relative_path TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+) STRICT;
+CREATE INDEX idx_session_plans_current ON session_plans(session_id,status,updated_at);
+CREATE TABLE plan_revisions (
+  id TEXT PRIMARY KEY,
+  plan_id TEXT NOT NULL REFERENCES session_plans(id) ON DELETE CASCADE,
+  ordinal INTEGER NOT NULL CHECK(ordinal>=1),
+  content TEXT NOT NULL,
+  sha256 TEXT NOT NULL,
+  source TEXT NOT NULL CHECK(source IN ('initial','model','editor','branch','migration')),
+  created_by_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(plan_id,ordinal),
+  UNIQUE(plan_id,sha256)
+) STRICT;
+CREATE INDEX idx_plan_revisions_plan ON plan_revisions(plan_id,ordinal);
+CREATE TABLE plan_requests (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  plan_id TEXT REFERENCES session_plans(id) ON DELETE CASCADE,
+  revision_id TEXT REFERENCES plan_revisions(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK(kind IN ('enter','submit')),
+  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','approved','feedback','rejected','cancelled')),
+  run_id TEXT REFERENCES runs(id) ON DELETE CASCADE,
+  invocation_id TEXT UNIQUE REFERENCES tool_invocations(id) ON DELETE CASCADE,
+  objective TEXT,
+  choice TEXT CHECK(choice IS NULL OR choice IN ('enter','implement','feedback','reject')),
+  feedback TEXT,
+  created_at TEXT NOT NULL,
+  decided_at TEXT,
+  CHECK((kind='enter' AND revision_id IS NULL) OR (kind='submit' AND plan_id IS NOT NULL AND revision_id IS NOT NULL))
+) STRICT;
+CREATE INDEX idx_plan_requests_session ON plan_requests(session_id,status,created_at);
+CREATE TABLE plan_implementations (
+  plan_id TEXT PRIMARY KEY REFERENCES session_plans(id) ON DELETE CASCADE,
+  revision_id TEXT NOT NULL REFERENCES plan_revisions(id) ON DELETE RESTRICT,
+  request_id TEXT NOT NULL UNIQUE REFERENCES plan_requests(id) ON DELETE CASCADE,
+  work_item_id TEXT NOT NULL UNIQUE REFERENCES work_items(id) ON DELETE CASCADE,
+  run_id TEXT UNIQUE REFERENCES runs(id) ON DELETE SET NULL,
+  status TEXT NOT NULL CHECK(status IN ('queued','running','completed','failed','cancelled')),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+) STRICT;
 CREATE TABLE tool_discoveries (
   session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
   tool_name TEXT NOT NULL,

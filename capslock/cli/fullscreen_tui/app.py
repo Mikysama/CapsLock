@@ -23,6 +23,7 @@ from ...domain import (
     ActionRecord,
     ActionStatus,
     ApprovalDecision,
+    ApprovalChoice,
     AgentEventKind,
     BudgetRequest,
     BudgetSnapshot,
@@ -51,11 +52,14 @@ from .screens import (
     ApprovalScreen,
     ConfirmScreen,
     ContentScreen,
+    EnterPlanModeScreen,
     MarkdownContentScreen,
     HistorySearchScreen,
     InputRequestScreen,
     ModelScreen,
+    PermissionApprovalScreen,
     PermissionScreen,
+    PlanApprovalScreen,
     SessionPickerScreen,
     SideQuestionScreen,
     TextPromptScreen,
@@ -120,6 +124,28 @@ class FullscreenCommandUI:
 
     async def input_text(self, title: str, prompt: str) -> str | None:
         return await self.app._modal_wait(TextPromptScreen(title, placeholder=prompt))
+
+    async def request_plan_entry(self, objective: str) -> bool:
+        return bool(await self.app._modal_wait(EnterPlanModeScreen(objective)))
+
+    async def request_plan_approval(
+        self,
+        *,
+        objective: str,
+        content: str,
+        revision: int,
+        sha256: str,
+        permission_mode: str,
+    ):
+        return await self.app._modal_wait(
+            PlanApprovalScreen(
+                objective=objective,
+                content=content,
+                revision=revision,
+                sha256=sha256,
+                permission_mode=permission_mode,
+            )
+        )
 
     async def copy(self, content: str) -> str:
         return await ConsoleCommandUI(self.app.context.console).copy(content)
@@ -271,6 +297,7 @@ ModalScreen {
     margin-bottom: 1;
 }
 .permission-title { color: #C4A96B; }
+.plan-title { color: #72AFA7; }
 .dialog-detail { margin-bottom: 1; }
 .dialog-scroll { height: 1fr; }
 .approval-preview {
@@ -280,6 +307,19 @@ ModalScreen {
     border: solid #3D4F61;
     padding: 0 1;
 }
+.plan-entry-dialog { width: 72; min-height: 22; }
+.plan-entry-dialog OptionList { height: 5; }
+.plan-approval-dialog { width: 90%; height: 86%; }
+.plan-preview {
+    height: 1fr;
+    min-height: 8;
+    margin: 1 0;
+    border-top: dashed #3D4F61;
+    border-bottom: dashed #3D4F61;
+    padding: 0 1;
+}
+.plan-approval-dialog OptionList { height: 8; }
+#plan-feedback { margin-top: 1; }
 .dialog-actions {
     height: 3;
     align-horizontal: right;
@@ -505,6 +545,59 @@ class CapsLockApp(App[int]):
                         run.question,
                         item.event.run_id,
                     )
+            elif item.event.kind is AgentEventKind.WAITING_APPROVAL:
+                try:
+                    plan_request = await self.agent_session.resolve_plan_request(
+                        str(item.event.data.get("request_id", ""))
+                    )
+                except ValueError:
+                    plan_request = None
+                if plan_request is not None:
+                    from ..plans import decide_plan_request_interactively
+
+                    await decide_plan_request_interactively(
+                        CliContext(
+                            self.context.console,
+                            self.agent_session,
+                            self.context.queries,
+                            ui=FullscreenCommandUI(self),
+                            application=self.context.application,
+                        ),
+                        plan_request,
+                    )
+                    run = await self.agent_session.runs.require(
+                        item.event.run_id,
+                        session_id=self.agent_session.session_id,
+                    )
+                    await self.controller.enqueue_item(
+                        item.event.work_item_id,
+                        run.question,
+                        item.event.run_id,
+                    )
+                    await self._sync()
+                    return
+                try:
+                    request = await self.agent_session.resolve_permission_request(
+                        str(item.event.data.get("request_id", ""))
+                    )
+                except ValueError:
+                    request = None
+                if request is not None:
+                    decision = await self._modal_wait(
+                        PermissionApprovalScreen(request)
+                    )
+                    await self.agent_session.decide_permission_request(
+                        str(request["id"]), decision
+                    )
+                    run = await self.agent_session.runs.require(
+                        item.event.run_id,
+                        session_id=self.agent_session.session_id,
+                    )
+                    await self.controller.enqueue_item(
+                        item.event.work_item_id,
+                        run.question,
+                        item.event.run_id,
+                    )
         elif item.kind is ControllerEventKind.CANCELLED:
             self.state = add_system_message(self.state, "Cancelled", status="cancelled")
         elif item.kind is ControllerEventKind.FAILED:
@@ -517,7 +610,9 @@ class CapsLockApp(App[int]):
             self.state = remove_queue_item(self.state, item.work_item_id)
         await self._sync()
 
-    async def _authorize_action(self, action: ActionRecord) -> ApprovalDecision:
+    async def _authorize_action(
+        self, action: ActionRecord
+    ) -> ApprovalChoice | ApprovalDecision:
         if self._too_small:
             return ApprovalDecision.REJECT
         result = await self._modal_wait(ApprovalScreen(action))
@@ -680,8 +775,12 @@ class CapsLockApp(App[int]):
                 ActionStatus.RUNNING,
             },
         )
+        permission_requests = await self.agent_session.permission_requests(
+            status="pending"
+        )
+        plan_requests = await self.agent_session.plan_requests()
         if len(parts) == 1:
-            if not items:
+            if not items and not permission_requests and not plan_requests:
                 self.push_screen(
                     ContentScreen("Pending approvals", "No pending approvals.")
                 )
@@ -690,6 +789,16 @@ class CapsLockApp(App[int]):
             for item in items:
                 view = present_action(item)
                 lines.append(f"{item.id[:12]}  {view.subtitle}\n{view.title}\n")
+            for request in permission_requests:
+                lines.append(
+                    f"{str(request['id'])[:12]}  permission · {request['tool']}\n"
+                    f"{request['reason']}\n"
+                )
+            for request in plan_requests:
+                lines.append(
+                    f"{request.id[:12]}  plan · {request.kind.value}\n"
+                    f"{request.objective or request.plan_id or '-'}\n"
+                )
             self.push_screen(ContentScreen("Pending approvals", "\n".join(lines)))
             return
         if len(parts) != 3 or parts[1] not in {"approve", "reject"}:
@@ -698,7 +807,57 @@ class CapsLockApp(App[int]):
             )
             await self._sync()
             return
-        action = await self.agent_session.action_factory("cli").resolve(parts[2])
+        try:
+            action = await self.agent_session.action_factory("cli").resolve(parts[2])
+        except ValueError:
+            try:
+                plan_request = await self.agent_session.resolve_plan_request(parts[2])
+            except ValueError:
+                plan_request = None
+            if plan_request is not None:
+                if parts[1] == "reject":
+                    await self.agent_session.decide_plan_request(
+                        plan_request.id, "reject"
+                    )
+                else:
+                    from ..plans import decide_plan_request_interactively
+
+                    await decide_plan_request_interactively(
+                        CliContext(
+                            self.context.console,
+                            self.agent_session,
+                            self.context.queries,
+                            ui=FullscreenCommandUI(self),
+                            application=self.context.application,
+                        ),
+                        plan_request,
+                    )
+                if plan_request.run_id:
+                    run = await self.agent_session.runs.require(
+                        plan_request.run_id,
+                        session_id=self.agent_session.session_id,
+                    )
+                    await self.controller.enqueue_item(
+                        run.work_item_id, run.question, run.id
+                    )
+                return
+            request = await self.agent_session.resolve_permission_request(parts[2])
+            decision = ApprovalChoice.REJECT
+            if parts[1] == "approve":
+                decision = await self._modal_wait(
+                    PermissionApprovalScreen(request)
+                )
+            await self.agent_session.decide_permission_request(
+                str(request["id"]), decision
+            )
+            run = await self.agent_session.runs.require(
+                str(request["run_id"]),
+                session_id=self.agent_session.session_id,
+            )
+            await self.controller.enqueue_item(
+                run.work_item_id, run.question, run.id
+            )
+            return
         decision = ApprovalDecision.REJECT
         if parts[1] == "approve":
             decision = await self._authorize_action(action)
@@ -737,7 +896,15 @@ class CapsLockApp(App[int]):
                 ),
                 text,
             )
-            if result.kind is not CommandOutcomeKind.HANDLED:
+            if result.kind is CommandOutcomeKind.ENQUEUE:
+                assert result.work_item_id and result.question
+                self.state = add_user_message(
+                    self.state, result.work_item_id, result.question
+                )
+                await self.controller.enqueue_item(
+                    result.work_item_id, result.question
+                )
+            elif result.kind is not CommandOutcomeKind.HANDLED:
                 self.exit(result)
                 return
         except (ValueError, OSError) as exc:
@@ -807,17 +974,27 @@ class CapsLockApp(App[int]):
         if self.session is None:
             return
         width = self.size.width
+        current_plan_loader = getattr(self.agent_session, "current_plan", None)
+        current_plan = (
+            await current_plan_loader() if callable(current_plan_loader) else None
+        )
+        permission_label = (
+            f"⏸ plan mode on · {current_plan[0].status.value} · "
+            f"{self.agent_session.permission_mode.value}"
+            if current_plan is not None
+            else self.agent_session.permission_mode.value
+        )
         self.query_one(SessionHeader).update_header(
             title=self.session.title,
             workspace=str(self.agent_session.workspace),
             model=self.agent_session.model,
-            permission=self.agent_session.permission_mode.value,
+            permission=permission_label,
             width=width,
         )
         self.query_one(StatusBar).update_status(
             self.state,
             model=self.agent_session.model,
-            permission=self.agent_session.permission_mode.value,
+            permission=permission_label,
             workspace=str(self.agent_session.workspace),
             width=width,
             context_limit=self.agent_session.context_budget.input_budget,

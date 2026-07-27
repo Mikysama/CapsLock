@@ -110,6 +110,57 @@ def merge_tables(
     return maps
 
 
+def rewrite_deferred_references(
+    connection: sqlite3.Connection,
+    payload: dict[str, Any],
+    tables: tuple[str, ...],
+    primary: dict[str, str | tuple[str, ...]],
+    maps: dict[str, dict[str, str]],
+) -> None:
+    """Repair references whose target table was imported later in the pass.
+
+    Portable imports deliberately process plans before their revisions so a plan
+    row can own all following records.  ``current_revision_id`` therefore cannot
+    be rewritten until every deterministic collision mapping is known.  Limit the
+    second pass to single-key tables; composite-key conflict rows may be blocked
+    and must never be mutated after the fact.
+    """
+
+    for table in tables:
+        key = primary[table]
+        if not isinstance(key, str):
+            continue
+        table_map = maps.get(table, {})
+        for source in payload.get(table, []):
+            if not isinstance(source, dict) or key not in source:
+                continue
+            target_key = table_map.get(str(source[key]))
+            if target_key is None:
+                continue
+            updates: dict[str, object] = {}
+            for field, target_table in REFERENCE_FIELDS.items():
+                value = source.get(field)
+                mapped = maps.get(target_table, {}).get(str(value))
+                if value is not None and mapped is not None and mapped != value:
+                    updates[field] = mapped
+            if table == "session_plans":
+                session_id = maps.get("sessions", {}).get(
+                    str(source.get("session_id")), source.get("session_id")
+                )
+                plan_id = maps.get("session_plans", {}).get(
+                    str(source.get("id")), source.get("id")
+                )
+                if session_id and plan_id:
+                    updates["mirror_relative_path"] = f"{session_id}/{plan_id}.md"
+            if not updates:
+                continue
+            assignments = ",".join(f"{field}=?" for field in updates)
+            connection.execute(
+                f"UPDATE {table} SET {assignments} WHERE {key}=?",
+                (*updates.values(), target_key),
+            )
+
+
 def rewrite_references(
     table_name: str,
     record: dict[str, Any],

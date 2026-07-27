@@ -19,6 +19,7 @@ from .import_merge import (
     normalize_imported_workflow,
     rebuild_memory_fts,
     rebuild_session_search,
+    rewrite_deferred_references,
     utc_now,
 )
 from .io import sqlite_backup
@@ -110,6 +111,13 @@ class ImportCoordinator:
                     archive_id,
                     report,
                     domain="workspace",
+                )
+                rewrite_deferred_references(
+                    workspace_connection,
+                    workspace_rows,
+                    WORKSPACE_TABLES,
+                    WORKSPACE_PRIMARY,
+                    workspace_maps,
                 )
                 normalize_imported_workflow(workspace_connection, import_id)
                 rebuild_session_search(

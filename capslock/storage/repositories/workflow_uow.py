@@ -274,55 +274,112 @@ class WorkflowUnitOfWork(Repository):
                         (request_id, run_id),
                     )
                 ).fetchone()
-                if action is None or action["status"] in {
-                    "pending",
-                    "approved",
-                    "running",
-                }:
-                    raise ValueError("action approval has not reached a terminal state")
-                data = {
-                    "action_id": str(action["id"]),
-                    "kind": str(action["action_type"]),
-                    "summary": str(action["summary"]),
-                    "status": str(action["status"]),
-                    "result_kind": action["result_kind"],
-                    "request": json.loads(action["request_json"]),
-                    "result": json.loads(action["result_json"])
-                    if action["result_json"]
-                    else None,
-                    "error": action["error_message"],
-                }
-                if action["status"] == "rejected":
-                    status, executed = "denied", False
-                    error, error_code = (
-                        action["error_message"] or "action was rejected",
-                        "action_rejected",
-                    )
-                elif action["status"] == "cancelled":
-                    status, executed = "cancelled", False
-                    error, error_code = (
-                        action["error_message"] or "action was cancelled",
-                        "action_cancelled",
-                    )
-                elif action["status"] == "failed":
-                    status, executed = "failed", True
-                    error, error_code = (
-                        action["error_message"] or "action failed",
-                        action["error_code"] or "action_failed",
-                    )
-            result = json.dumps(
-                {
-                    "status": status,
-                    "ok": status == "succeeded",
-                    "executed": executed,
-                    "delivery_status": "inline",
-                    "data": data,
-                    "content": [],
-                    "error": error,
-                    "error_code": error_code,
-                },
-                ensure_ascii=False,
-            )
+                if action is None:
+                    plan_request = await (
+                        await connection.execute(
+                            """SELECT * FROM plan_requests
+                               WHERE id=? AND run_id=? AND invocation_id=?""",
+                            (request_id, run_id, str(invocation["id"])),
+                        )
+                    ).fetchone()
+                    if plan_request is not None:
+                        if plan_request["status"] == "pending":
+                            raise ValueError("plan request has not been decided")
+                        choice = str(plan_request["choice"] or "reject")
+                        succeeded = choice in {"enter", "implement", "feedback"}
+                        status = "succeeded" if succeeded else "denied"
+                        executed = succeeded
+                        error = None if succeeded else "plan request was rejected"
+                        error_code = None if succeeded else "plan_request_rejected"
+                        result_payload = {
+                            "status": status,
+                            "ok": succeeded,
+                            "executed": executed,
+                            "delivery_status": "inline",
+                            "data": {
+                                "choice": choice,
+                                "plan_id": plan_request["plan_id"],
+                                "feedback": plan_request["feedback"],
+                            },
+                            "content": [],
+                            "error": error,
+                            "error_code": error_code,
+                        }
+                    else:
+                        permission_request = await (
+                            await connection.execute(
+                                """SELECT * FROM permission_requests
+                                   WHERE id=? AND run_id=? AND invocation_id=?""",
+                                (request_id, run_id, str(invocation["id"])),
+                            )
+                        ).fetchone()
+                        if (
+                            permission_request is None
+                            or permission_request["status"] == "pending"
+                            or not permission_request["result_json"]
+                        ):
+                            raise ValueError(
+                                "permission approval has not been executed to a terminal result"
+                            )
+                        stored_result = json.loads(permission_request["result_json"])
+                        if not isinstance(stored_result, dict):
+                            raise ValueError("permission result is invalid")
+                        result_payload = stored_result
+                        status = str(stored_result.get("status", "failed"))
+                        executed = bool(stored_result.get("executed", False))
+                        error = stored_result.get("error")
+                        error_code = stored_result.get("error_code")
+                else:
+                    if action["status"] in {"pending", "approved", "running"}:
+                        raise ValueError(
+                            "action approval has not reached a terminal state"
+                        )
+                    data = {
+                        "action_id": str(action["id"]),
+                        "kind": str(action["action_type"]),
+                        "summary": str(action["summary"]),
+                        "status": str(action["status"]),
+                        "result_kind": action["result_kind"],
+                        "request": json.loads(action["request_json"]),
+                        "result": json.loads(action["result_json"])
+                        if action["result_json"]
+                        else None,
+                        "error": action["error_message"],
+                    }
+                    if action["status"] == "rejected":
+                        status, executed = "denied", False
+                        error, error_code = (
+                            action["error_message"] or "action was rejected",
+                            "action_rejected",
+                        )
+                    elif action["status"] == "cancelled":
+                        status, executed = "cancelled", False
+                        error, error_code = (
+                            action["error_message"] or "action was cancelled",
+                            "action_cancelled",
+                        )
+                    elif action["status"] == "failed":
+                        status, executed = "failed", True
+                        error, error_code = (
+                            action["error_message"] or "action failed",
+                            action["error_code"] or "action_failed",
+                        )
+            if pause_kind != "user_input" and action is None:
+                result = json.dumps(result_payload, ensure_ascii=False)
+            else:
+                result = json.dumps(
+                    {
+                        "status": status,
+                        "ok": status == "succeeded",
+                        "executed": executed,
+                        "delivery_status": "inline",
+                        "data": data,
+                        "content": [],
+                        "error": error,
+                        "error_code": error_code,
+                    },
+                    ensure_ascii=False,
+                )
             checkpoint = json.loads(step["checkpoint_json"] or "{}")
             messages = list(checkpoint.get("messages", []))
             tool_message = {
@@ -426,6 +483,15 @@ class WorkflowUnitOfWork(Repository):
                 )
             ).fetchone()
             if pending is not None:
+                return None
+            pending_permission = await (
+                await connection.execute(
+                    """SELECT 1 FROM permission_requests WHERE run_id=?
+                       AND status='pending' LIMIT 1""",
+                    (run_id,),
+                )
+            ).fetchone()
+            if pending_permission is not None:
                 return None
             paused_invocation = await (
                 await connection.execute(

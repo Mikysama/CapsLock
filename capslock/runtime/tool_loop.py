@@ -118,6 +118,7 @@ class ModelStepExecutor:
         run_id: str,
         emit: Callable[[AgentEventKind, dict[str, Any]], Awaitable[None]],
         governor: RunGovernor | None,
+        tool_schemas: list[dict[str, object]] | None = None,
     ):
         step = await self.journal.create_step(run_id, RunStepKind.MODEL)
         content: list[str] = []
@@ -129,7 +130,7 @@ class ModelStepExecutor:
                 chat_model,
                 model=self.model,
                 messages=messages,
-                tools=self.tools.schemas,
+                tools=self.tools.schemas if tool_schemas is None else tool_schemas,
             )
             timeout = governor.remaining_seconds() if governor else None
             async with asyncio.timeout(timeout):
@@ -832,6 +833,7 @@ class ToolLoop:
             await self.tools.refresh_dynamic()
             if compact_context is not None:
                 messages[:] = await compact_context(messages)
+            planning_active = await self._refresh_plan_attachment(messages, run_id)
             if governor is not None:
                 try:
                     await governor.before_model()
@@ -886,6 +888,7 @@ class ToolLoop:
                 run_id=run_id,
                 emit=emit,
                 governor=governor,
+                tool_schemas=(self.tools.plan_schemas if planning_active else self.tools.schemas),
             )
             input_tokens += usage.input_tokens
             output_tokens += usage.output_tokens
@@ -1008,6 +1011,28 @@ class ToolLoop:
             input_tokens=input_tokens,
             output_tokens=output_tokens,
         )
+
+    async def _refresh_plan_attachment(
+        self, messages: list[dict[str, object]], run_id: str
+    ) -> bool:
+        prefix = "<capslock-plan-mode>"
+        messages[:] = [
+            item
+            for item in messages
+            if not (
+                item.get("role") == "system"
+                and str(item.get("content", "")).startswith(prefix)
+            )
+        ]
+        context = self.context_factory(run_id)
+        if context.planning is None:
+            return False
+        attachment = await context.planning.attachment(context.session_id)
+        if attachment is None:
+            return False
+        insertion = 1 if messages and messages[0].get("role") == "system" else 0
+        messages.insert(insertion, {"role": "system", "content": attachment})
+        return True
 
     async def _cancel_after_barrier(
         self,

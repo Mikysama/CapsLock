@@ -16,7 +16,7 @@ from capslock.domain import AgentEvent, AgentEventKind, RunLimits, RunMode
 from capslock.runtime import RunRequest
 from capslock.runtime.model import ModelMessage, ModelResponse, ModelToolCall
 from capslock.storage.repositories import WorkspaceRepositories
-from capslock.tooling.contracts import ToolOutcome, define_tool
+from capslock.tooling.contracts import ResolvedToolPolicy, ToolOutcome, define_tool
 from capslock.tooling.executor import ToolRuntime
 from tests.helpers import FakeChatModel, answer, workflow_service
 from tests.test_runtime import make_agent
@@ -59,7 +59,7 @@ def test_fresh_schema_has_governance_tables(tmp_path: Path) -> None:
         )
         try:
             version = await repositories.database.fetch_one("PRAGMA user_version")
-            assert version[0] == 10
+            assert version[0] == 12
             for table in ("run_governance", "tool_call_attempts"):
                 assert await repositories.database.fetch_one(
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
@@ -142,6 +142,116 @@ def test_budget_snapshot_round_trip(tmp_path: Path) -> None:
                 json.loads(json.dumps(snapshot.as_dict()))["limits"]["max_tool_calls"]
                 == 4
             )
+        finally:
+            await repositories.close()
+
+    asyncio.run(scenario())
+
+
+def test_concurrent_tool_attempts_receive_unique_sequences(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        repositories = await WorkspaceRepositories.open(
+            tmp_path / "state.sqlite3", workspace=tmp_path
+        )
+        try:
+            session = await repositories.sessions.create("test-model")
+            prepared = await workflow_service(repositories).prepare(
+                session.id, "parallel reads"
+            )
+            attempt_ids = await asyncio.gather(
+                *(
+                    repositories.governance.reserve_attempt(
+                        prepared.run.id,
+                        round_index=1,
+                        name=f"read_{index}",
+                        arguments={"index": index},
+                        fingerprint=f"fingerprint-{index}",
+                    )
+                    for index in range(16)
+                )
+            )
+            rows = await repositories.database.fetch_all(
+                """SELECT id,sequence FROM tool_call_attempts
+                   WHERE run_id=? ORDER BY sequence""",
+                (prepared.run.id,),
+            )
+            assert len(set(attempt_ids)) == 16
+            assert [int(row["sequence"]) for row in rows] == list(range(1, 17))
+            assert {int(row["id"]) for row in rows} == set(attempt_ids)
+        finally:
+            await repositories.close()
+
+    asyncio.run(scenario())
+
+
+def test_parallel_read_batch_records_attempts_without_sequence_collision(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        repositories = await WorkspaceRepositories.open(
+            tmp_path / "state.sqlite3", workspace=tmp_path
+        )
+        try:
+            session = await repositories.sessions.create("test-model")
+
+            async def read(context, arguments):
+                del context
+                await asyncio.sleep(0)
+                return ToolResult(True, arguments)
+
+            tools = ToolRegistry(
+                [
+                    Tool(
+                        name,
+                        "safe parallel read",
+                        {"type": "object"},
+                        read,
+                        policy=ResolvedToolPolicy.safe_read(),
+                    )
+                    for name in ("list_files", "git_status", "glob_files")
+                ]
+            )
+            model = FakeChatModel(
+                ModelResponse(
+                    ModelMessage(
+                        "Inspecting the workspace.",
+                        tuple(
+                            ModelToolCall(str(index), name, "{}")
+                            for index, name in enumerate(
+                                ("list_files", "git_status", "glob_files")
+                            )
+                        ),
+                    )
+                ),
+                answer("Plan ready."),
+            )
+            agent = make_agent(
+                tmp_path, repositories, session.id, model, tools=tools
+            )
+            events = [
+                item
+                async for item in agent.run_stream(
+                    RunRequest(question="Create a development plan")
+                )
+            ]
+            assert events[-1].kind is AgentEventKind.COMPLETED
+            rows = await repositories.database.fetch_all(
+                """SELECT sequence,name,ok FROM tool_call_attempts
+                   WHERE run_id=? ORDER BY sequence""",
+                (events[-1].run_id,),
+            )
+            assert [int(row["sequence"]) for row in rows] == [1, 2, 3]
+            assert {str(row["name"]) for row in rows} == {
+                "list_files",
+                "git_status",
+                "glob_files",
+            }
+            assert all(int(row["ok"]) == 1 for row in rows)
+            governance = await repositories.database.fetch_one(
+                "SELECT tool_calls FROM run_governance WHERE run_id=?",
+                (events[-1].run_id,),
+            )
+            assert int(governance["tool_calls"]) == 3
         finally:
             await repositories.close()
 

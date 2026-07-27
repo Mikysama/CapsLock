@@ -2,7 +2,7 @@
 
 CapsLock 是一个本机工作区 Agent，用于读取和修改代码、检索证据、运行受沙箱保护的 Shell、查询代码语义，以及按审批策略访问 Web、MCP 和本地插件。Tool Runtime v2 将工具契约、参数级策略、可恢复暂停、调度、富结果与审计统一到异步执行链。
 
-当前源码版本为 `2.5.0`。记忆系统使用后台持久作业、严格来源 envelope、可解释混合召回、revision-aware compaction、长期整理、受控仓库指令和验证后的子 Agent 记忆提案。workspace schema 为 10、memory schema 为 4、config 为 6。完整升级边界见 [2.5.0 发布说明](docs/releases/v2.5.0.md)。
+当前源码版本为 `2.6.0`。本版本新增工具专属权限 v2 判定链、可恢复审批、会话级 Plan Mode、Claude Code 风格规划交互，以及并发工具调用序号的原子分配。当前协议为 workspace schema 12、memory schema 4、portable archive 5、session export 5 和 config 6。完整升级边界见 [2.6.0 发布说明](docs/releases/v2.6.0.md)。
 
 正式支持矩阵：Linux/macOS，Python 3.12。发布 CI 会在两个操作系统组合中执行测试、构建、依赖审计和安装冒烟。
 
@@ -79,7 +79,7 @@ printf '%s\n' "总结最近的改动" | capslock exec --json
 TUI 保留以下命令：
 
 ```text
-/help /status /resume /btw /compact /new /copy /export /branch /context
+/help /plan /status /resume /btw /compact /new /copy /export /branch /context
 /worktree /rewind /stats /doctor /permissions /approvals /queue /memory
 /skills /agents /model /sources /mcp /diff /undo /rename
 /exit /quit
@@ -139,7 +139,7 @@ Markdown、代码高亮和输入光标行只移除字符背景，不改变前景
 
 ## 权限与动作
 
-默认模式为 `approve_for_me`：高风险文件、命令和 MCP 动作需要确认，Web 动作仍经过校验与审计。另有 `full_access` 和 `ask_for_approval`：
+CapsLock 只提供 `full_access`、`approve_for_me` 和 `ask_for_approval` 三种模式。默认的 `approve_for_me` 自动放行安全本地读取和确定性安全的断网沙箱命令；文件修改、网络、后台进程、MCP 与插件副作用默认询问。`full_access` 放行其余调用，但 hard deny、强制安全确认及显式 deny/ask 仍生效；`ask_for_approval` 只有显式 allow 才自动放行。Shell 快速分类器只可在 `approve_for_me`、默认断网沙箱、确定性分析未知、置信度至少 0.95 且没有显式 ask/deny 时放行。
 
 ```text
 /permissions full
@@ -147,7 +147,29 @@ Markdown、代码高亮和输入光标行只移除字符背景，不改变前景
 /permissions ask
 ```
 
-直接输入 `/permissions` 会打开三档权限选择框。交互 TUI 中需要确认的动作会原地等待选择；批准后立即执行并把结果返回当前 run，拒绝后不会产生副作用。非交互 `exec` 无法弹出选择框，因此仍以 `waiting_approval` 和退出码 `3` 结束。
+直接输入 `/permissions` 会打开三档权限选择框。审批默认拒绝，支持仅本次、当前 session、当前工作区 local 和拒绝；session/local 规则必须先成功持久化并重新判定为 allow，原调用才会执行。普通读取工具与 Action 共用可恢复的审批请求，进程重启后仍会复验 session、run、invocation、工具名和规范化参数 SHA-256。非交互 `exec` 无法弹出选择框，因此仍以 `waiting_approval` 和退出码 `3` 结束。
+
+权限规则使用 `permissions_version = 2`，按 `deny → ask → allow → 模式默认` 判定；参数规范化、能力边界和 hard deny/hard ask 更早执行。文件 glob 中 `*` 不跨目录，`**` 才跨目录；Shell 使用 exact command 或显式 command prefix；Web 按 IDNA host 和操作匹配；MCP 按精确 server/tool 匹配。项目 allow 只有在 `/permissions trust-project` 信任当前文件 SHA-256 后才生效，文件变化会立即撤销信任。
+
+```toml
+permissions_version = 2
+
+[[rules]]
+id = "read-python"
+behavior = "allow"
+tool = "read_file"
+[rules.constraints]
+path = "src/**/*.py"
+
+[[rules]]
+id = "deny-secrets"
+behavior = "deny"
+tool = "read_file"
+[rules.constraints]
+path = "**/.env*"
+```
+
+使用 `/permissions rules|recent|doctor` 查看规则、近期决定和迁移/冲突诊断；`/permissions add ...`、`remove ...` 管理规则。未版本化旧 allow 只有可无损解释时才继续生效，歧义规则降级为 ask。
 
 所有动作共用 `pending -> approved -> running -> completed|failed|cancelled` 状态机。拒绝从 `pending` 进入 `rejected`。Coordinator 负责风险、审批、状态和审计；handler 负责文件、命令、Web 或 MCP 的校验与执行。
 
@@ -156,6 +178,24 @@ Markdown、代码高亮和输入光标行只移除字符背景，不改变前景
 - Web 只访问公开 HTTP/HTTPS 地址，拒绝私网、重定向越界和非文本响应；来源始终是不可信数据。
 - MCP 只使用显式配置的本地 stdio server 和工具 allowlist。
 - 本地工具插件必须显式安装和逐工作区启用；安装、升级、权限变化和卸载均展示内容摘要与 capability 并记录审计。插件默认在 OS sandbox 中运行，通过宿主 broker 请求受限能力；没有 sandbox backend 时拒绝执行。
+
+## Plan Mode
+
+`/plan [目标]` 进入会话级 Plan Mode；也可以在提示词中明确要求“只规划”，由模型调用 `enter_plan_mode` 并等待确认。Plan Mode 不增加权限模式，它是在当前 `full_access`、`approve_for_me` 或 `ask_for_approval` 上叠加的强制只读边界。即使底层为 `full_access`，Shell、Web、MCP、插件、文件 Action、任务/记忆修改、worktree、后台进程和子 Agent 也会直接返回 `plan_mode_read_only`。
+
+```text
+/plan [目标]
+/plan show
+/plan open
+/plan submit
+/plan exit
+```
+
+规划期间只开放 CapsLock 自有的本地只读探索、`ask_user` 和 `get_plan`、`update_plan`、`submit_plan`。每个 revision 都绑定 SHA-256；提交后可选择批准并实施、提供反馈继续规划或拒绝退出。批准会结束规划 run，并用批准 revision 的精确 Markdown 启动新的 implementation run；它只是任务上下文，不授予文件、Shell、Web 或插件权限，实施仍完整经过原权限内核。
+
+交互方式与 Claude Code 的 Plan Mode 对齐：模型提议进入时会先展示只读能力说明和目标；规划期间提示栏显示 `⏸ plan mode on`；提交时使用 `Ready to code?` 审阅页内嵌完整 Markdown 计划、revision、摘要和当前底层权限。选择“keep planning”可直接输入修改意见，Esc 同样保持规划且不执行；批准后才移除只读 overlay。Fullscreen TUI 在同一对话框内完成反馈，Inline TUI 使用等价的编号选择和反馈提示。
+
+数据库是计划状态的权威来源，Markdown 镜像位于 `.capslock/state/plans/<session-id>/<plan-id>.md`，供 `/plan open` 使用。草稿、进入/提交审批和批准后的实施工作项可跨进程恢复；非交互 `exec` 遇到计划审批时返回 `waiting_approval` 和退出码 `3`。
 
 ## 本地工具插件
 
@@ -377,9 +417,10 @@ CapsLock 只接受 canonical 布局：
 - 本机 MCP：`.capslock/local/mcp.json`
 - 工作区数据库：`.capslock/state/capslock.sqlite3`
 - 事件日志：`.capslock/state/events.jsonl`
+- 计划镜像：`.capslock/state/plans/<session-id>/<plan-id>.md`
 - 用户记忆：`${CAPSLOCK_HOME:-~/.capslock}/state/memory.sqlite3`
 
-工作区库和记忆库使用不同的 SQLite `application_id`。当前 workspace schema 为 10，memory schema 为 4；workspace schema v6-v9 与 memory schema v3 在 WAL checkpoint 和 SQLite backup 后事务升级。旧 application ID、其他非当前 schema 或未知已有表均拒绝启动。
+工作区库和记忆库使用不同的 SQLite `application_id`。当前 workspace schema 为 12，memory schema 为 4；workspace schema v6-v11 与 memory schema v3 在 WAL checkpoint 和 SQLite backup 后事务升级。portable archive 与 session export 当前为 version 5，portable archive 读取兼容 version 3/4。旧 application ID、其他非当前 schema 或未知已有表均拒绝启动。
 
 ## 架构
 

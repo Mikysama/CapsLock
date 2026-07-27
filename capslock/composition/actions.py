@@ -45,6 +45,7 @@ def build_action_factory(
     plugin_client: PluginProcessClient,
     processes: SessionProcessManager,
     interaction: RunInteraction,
+    permission_engine: Any = None,
     emit: Callable[..., None],
 ) -> Callable[[str], ActionCoordinator]:
     def actions(run_id: str) -> ActionCoordinator:
@@ -155,6 +156,7 @@ def build_action_factory(
             handlers=handlers,
             event=emit,
             interaction=interaction,
+            permission_engine=permission_engine,
         )
         return coordinator
 

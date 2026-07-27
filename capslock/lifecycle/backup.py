@@ -23,8 +23,8 @@ from .sanitization import sanitize_config, sanitize_mcp
 
 
 BACKUP_FORMAT = "capslock-backup"
-ARCHIVE_VERSION = 4
-SUPPORTED_ARCHIVE_VERSIONS = frozenset({3, ARCHIVE_VERSION})
+ARCHIVE_VERSION = 5
+SUPPORTED_ARCHIVE_VERSIONS = frozenset({3, 4, ARCHIVE_VERSION})
 
 
 class BackupService:

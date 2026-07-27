@@ -183,7 +183,13 @@ async def search_tools(
         return ToolOutcome.failure(
             "limit must be between 1 and 20", code="invalid_limit"
         )
-    names = context.catalog.search(query, limit)
+    active_plan = bool(
+        context.planning is not None
+        and await context.planning.is_active(context.session_id)
+    )
+    names = context.catalog.search(
+        query, limit, plan_visible_only=active_plan
+    )
     if context.discoveries is not None and hasattr(
         context.discoveries, "record_tool_discoveries"
     ):

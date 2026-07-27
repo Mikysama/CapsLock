@@ -410,6 +410,10 @@ class SessionRepository(Repository):
             "SELECT relative_path FROM tool_artifacts WHERE session_id=?",
             (session_id,),
         )
+        plan_rows = await self.all(
+            "SELECT mirror_relative_path FROM session_plans WHERE session_id=?",
+            (session_id,),
+        )
         async with self.database.transaction() as connection:
             cursor = await connection.execute(
                 "DELETE FROM sessions WHERE id=?", (session_id,)
@@ -429,6 +433,14 @@ class SessionRepository(Repository):
             target = (artifact_root / relative).resolve()
             if remaining is None and target.is_relative_to(artifact_root.resolve()):
                 target.unlink(missing_ok=True)
+        plan_root = self.workspace / ".capslock" / "state" / "plans"
+        for row in plan_rows:
+            target = (plan_root / str(row["mirror_relative_path"])).resolve()
+            if target.is_relative_to(plan_root.resolve()):
+                target.unlink(missing_ok=True)
+        session_plan_dir = plan_root / session_id
+        if session_plan_dir.is_dir() and not any(session_plan_dir.iterdir()):
+            session_plan_dir.rmdir()
 
     async def transcript(self, session_id: str) -> list[dict[str, Any]]:
         entries: list[tuple[str, int, dict[str, Any]]] = []

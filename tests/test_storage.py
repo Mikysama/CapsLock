@@ -13,6 +13,7 @@ import pytest
 
 from capslock.domain import AgentEventKind, WorkItemStatus
 from capslock.layout import LayoutConflict, ProjectLayout, UserLayout
+from capslock.planning import PlanningService
 from capslock.session_management import SessionManager
 from capslock.storage.async_database import (
     IncompatibleDatabaseError,
@@ -206,7 +207,7 @@ def test_current_state_reopens_without_mutation(tmp_path: Path) -> None:
         try:
             workspace_version = (await workspace.fetch_one("PRAGMA user_version"))[0]
             memory_version = (await memory.fetch_one("PRAGMA user_version"))[0]
-            assert workspace_version == WORKSPACE_SCHEMA_VERSION == 10
+            assert workspace_version == WORKSPACE_SCHEMA_VERSION == 12
             assert memory_version == MEMORY_SCHEMA_VERSION == 4
         finally:
             await workspace.close()
@@ -227,6 +228,139 @@ def test_current_state_reopens_without_mutation(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
+def test_workspace_schema_ten_upgrades_permission_state_to_twelve(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "workspace-upgrade.sqlite3"
+
+    async def initialize() -> None:
+        database = await WorkspaceDatabase.open(path)
+        await database.close()
+
+    asyncio.run(initialize())
+    with sqlite3.connect(path) as connection:
+        connection.executescript(
+            """
+PRAGMA foreign_keys=OFF;
+DROP TABLE permission_grants;
+DROP TABLE permission_requests;
+ALTER TABLE permission_decisions RENAME TO permission_decisions_current;
+CREATE TABLE permission_decisions (
+  id TEXT PRIMARY KEY,
+  invocation_id TEXT NOT NULL REFERENCES tool_invocations(id) ON DELETE CASCADE,
+  behavior TEXT NOT NULL CHECK(behavior IN ('allow','ask','deny')),
+  source TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  rule_json TEXT CHECK(rule_json IS NULL OR json_valid(rule_json)),
+  classifier_json TEXT CHECK(classifier_json IS NULL OR json_valid(classifier_json)),
+  decided_by TEXT,
+  created_at TEXT NOT NULL
+) STRICT;
+DROP TABLE permission_decisions_current;
+ALTER TABLE permission_rules RENAME TO permission_rules_current;
+CREATE TABLE permission_rules (
+  id TEXT PRIMARY KEY,
+  session_id TEXT REFERENCES sessions(id) ON DELETE CASCADE,
+  behavior TEXT NOT NULL CHECK(behavior IN ('allow','ask','deny')),
+  tool TEXT NOT NULL,
+  constraints_json TEXT NOT NULL CHECK(json_valid(constraints_json)),
+  source TEXT NOT NULL CHECK(source='session'),
+  created_at TEXT NOT NULL
+) STRICT;
+DROP TABLE permission_rules_current;
+PRAGMA user_version=10;
+"""
+        )
+
+    async def upgrade() -> None:
+        database = await WorkspaceDatabase.open(path)
+        try:
+            assert (await database.fetch_one("PRAGMA user_version"))[0] == 12
+            tables = {
+                row[0]
+                for row in await database.fetch_all(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            assert {
+                "permission_requests",
+                "permission_grants",
+                "session_plans",
+                "plan_revisions",
+                "plan_requests",
+                "plan_implementations",
+            } <= tables
+            decision_columns = {
+                row[1]
+                for row in await database.fetch_all(
+                    "PRAGMA table_info(permission_decisions)"
+                )
+            }
+            assert {
+                "reason_code",
+                "mode",
+                "arguments_sha256",
+                "suggestions_json",
+            } <= decision_columns
+            request_columns = {
+                row[1]
+                for row in await database.fetch_all(
+                    "PRAGMA table_info(permission_requests)"
+                )
+            }
+            assert "result_json" in request_columns
+        finally:
+            await database.close()
+
+    asyncio.run(upgrade())
+    assert len(list((tmp_path / "backups").glob("capslock-v10-*.sqlite3"))) == 1
+
+
+def test_workspace_schema_eleven_upgrades_plan_state_to_twelve(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "workspace-v11.sqlite3"
+
+    async def initialize() -> None:
+        database = await WorkspaceDatabase.open(path)
+        await database.close()
+
+    asyncio.run(initialize())
+    with sqlite3.connect(path) as connection:
+        connection.executescript(
+            """
+PRAGMA foreign_keys=OFF;
+DROP TABLE plan_implementations;
+DROP TABLE plan_requests;
+DROP TABLE plan_revisions;
+DROP TABLE session_plans;
+PRAGMA user_version=11;
+"""
+        )
+
+    async def upgrade() -> None:
+        database = await WorkspaceDatabase.open(path)
+        try:
+            assert (await database.fetch_one("PRAGMA user_version"))[0] == 12
+            tables = {
+                row[0]
+                for row in await database.fetch_all(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            assert {
+                "session_plans",
+                "plan_revisions",
+                "plan_requests",
+                "plan_implementations",
+            } <= tables
+        finally:
+            await database.close()
+
+    asyncio.run(upgrade())
+    assert len(list((tmp_path / "backups").glob("capslock-v11-*.sqlite3"))) == 1
+
+
 def test_session_export_includes_all_snapshot_tables(tmp_path: Path) -> None:
     async def scenario() -> None:
         repositories = await WorkspaceRepositories.open(
@@ -241,7 +375,7 @@ def test_session_export_includes_all_snapshot_tables(tmp_path: Path) -> None:
             target = await manager.export(session.id, "exports/session")
             document = json.loads((target / "session.json").read_text(encoding="utf-8"))
             assert document["format"] == "capslock-session-export"
-            assert document["version"] == 4
+            assert document["version"] == 5
             assert document["sessions"][0]["id"] == session.id
             assert document["messages"][0]["content"] == "Export this"
             assert document["runs"][0]["work_item_id"] == prepared.work_item.id
@@ -268,7 +402,21 @@ def test_session_delete_cascades_domain_rows_and_cleans_fts(tmp_path: Path) -> N
                 payload={"status": "completed"},
                 duration_ms=1,
             )
+            plan, _ = await PlanningService(
+                repositories.plans,
+                root=tmp_path / ".capslock" / "state" / "plans",
+            ).create(
+                session.id,
+                "Delete this plan",
+                entry_source="slash",
+                base_permission_mode="approve_for_me",
+            )
+            mirror = (
+                tmp_path / ".capslock" / "state" / "plans" / plan.mirror_relative_path
+            )
+            assert mirror.is_file()
             await repositories.sessions.delete(session.id)
+            assert not mirror.exists()
             for table in ("sessions", "messages", "work_items", "runs", "run_events"):
                 assert (
                     await repositories.database.fetch_one(

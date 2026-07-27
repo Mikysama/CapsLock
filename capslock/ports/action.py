@@ -11,6 +11,7 @@ from ..domain import (
     ActionType,
     AgentEvent,
     ApprovalDecision,
+    ApprovalChoice,
     RunInfo,
 )
 
@@ -28,7 +29,9 @@ class ActionPort(Protocol):
     async def reverse_last_file_action(self) -> ActionRecord: ...
 
 
-ActionAuthorizer = Callable[[ActionRecord], Awaitable[ApprovalDecision]]
+ActionAuthorizer = Callable[
+    [ActionRecord], Awaitable[ApprovalDecision | ApprovalChoice]
+]
 ActionFactory = Callable[[str], ActionPort]
 
 

@@ -32,6 +32,11 @@ async def execute_action_tool(
 ) -> ToolExecution:
     """Execute a direct-capability tool through the internal Action workflow."""
     payload = dict(arguments)
+    permission_decision = getattr(context, "runtime_state", {}).get(
+        "permission_decision"
+    )
+    if isinstance(permission_decision, dict):
+        payload["_permission"] = permission_decision
     if getattr(context, "runtime_state", {}).get("force_manual_approval") is True:
         payload["force_manual_approval"] = True
     action = await context.actions.propose(action_type, **payload)

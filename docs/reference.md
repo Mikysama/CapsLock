@@ -4,7 +4,7 @@
 
 ## 稳定契约
 
-CapsLock 2.5.0 支持 Linux/macOS 与 Python 3.12。当前开发协议为 `config_version = 6`、workspace schema 10、memory schema 4、portable archive 4、session export 4、JSONL schema 3 和插件 manifest/protocol/grant 4。config v3-v5、workspace schema v6-v9 与 memory schema v3 使用 backup-first 自动迁移。
+CapsLock 2.6.0 支持 Linux/macOS 与 Python 3.12。当前开发协议为 `permissions_version = 2`、`config_version = 6`、workspace schema 12、memory schema 4、portable archive 5、session export 5、JSONL schema 3 和插件 manifest/protocol/grant 4。config v3-v5、workspace schema v6-v11 与 memory schema v3 使用 backup-first 自动迁移。
 
 公开运行入口为 `AgentSession.run_stream(RunRequest)`。CLI 通过应用查询面读取状态，不应依赖 repository 聚合对象。
 
@@ -12,11 +12,29 @@ CapsLock 2.5.0 支持 Linux/macOS 与 Python 3.12。当前开发协议为 `confi
 
 | 模式 | 行为 |
 | --- | --- |
-| `full_access` | 自动批准普通动作；Skill 文件写入仍逐次确认。安全校验、状态与审计始终启用。 |
-| `approve_for_me` | 默认模式。文件、命令、MCP 和插件等高风险动作需要确认。 |
-| `ask_for_approval` | 发送请求和后续动作都要求人工确认。 |
+| `full_access` | hard deny、强制安全确认和显式 deny/ask 仍生效；其余允许，不调用 Shell 分类器。 |
+| `approve_for_me` | 默认模式。安全本地读取和确定性安全的断网沙箱命令自动允许；修改、网络、后台进程、MCP/插件副作用默认询问。 |
+| `ask_for_approval` | 显式 allow 可放行，其余每次调用询问；分类器不能自动放行。 |
 
-使用 `/permissions` 打开三档权限选择框，或使用 `/permissions full|approve|ask` 直接切换。选择保存在工作区 settings repository。
+使用 `/permissions` 打开三档权限选择框，或使用 `/permissions full|approve|ask` 直接切换。选择保存在工作区 settings repository。没有其他模式或别名。
+
+固定判定顺序为：工具参数规范化与 capability 边界、hard deny/hard ask、显式 deny、显式 ask、显式 allow、模式默认。规则行为相同时按具体度、`session > local > project > user` 和稳定规则 ID 选择解释来源。批准不能扩大父 Agent、MCP 或插件已有 capability grant，也不能绕过沙箱。
+
+权限文件使用 `permissions_version = 2` 和 `[[rules]]`。文件规则的 path 是工作区相对 POSIX glob；Shell 规则支持 `command`、`command_prefix`、`cwd`、`sandbox`、`network`，动态展开、不可靠复合命令及危险重定向不命中 allow；Web 使用规范化 IDNA host 和 operation；MCP 使用精确 server 与 `mcp_tool`。未知 constraint、遍历、NUL、无效网络 scope 均关闭授权。项目 ask/deny 立即生效，项目 allow 必须通过 `/permissions trust-project` 信任当前文件 SHA-256，文件变化后自动退化为 ask。
+
+审批提供 `approve_once`、`approve_session`、`approve_local` 和 `reject`。一次性 grant 绑定 session、run、invocation、工具名及规范化参数 SHA-256，并只能消费一次。session 规则随 session 删除；local 规则原子写入 `.capslock/local/permissions.toml`，拒绝符号链接并保留未知 TOML 内容。普通工具请求和 Action 都可在重启后恢复，任何摘要变化、写入失败或规则遮蔽都不会执行。
+
+## Plan Mode
+
+Plan Mode 是独立的 session overlay，不是第四种 `PermissionMode`，也不改变 `RunMode`。`/plan [目标]` 直接进入；自然语言要求只规划时，模型使用 `enter_plan_mode(objective)` 创建持久化确认。状态为 `draft`、`awaiting_approval`、`approved`、`implementing`、`implemented`、`implementation_failed`、`rejected` 或 `cancelled`，数据库中的 plan/revision/request/implementation 记录是权威来源。
+
+激活后，Planning boundary 在普通权限判定和 Shell 分类器之前执行。目录只暴露明确标记为 `local_read` 的本地读取工具、`ask_user` 及 `get_plan`、`update_plan`、`submit_plan`；Shell、Web、MCP、插件、Action、任务/记忆修改、worktree、后台进程和子 Agent 一律返回 `plan_mode_read_only`。`full_access`、显式 allow 和分类器都不能扩大该边界；暂停 invocation 恢复前也会重新查询数据库状态。
+
+计划正文最多 256 KiB，拒绝空内容与 NUL，每次更新和提交都使用 revision SHA-256 乐观锁。提交审批固定为批准实施、反馈继续规划或拒绝退出；Esc 等同继续规划且不执行。批准会幂等创建新的 implementation work item，使用精确 revision Markdown 与 SHA-256，并恢复普通工具目录。计划批准不是权限 grant，实施调用仍经过底层权限模式与 Action 审批。
+
+交互层使用专用的进入和提交对话框，而不是普通权限确认框。进入页解释探索范围并展示目标；提交页以 `Ready to code?` 为标题，内嵌完整 Markdown、revision、SHA-256 与 implementation run 将沿用的权限模式。Fullscreen 的 “No, keep planning” 会聚焦同页反馈框；Esc 返回无反馈的继续规划。状态栏以 `⏸ plan mode on · <status> · <permission>` 同时呈现 overlay 与底层权限。
+
+Markdown 镜像位于 `.capslock/state/plans/<session-id>/<plan-id>.md`。数据库可在 show/open/resume 时重建镜像；`/plan open` 才会把编辑器内容显式导入为新 revision。branch/rewind 复制当前 revision 为子 session 的独立 draft。非交互 `exec` 遇到进入或提交审批时保留 `waiting_approval` 并返回退出码 `3`。
 
 ## 模型工具
 
@@ -32,6 +50,7 @@ CapsLock 2.5.0 支持 Linux/macOS 与 Python 3.12。当前开发协议为 `confi
 | `shell` | 在 OS 沙箱运行命令。 | 工作区可写、默认断网；危险命令 hard deny。 |
 | `process_output` / `process_stop` | 管理 session 隔离的后台进程。 | 有界输出和 TERM→KILL 取消。 |
 | `ask_user` | 创建可持久化结构化问题。 | 暂停同一 invocation，可跨进程回答。 |
+| `enter_plan_mode` / `get_plan` / `update_plan` / `submit_plan` | 进入、读取、更新和提交当前 session 的计划。 | 主 Agent 专用；状态、归属、大小与 revision SHA-256 强校验。 |
 | `create_task` / `list_tasks` / `get_task` / `update_task` | 管理任务与依赖关系。 | session 隔离并拒绝依赖环。 |
 | `read_pdf` / `read_notebook` / `edit_notebook` | 读取 PDF/Notebook 或编辑 cell。 | 有界读取；Notebook 编辑使用独立 Action。 |
 | LSP 语义工具 | 定义、引用、符号、实现和调用层级查询。 | 仅已安装/配置 server；只读、禁网沙箱。 |
@@ -82,6 +101,7 @@ pending -> approved -> running -> completed
 | 命令 | 功能 |
 | --- | --- |
 | `/help` | 显示命令。 |
+| `/plan [goal\|show\|open\|submit\|exit]` | 进入、查看、编辑、提交或退出当前 session 的 Plan Mode。 |
 | `/status` | 汇总 session、workspace、model、permissions、context、usage、tasks 和 queue。 |
 | `/resume [session-id-prefix\|query]` | 选择或解析当前 workspace 的历史 session，并在关闭当前 Application 后切换。 |
 | `/btw <question>` | 使用隔离的 FAST 工具循环回答临时问题；正文不进入 transcript 或 memory。 |
@@ -96,8 +116,8 @@ pending -> approved -> running -> completed
 | `/stats [workspace\|session]` | 汇总主运行指标，并单列 maintenance 用量。 |
 | `/doctor [--network]` | 在 TUI 中运行只读诊断；默认不联网。 |
 | `/model [deepseek-v4-flash\|deepseek-v4-pro]` | 查看或切换当前 session 的模型；无参数时打开选择器。 |
-| `/permissions [full|approve|ask]` | 无参数时打开权限选择框；带参数时直接切换。 |
-| `/approvals` | 处理非交互运行留下的待审批动作。 |
+| `/permissions [full|approve|ask]` | 无参数时打开权限选择框；带参数时直接切换。`rules|recent|doctor|trust-project|add|remove` 管理与诊断规则。 |
+| `/approvals` | 处理非交互运行留下的 Plan、Action 或普通工具权限请求。 |
 | `/queue` | 查看队列；`start <id>` 显式启动导入队列，另有 `move`、`cancel` 和 `retry`。 |
 | `/memory ...` | 管理记忆、独立 capture/recall 开关、候选、整理、导入导出和 embeddings。 |
 | `/instructions ...` | 列出、解释或重新加载受控仓库指令。 |
@@ -220,7 +240,7 @@ ToolLoop 每个模型或工具阶段写 `run_steps`。只有 completed 且带 ch
 
 调度器按契约顺序返回结果，兄弟任务失败不会互相取消，父运行取消会传播到全部未完成子任务。子快照排除 `.git`、`.capslock`、环境文件和符号链接，并使用自己的 workspace/memory 数据库。`AgentOutputVerifier` 校验输出对象、allowlist 路径、必需检查、文件大小和 SHA-256；未通过的输出只返回失败诊断。
 
-workspace schema 10 使用 Agent、Tool invocation、input request、task dependency、session lineage、active compaction、context snapshot 和 session worktree 表保存可恢复状态、审计与验证结果。portable archive 默认不包含 artifact 正文。
+workspace schema 12 使用 Agent、Tool invocation、input request、task dependency、session lineage、active compaction、context snapshot、session worktree 与 Plan Mode 表保存可恢复状态、审计与验证结果。portable archive 默认不包含 artifact 正文。
 
 ## 记忆契约
 
@@ -242,9 +262,9 @@ workspace schema 10 使用 Agent、Tool invocation、input request、task depend
 
 ## 数据库与布局
 
-工作区数据库使用 application ID `0x434C4B32`，记忆数据库使用 `0x434C4D32`。两者开启 foreign keys、WAL 和 5 秒 busy timeout；记忆库额外开启 secure delete 并设置文件权限 `0600`。
+工作区数据库使用 application ID `0x434C4B32`、schema 12，记忆数据库使用 `0x434C4D32`。两者开启 foreign keys、WAL 和 5 秒 busy timeout；记忆库额外开启 secure delete 并设置文件权限 `0600`。schema 10→11 增加通用 permission request、一次性 grant、规则 matcher version 和完整决定审计，schema 11→12 增加计划、不可变 revision、计划审批和实施绑定；均不提升主 config version。
 
-应用先读取 application ID 和 schema version，确认是当前格式或可迁移格式后才切换 WAL。workspace schema 为 10，memory schema 为 4；其他 application ID 或 schema 只报错，不修改原数据库。
+应用先读取 application ID 和 schema version，确认是当前格式或可迁移格式后才切换 WAL。workspace schema 为 12，memory schema 为 4；其他 application ID 或 schema 只报错，不修改原数据库。portable archive 和 session export 当前为 version 5，portable archive 读取兼容 version 3/4；导入后按数据库 revision 重建计划镜像。
 
 portable import 使用 archive ID 幂等记录。相同 ID 与内容跳过，同 ID 不同内容确定性重映射并重写引用。running run 转为 interrupted，approved/running action 转为 pending；导入的历史副作用不能在目标工作区执行 undo。
 

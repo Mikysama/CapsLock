@@ -19,7 +19,7 @@ async def upgrade_workspace_schema(
     if source_version is None:
         row = await (await connection.execute("PRAGMA user_version")).fetchone()
         source_version = int(row[0])
-    if source_version not in {6, 7, 8, 9}:
+    if source_version not in {6, 7, 8, 9, 10, 11}:
         raise ValueError(f"unsupported workspace upgrade source: {source_version}")
     checkpoint = await connection.execute("PRAGMA wal_checkpoint(FULL)")
     await checkpoint.close()
@@ -41,7 +41,11 @@ async def upgrade_workspace_schema(
             await connection.executescript(_UPGRADE_SECOND_STEP)
         if source_version in {6, 7, 8}:
             await connection.executescript(_UPGRADE_THIRD_STEP)
-        await connection.executescript(_UPGRADE_WORKSPACE_CURRENT)
+        if source_version in {6, 7, 8, 9}:
+            await connection.executescript(_UPGRADE_WORKSPACE_TEN)
+        if source_version in {6, 7, 8, 9, 10}:
+            await connection.executescript(_UPGRADE_WORKSPACE_ELEVEN)
+        await connection.executescript(_UPGRADE_WORKSPACE_TWELVE)
     except BaseException:
         await connection.rollback()
         raise
@@ -496,10 +500,115 @@ PRAGMA foreign_keys=ON;
 """
 
 
-_UPGRADE_WORKSPACE_CURRENT = """
+_UPGRADE_WORKSPACE_TEN = """
 BEGIN IMMEDIATE;
 ALTER TABLE context_compactions ADD COLUMN memory_revision_digest TEXT NOT NULL DEFAULT '';
 PRAGMA user_version=10;
+COMMIT;
+"""
+
+
+_UPGRADE_WORKSPACE_ELEVEN = """
+BEGIN IMMEDIATE;
+ALTER TABLE permission_decisions ADD COLUMN reason_code TEXT NOT NULL DEFAULT 'legacy_decision';
+ALTER TABLE permission_decisions ADD COLUMN mode TEXT NOT NULL DEFAULT 'approve_for_me'
+ CHECK(mode IN ('full_access','approve_for_me','ask_for_approval'));
+ALTER TABLE permission_decisions ADD COLUMN arguments_sha256 TEXT NOT NULL DEFAULT '';
+ALTER TABLE permission_decisions ADD COLUMN suggestions_json TEXT NOT NULL DEFAULT '[]'
+ CHECK(json_valid(suggestions_json));
+ALTER TABLE permission_rules ADD COLUMN matcher_version INTEGER NOT NULL DEFAULT 1
+ CHECK(matcher_version IN (1,2));
+CREATE TABLE permission_requests (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  invocation_id TEXT NOT NULL UNIQUE REFERENCES tool_invocations(id) ON DELETE CASCADE,
+  tool TEXT NOT NULL,
+  arguments_sha256 TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  suggestions_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(suggestions_json)),
+  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','approved','rejected','cancelled')),
+  choice TEXT CHECK(choice IN ('approve_once','approve_session','approve_local','reject')),
+  selected_update_json TEXT CHECK(selected_update_json IS NULL OR json_valid(selected_update_json)),
+  feedback TEXT,
+  result_json TEXT CHECK(result_json IS NULL OR json_valid(result_json)),
+  created_at TEXT NOT NULL,
+  decided_at TEXT
+) STRICT;
+CREATE INDEX idx_permission_requests_session ON permission_requests(session_id,status,created_at);
+CREATE TABLE permission_grants (
+  id TEXT PRIMARY KEY,
+  permission_request_id TEXT NOT NULL UNIQUE REFERENCES permission_requests(id) ON DELETE CASCADE,
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  invocation_id TEXT NOT NULL UNIQUE REFERENCES tool_invocations(id) ON DELETE CASCADE,
+  tool TEXT NOT NULL,
+  arguments_sha256 TEXT NOT NULL,
+  consumed_at TEXT,
+  created_at TEXT NOT NULL
+) STRICT;
+PRAGMA user_version=11;
+COMMIT;
+"""
+
+
+_UPGRADE_WORKSPACE_TWELVE = """
+BEGIN IMMEDIATE;
+CREATE TABLE IF NOT EXISTS session_plans (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  objective TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('draft','awaiting_approval','approved','implementing','implemented','implementation_failed','rejected','cancelled')),
+  entry_source TEXT NOT NULL CHECK(entry_source IN ('slash','model','resume','branch','rewind')),
+  base_permission_mode TEXT NOT NULL CHECK(base_permission_mode IN ('full_access','approve_for_me','ask_for_approval')),
+  current_revision_id TEXT,
+  parent_plan_id TEXT REFERENCES session_plans(id) ON DELETE SET NULL,
+  mirror_relative_path TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS idx_session_plans_current ON session_plans(session_id,status,updated_at);
+CREATE TABLE IF NOT EXISTS plan_revisions (
+  id TEXT PRIMARY KEY,
+  plan_id TEXT NOT NULL REFERENCES session_plans(id) ON DELETE CASCADE,
+  ordinal INTEGER NOT NULL CHECK(ordinal>=1),
+  content TEXT NOT NULL,
+  sha256 TEXT NOT NULL,
+  source TEXT NOT NULL CHECK(source IN ('initial','model','editor','branch','migration')),
+  created_by_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(plan_id,ordinal),
+  UNIQUE(plan_id,sha256)
+) STRICT;
+CREATE INDEX IF NOT EXISTS idx_plan_revisions_plan ON plan_revisions(plan_id,ordinal);
+CREATE TABLE IF NOT EXISTS plan_requests (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  plan_id TEXT REFERENCES session_plans(id) ON DELETE CASCADE,
+  revision_id TEXT REFERENCES plan_revisions(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK(kind IN ('enter','submit')),
+  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','approved','feedback','rejected','cancelled')),
+  run_id TEXT REFERENCES runs(id) ON DELETE CASCADE,
+  invocation_id TEXT UNIQUE REFERENCES tool_invocations(id) ON DELETE CASCADE,
+  objective TEXT,
+  choice TEXT CHECK(choice IS NULL OR choice IN ('enter','implement','feedback','reject')),
+  feedback TEXT,
+  created_at TEXT NOT NULL,
+  decided_at TEXT,
+  CHECK((kind='enter' AND revision_id IS NULL) OR (kind='submit' AND plan_id IS NOT NULL AND revision_id IS NOT NULL))
+) STRICT;
+CREATE INDEX IF NOT EXISTS idx_plan_requests_session ON plan_requests(session_id,status,created_at);
+CREATE TABLE IF NOT EXISTS plan_implementations (
+  plan_id TEXT PRIMARY KEY REFERENCES session_plans(id) ON DELETE CASCADE,
+  revision_id TEXT NOT NULL REFERENCES plan_revisions(id) ON DELETE RESTRICT,
+  request_id TEXT NOT NULL UNIQUE REFERENCES plan_requests(id) ON DELETE CASCADE,
+  work_item_id TEXT NOT NULL UNIQUE REFERENCES work_items(id) ON DELETE CASCADE,
+  run_id TEXT UNIQUE REFERENCES runs(id) ON DELETE SET NULL,
+  status TEXT NOT NULL CHECK(status IN ('queued','running','completed','failed','cancelled')),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+) STRICT;
+PRAGMA user_version=12;
 COMMIT;
 """
 

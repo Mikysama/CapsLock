@@ -14,10 +14,11 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Input, OptionList, Static
 from textual.widgets.option_list import Option
 
-from ...domain import ActionRecord, ApprovalDecision, SessionInfo
+from ...domain import ActionRecord, ApprovalChoice, ApprovalDecision, SessionInfo
 from ...models import SELECTABLE_MODELS
 from ...permissions import PermissionMode
 from ..presentation import ToolPresentation
+from ..command_ui import PlanApprovalResult
 from .presentation import present_action
 from .rendering import TransparentBackground
 from ..views.conversation import tool_group
@@ -136,6 +137,150 @@ class ConfirmScreen(ModalScreen[bool]):
         self.dismiss(True)
 
 
+class EnterPlanModeScreen(ModalScreen[bool]):
+    """Claude Code-compatible explanation shown for model-proposed planning."""
+
+    BINDINGS = [Binding("escape", "reject", "Do not enter Plan Mode")]
+
+    def __init__(self, objective: str) -> None:
+        super().__init__()
+        self.objective = objective
+
+    def compose(self) -> ComposeResult:
+        options = OptionList(
+            Option("Yes, enter Plan Mode", id="enter"),
+            Option("No, start implementing now", id="reject"),
+            id="plan-entry-options",
+        )
+        with Vertical(id="dialog", classes="plan-entry-dialog"):
+            yield Static("Enter Plan Mode?", classes="dialog-title plan-title")
+            yield Static(
+                "CapsLock wants to enter Plan Mode to explore and design an "
+                "implementation approach."
+            )
+            yield Static(Text.assemble(("Objective  ", "dim"), (self.objective, "bold")))
+            yield Static(
+                "In Plan Mode, CapsLock will:\n"
+                "  - Explore the codebase\n"
+                "  - Identify existing patterns\n"
+                "  - Design an implementation strategy\n"
+                "  - Present a plan for your approval",
+                classes="dialog-detail",
+            )
+            yield Static(
+                "No code changes will be made until you approve the plan.",
+                classes="dialog-detail",
+            )
+            yield options
+            yield Static(
+                "↑/↓ choose · Enter confirm · Esc do not enter",
+                classes="input-guide",
+            )
+
+    def on_mount(self) -> None:
+        self.query_one(OptionList).focus()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss(event.option.id == "enter")
+
+    def action_reject(self) -> None:
+        self.dismiss(False)
+
+
+class PlanApprovalScreen(ModalScreen[PlanApprovalResult]):
+    """Review the complete plan and either implement or continue planning."""
+
+    BINDINGS = [Binding("escape", "keep_planning", "Keep planning")]
+
+    def __init__(
+        self,
+        *,
+        objective: str,
+        content: str,
+        revision: int,
+        sha256: str,
+        permission_mode: str,
+    ) -> None:
+        super().__init__()
+        self.objective = objective
+        self.content = content
+        self.revision = revision
+        self.sha256 = sha256
+        self.permission_mode = permission_mode
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="dialog", classes="plan-approval-dialog"):
+            yield Static("Ready to code?", classes="dialog-title plan-title")
+            yield Static("Here is CapsLock's plan:")
+            yield Static(
+                Text.assemble(
+                    (self.objective, "bold"),
+                    (
+                        f"\nrevision {self.revision}  ·  sha256 {self.sha256[:12]}",
+                        "dim",
+                    ),
+                )
+            )
+            with VerticalScroll(classes="plan-preview"):
+                yield Static(
+                    TransparentBackground(
+                        RichMarkdown(
+                            self.content,
+                            code_theme="ansi_dark",
+                            hyperlinks=True,
+                        )
+                    )
+                )
+            yield Static(
+                "Plan approval starts a new implementation run. Tool calls still "
+                f"follow {self.permission_mode} permissions.",
+                classes="dialog-detail",
+            )
+            yield OptionList(
+                Option(
+                    Text.assemble(
+                        ("Yes, start implementation", "bold"),
+                        (f"\nusing {self.permission_mode}", "dim"),
+                    ),
+                    id="implement",
+                ),
+                Option(
+                    Text.assemble(
+                        ("No, keep planning", "bold"),
+                        ("\ntell CapsLock what to change", "dim"),
+                    ),
+                    id="feedback",
+                ),
+                Option("Reject and exit Plan Mode", id="reject"),
+                id="plan-approval-options",
+            )
+            yield Input(
+                placeholder="Tell CapsLock what to change (optional)",
+                id="plan-feedback",
+            )
+            yield Static(
+                "↑/↓ choose · Enter confirm · Esc keep planning",
+                classes="input-guide",
+            )
+
+    def on_mount(self) -> None:
+        self.query_one("#plan-approval-options", OptionList).focus()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        choice = str(event.option.id)
+        if choice == "feedback":
+            self.query_one("#plan-feedback", Input).focus()
+            return
+        self.dismiss(PlanApprovalResult(choice))
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        value = event.value.strip()
+        self.dismiss(PlanApprovalResult("feedback", value or None))
+
+    def action_keep_planning(self) -> None:
+        self.dismiss(PlanApprovalResult("feedback"))
+
+
 class TextPromptScreen(ModalScreen[str | None]):
     BINDINGS = [Binding("escape", "cancel", "Cancel")]
 
@@ -239,7 +384,7 @@ class InputRequestScreen(ModalScreen[dict[str, object] | None]):
         self.dismiss(None)
 
 
-class ApprovalScreen(ModalScreen[ApprovalDecision]):
+class ApprovalScreen(ModalScreen[ApprovalChoice | ApprovalDecision]):
     BINDINGS = [
         Binding("escape", "reject", "Reject"),
         Binding("n", "reject", "Reject"),
@@ -286,7 +431,12 @@ class ApprovalScreen(ModalScreen[ApprovalDecision]):
                     )
             with Horizontal(classes="dialog-actions"):
                 yield Button("No, reject", id="reject", variant="default")
-                yield Button("Yes, execute", id="approve", variant="warning")
+                yield Button("Yes, once", id="approve", variant="warning")
+                destinations = self._suggestion_destinations()
+                if "session" in destinations:
+                    yield Button("For session", id="approve_session")
+                if "local" in destinations:
+                    yield Button("Always here", id="approve_local")
             yield Static(
                 "Default: reject · Enter confirm · Esc reject", classes="input-guide"
             )
@@ -295,17 +445,106 @@ class ApprovalScreen(ModalScreen[ApprovalDecision]):
         self.query_one("#reject", Button).focus()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
+        if not self._suggestion_destinations():
+            self.dismiss(
+                ApprovalDecision.APPROVE
+                if event.button.id == "approve"
+                else ApprovalDecision.REJECT
+            )
+            return
+        choices = {
+            "approve": ApprovalChoice.APPROVE_ONCE,
+            "approve_session": ApprovalChoice.APPROVE_SESSION,
+            "approve_local": ApprovalChoice.APPROVE_LOCAL,
+            "reject": ApprovalChoice.REJECT,
+        }
+        self.dismiss(choices.get(str(event.button.id), ApprovalChoice.REJECT))
+
+    def action_reject(self) -> None:
         self.dismiss(
-            ApprovalDecision.APPROVE
-            if event.button.id == "approve"
+            ApprovalChoice.REJECT
+            if self._suggestion_destinations()
             else ApprovalDecision.REJECT
         )
 
+    def action_approve(self) -> None:
+        self.dismiss(
+            ApprovalChoice.APPROVE_ONCE
+            if self._suggestion_destinations()
+            else ApprovalDecision.APPROVE
+        )
+
+    def _suggestion_destinations(self) -> set[str]:
+        permission = self.action_record.request.get("_permission")
+        suggestions = permission.get("suggestions") if isinstance(permission, dict) else []
+        return {
+            str(item.get("destination"))
+            for item in suggestions
+            if isinstance(item, dict)
+        }
+
+
+class PermissionApprovalScreen(ModalScreen[ApprovalChoice]):
+    """Fail-safe approval for a durable non-Action tool invocation."""
+
+    BINDINGS = [
+        Binding("escape", "reject", "Reject"),
+        Binding("n", "reject", "Reject"),
+        Binding("y", "approve", "Approve once"),
+    ]
+
+    def __init__(self, request: dict[str, object]) -> None:
+        super().__init__()
+        self.request = request
+
+    def compose(self) -> ComposeResult:
+        destinations = {
+            str(item.get("destination"))
+            for item in self.request.get("suggestions", [])
+            if isinstance(item, dict)
+        }
+        with Vertical(id="dialog", classes="approval-dialog"):
+            yield Static(
+                "Allow CapsLock to invoke this tool?",
+                classes="dialog-title permission-title",
+            )
+            yield Static(
+                Text.assemble(
+                    (str(self.request.get("tool", "tool")), "bold"),
+                    (f"\n{self.request.get('reason', 'Approval required')}", "dim"),
+                )
+            )
+            if self.request.get("preview"):
+                with VerticalScroll(classes="approval-preview"):
+                    yield Static(str(self.request["preview"]), markup=False)
+            with Horizontal(classes="dialog-actions"):
+                yield Button("No, reject", id="reject", variant="default")
+                yield Button("Yes, once", id="approve_once", variant="warning")
+                if "session" in destinations:
+                    yield Button("For session", id="approve_session")
+                if "local" in destinations:
+                    yield Button("Always here", id="approve_local")
+            yield Static(
+                "Default: reject · Enter confirm · Esc reject", classes="input-guide"
+            )
+
+    def on_mount(self) -> None:
+        self.query_one("#reject", Button).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        choices = {
+            "approve_once": ApprovalChoice.APPROVE_ONCE,
+            "approve_session": ApprovalChoice.APPROVE_SESSION,
+            "approve_local": ApprovalChoice.APPROVE_LOCAL,
+            "reject": ApprovalChoice.REJECT,
+        }
+        self.dismiss(choices.get(str(event.button.id), ApprovalChoice.REJECT))
+
     def action_reject(self) -> None:
-        self.dismiss(ApprovalDecision.REJECT)
+        self.dismiss(ApprovalChoice.REJECT)
 
     def action_approve(self) -> None:
-        self.dismiss(ApprovalDecision.APPROVE)
+        self.dismiss(ApprovalChoice.APPROVE_ONCE)
 
 
 class PermissionScreen(ModalScreen[PermissionMode | None]):

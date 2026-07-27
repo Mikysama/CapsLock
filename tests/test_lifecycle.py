@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import json
 import sqlite3
@@ -28,6 +29,7 @@ from capslock.domain import (
 )
 from capslock.layout import ProjectLayout
 from capslock.lifecycle import LifecycleError, LifecycleService
+from capslock.planning import PlanningService
 from capslock.storage.memory_repositories import MemoryRepositories
 from capslock.storage.async_database import IncompatibleDatabaseError
 from capslock.storage.repositories import WorkspaceRepositories
@@ -136,7 +138,7 @@ def test_backup_verification_and_tamper_rejection(tmp_path: Path, monkeypatch) -
             '{"servers":{"demo":{"env":{"TOKEN":"mcp-secret"}}}}',
             encoding="utf-8",
         )
-        assert _version(layout.database) == WORKSPACE_SCHEMA_VERSION == 10
+        assert _version(layout.database) == WORKSPACE_SCHEMA_VERSION == 12
         assert _version(layout.user.memory) == MEMORY_SCHEMA_VERSION == 4
         service = LifecycleService(layout)
         backup = service.backup_create(tmp_path / "state.clbackup")
@@ -230,6 +232,15 @@ def test_portable_import_is_idempotent_and_resets_approval(
             payload={"action_ids": [action.id]},
             duration_ms=1,
         )
+        source_plan, source_revision = await PlanningService(
+            repositories.plans, root=source_layout.plans
+        ).create(
+            session.id,
+            "Import this plan",
+            entry_source="slash",
+            base_permission_mode="approve_for_me",
+            content="# Plan\n\nInspect the imported references safely.\n",
+        )
         await repositories.close()
         await memory.close()
         portable = LifecycleService(source_layout).export(tmp_path / "data.clexport")
@@ -255,6 +266,33 @@ def test_portable_import_is_idempotent_and_resets_approval(
                 "2026-01-01T00:00:00+00:00",
             ),
         )
+        await repositories.database.execute(
+            """INSERT INTO session_plans(
+               id,session_id,objective,status,entry_source,base_permission_mode,
+               current_revision_id,mirror_relative_path,created_at,updated_at)
+               VALUES(?,?,?,'cancelled','slash','approve_for_me',?,?,?,?)""",
+            (
+                source_plan.id,
+                session.id,
+                "collision",
+                source_revision.id,
+                f"{session.id}/{source_plan.id}.md",
+                "2026-01-01T00:00:00+00:00",
+                "2026-01-01T00:00:00+00:00",
+            ),
+        )
+        await repositories.database.execute(
+            """INSERT INTO plan_revisions(
+               id,plan_id,ordinal,content,sha256,source,created_at)
+               VALUES(?,?,1,?,?, 'initial',?)""",
+            (
+                source_revision.id,
+                source_plan.id,
+                "# Different plan\n",
+                hashlib.sha256(b"# Different plan\n").hexdigest(),
+                "2026-01-01T00:00:00+00:00",
+            ),
+        )
         await repositories.close()
         await memory.close()
         service = LifecycleService(target_layout)
@@ -266,9 +304,32 @@ def test_portable_import_is_idempotent_and_resets_approval(
         )
         sessions = await repositories.sessions.list(10)
         imported_session = first["mappings"]["sessions"][session.id]
+        imported_plan = first["mappings"]["session_plans"][source_plan.id]
+        imported_revision = first["mappings"]["plan_revisions"][source_revision.id]
         actions = await repositories.actions.list(imported_session)
         assert len(sessions) == 2
         assert imported_session != session.id
+        assert imported_plan != source_plan.id
+        assert imported_revision != source_revision.id
+        imported_plan_row = await repositories.database.fetch_one(
+            """SELECT p.session_id,p.current_revision_id,p.mirror_relative_path,
+                      v.plan_id,v.content
+               FROM session_plans p JOIN plan_revisions v
+               ON v.id=p.current_revision_id WHERE p.id=?""",
+            (imported_plan,),
+        )
+        assert tuple(imported_plan_row[:4]) == (
+            imported_session,
+            imported_revision,
+            f"{imported_session}/{imported_plan}.md",
+            imported_plan,
+        )
+        assert (
+            target_layout.plans
+            / imported_session
+            / f"{imported_plan}.md"
+        ).read_text(encoding="utf-8") == imported_plan_row["content"]
+        assert first["plan_mirror_failures"] == 0
         assert first["remapped"] >= 1
         assert actions[0].status is ActionStatus.PENDING
         assert actions[0].requires_reapproval

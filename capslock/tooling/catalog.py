@@ -9,7 +9,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
 
-from .contracts import ToolContract, ToolDefinition
+from .contracts import PlanToolVisibility, ToolContract, ToolDefinition
 
 
 @dataclass(frozen=True)
@@ -112,11 +112,22 @@ class ToolCatalog:
         self._discovered.update(selected)
         return selected
 
-    def search(self, query: str, limit: int = 5) -> tuple[str, ...]:
+    def search(
+        self,
+        query: str,
+        limit: int = 5,
+        *,
+        plan_visible_only: bool = False,
+    ) -> tuple[str, ...]:
         terms = tuple(item.casefold() for item in query.split() if item.strip())
         scored: list[tuple[int, str]] = []
         for name, tool in self._tools.items():
             if not tool.contract.deferred:
+                continue
+            if (
+                plan_visible_only
+                and tool.contract.plan_visibility is not PlanToolVisibility.LOCAL_READ
+            ):
                 continue
             haystack = " ".join(
                 filter(
@@ -163,7 +174,21 @@ class ToolCatalog:
 
     @property
     def schemas(self) -> list[dict[str, object]]:
-        return list(self.snapshot().schemas)
+        return [
+            tool.schema()
+            for tool in self.snapshot().tools
+            if tool.contract.plan_visibility is not PlanToolVisibility.CONTROL
+            or tool.name in {"enter_plan_mode", "ask_user"}
+        ]
+
+    @property
+    def plan_schemas(self) -> list[dict[str, object]]:
+        return [
+            tool.schema()
+            for tool in self.snapshot().tools
+            if tool.contract.plan_visibility is not PlanToolVisibility.HIDDEN
+            and tool.name != "enter_plan_mode"
+        ]
 
 
 __all__ = ["ToolCatalog", "ToolCatalogSnapshot"]

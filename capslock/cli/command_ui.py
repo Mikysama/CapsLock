@@ -18,6 +18,14 @@ class Choice:
     detail: str = ""
 
 
+@dataclass(frozen=True)
+class PlanApprovalResult:
+    """Result of the dedicated Plan Mode approval surface."""
+
+    choice: str
+    feedback: str | None = None
+
+
 class CommandUI(Protocol):
     async def select(self, title: str, choices: Sequence[Choice]) -> str | None: ...
     async def confirm(
@@ -33,6 +41,16 @@ class CommandUI(Protocol):
         tools: Sequence[Any] = (),
     ) -> None: ...
     async def input_text(self, title: str, prompt: str) -> str | None: ...
+    async def request_plan_entry(self, objective: str) -> bool: ...
+    async def request_plan_approval(
+        self,
+        *,
+        objective: str,
+        content: str,
+        revision: int,
+        sha256: str,
+        permission_mode: str,
+    ) -> PlanApprovalResult: ...
     async def copy(self, content: str) -> str: ...
 
 
@@ -43,7 +61,8 @@ class ConsoleCommandUI:
     async def select(self, title: str, choices: Sequence[Choice]) -> str | None:
         if not choices:
             return None
-        self.console.print(f"[command]{title}[/]")
+        if title:
+            self.console.print(f"[command]{title}[/]")
         for index, choice in enumerate(choices, 1):
             self.console.print(f"  {index}. {choice.label} {choice.detail}")
         answer = await asyncio.to_thread(
@@ -97,6 +116,93 @@ class ConsoleCommandUI:
         self.console.print(f"[command]{title}[/]")
         value = await asyncio.to_thread(self.console.input, prompt)
         return str(value) if str(value).strip() else None
+
+    async def request_plan_entry(self, objective: str) -> bool:
+        from rich.console import Group
+        from rich.panel import Panel
+        from rich.text import Text
+
+        body = Group(
+            Text("CapsLock wants to enter Plan Mode to explore and design an implementation approach."),
+            Text(),
+            Text(f"Objective  {objective}", style="bold"),
+            Text(),
+            Text("In Plan Mode, CapsLock will:", style="text.secondary"),
+            Text("  - Explore the codebase", style="text.secondary"),
+            Text("  - Identify existing patterns", style="text.secondary"),
+            Text("  - Design an implementation strategy", style="text.secondary"),
+            Text("  - Present a plan for your approval", style="text.secondary"),
+            Text(),
+            Text(
+                "No code changes will be made until you approve the plan.",
+                style="text.secondary",
+            ),
+        )
+        self.console.print(
+            Panel(body, title="Enter Plan Mode?", border_style="plan", expand=True)
+        )
+        choice = await self.select(
+            "",
+            (
+                Choice("enter", "Yes, enter Plan Mode"),
+                Choice("reject", "No, start implementing now"),
+            ),
+        )
+        return choice == "enter"
+
+    async def request_plan_approval(
+        self,
+        *,
+        objective: str,
+        content: str,
+        revision: int,
+        sha256: str,
+        permission_mode: str,
+    ) -> PlanApprovalResult:
+        from rich.console import Group
+        from rich.panel import Panel
+        from rich.text import Text
+
+        plan = Panel(
+            Markdown(content, code_theme="ansi_dark", hyperlinks=True),
+            border_style="border.muted",
+            expand=True,
+        )
+        body = Group(
+            Text("Here is CapsLock's plan:"),
+            Text(
+                f"{objective}  ·  revision {revision}  ·  sha256 {sha256[:12]}",
+                style="text.secondary",
+            ),
+            plan,
+            Text(
+                "Plan approval starts a new implementation run. Tool calls still follow "
+                f"{permission_mode} permissions.",
+                style="text.secondary",
+            ),
+        )
+        self.console.print(
+            Panel(body, title="Ready to code?", border_style="plan", expand=True)
+        )
+        choice = await self.select(
+            "CapsLock has finished planning. Would you like to proceed?",
+            (
+                Choice(
+                    "implement",
+                    "Yes, start implementation",
+                    f"using {permission_mode}",
+                ),
+                Choice("feedback", "No, keep planning", "tell CapsLock what to change"),
+                Choice("reject", "Reject and exit Plan Mode"),
+            ),
+        )
+        selected = choice or "feedback"
+        feedback = None
+        if selected == "feedback":
+            feedback = await self.input_text(
+                "Keep planning", "Tell CapsLock what to change [optional]: "
+            )
+        return PlanApprovalResult(selected, feedback)
 
     async def copy(self, content: str) -> str:
         data = content.encode("utf-8")

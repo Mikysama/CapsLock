@@ -14,6 +14,7 @@ from capslock.application.action_system import (
     FileActionHandler,
 )
 from capslock.domain import (
+    ApprovalChoice,
     ApprovalDecision,
     ActionStatus,
     ActionType,
@@ -23,6 +24,7 @@ from capslock.domain import (
 from capslock.observability import EventSink
 from capslock.interaction import RunInteraction
 from capslock.permissions import PermissionMode
+from capslock.planning import PlanningService
 from capslock.policy import WorkspacePolicy
 from capslock.runtime import AgentSession, AsyncOpenAIChatModel, RunRequest
 from capslock.runtime.model import (
@@ -40,8 +42,11 @@ from capslock.tooling.contracts import (
     ToolOutcome,
     define_tool,
 )
+from capslock.tooling.authorization import PermissionEngine, PermissionMiddleware
+from capslock.tooling.planning import PlanningBoundaryMiddleware
 from capslock.tooling.executor import ToolRuntime
 from capslock.tooling.tools import workspace_tools
+from capslock.tooling.tools.plans import plan_tools
 from tests.helpers import (
     DummySkillRegistry,
     DummySkillService,
@@ -93,6 +98,8 @@ def make_agent(
     model: FakeChatModel,
     *,
     tools: ToolRegistry | None = None,
+    permission_engine=None,
+    planning=None,
 ) -> AgentSession:
     return AgentSession(
         workspace=tmp_path,
@@ -119,8 +126,189 @@ def make_agent(
         events=EventSink(),
         tools=tools or ToolRegistry([]),
         permission_mode=PermissionMode.APPROVE_FOR_ME,
+        permission_engine=permission_engine,
+        planning=planning,
         max_tool_rounds=3,
     )
+
+
+def test_model_enter_plan_mode_resumes_with_attachment_and_blocks_hidden_tool(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        repositories = await WorkspaceRepositories.open(
+            tmp_path / "plan-runtime.sqlite3", workspace=tmp_path
+        )
+        shell_calls = 0
+        try:
+            session = await repositories.sessions.create("test-model")
+            planning = PlanningService(
+                repositories.plans, root=tmp_path / "plans"
+            )
+
+            async def shell(context, arguments):
+                nonlocal shell_calls
+                shell_calls += 1
+                return ToolOutcome.success({"ran": True})
+
+            shell_tool = define_tool(
+                "shell",
+                "Execute a command.",
+                {"type": "object", "properties": {}},
+                shell,
+                policy=ResolvedToolPolicy(external_side_effects=True),
+            )
+            engine = PermissionEngine((), repositories.run_journal)
+            tools = ToolRuntime(
+                [*plan_tools(), shell_tool],
+                middleware=(
+                    PlanningBoundaryMiddleware(),
+                    PermissionMiddleware(engine),
+                ),
+            )
+            model = FakeChatModel(
+                ModelResponse(
+                    ModelMessage(
+                        None,
+                        (
+                            ModelToolCall(
+                                "enter-call",
+                                "enter_plan_mode",
+                                '{"objective":"Design Plan Mode"}',
+                            ),
+                        ),
+                    )
+                ),
+                answer("Planning is now active."),
+                ModelResponse(
+                    ModelMessage(
+                        None,
+                        (ModelToolCall("shell-call", "shell", "{}"),),
+                    )
+                ),
+                answer("The hidden tool was denied."),
+            )
+            agent = make_agent(
+                tmp_path,
+                repositories,
+                session.id,
+                model,
+                tools=tools,
+                permission_engine=engine,
+                planning=planning,
+            )
+            agent.permission_mode = PermissionMode.FULL_ACCESS
+
+            first = await collect(agent, "Plan this change")
+            paused = first[-1]
+            assert paused.kind is AgentEventKind.WAITING_APPROVAL
+            request = await agent.resolve_plan_request(
+                str(paused.data["request_id"])
+            )
+            await agent.decide_plan_request(request.id, "enter")
+
+            resumed = [event async for event in agent.resume_paused_stream(paused.run_id)]
+            assert resumed[-1].kind is AgentEventKind.COMPLETED
+            assert any(
+                str(message.get("content", "")).startswith("<capslock-plan-mode>")
+                for message in model.requests[1]["messages"]
+            )
+            assert {
+                item["function"]["name"] for item in model.requests[1]["tools"]
+            } == {"get_plan", "update_plan", "submit_plan"}
+
+            completed = await collect(agent, "Try a forbidden command")
+            assert completed[-1].kind is AgentEventKind.COMPLETED
+            assert shell_calls == 0
+            tool_message = next(
+                item
+                for item in model.requests[3]["messages"]
+                if item.get("role") == "tool"
+            )
+            assert "plan_mode_read_only" in str(tool_message["content"])
+        finally:
+            await repositories.close()
+
+    asyncio.run(scenario())
+
+
+def test_submitted_plan_approval_queues_exactly_one_implementation(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        repositories = await WorkspaceRepositories.open(
+            tmp_path / "plan-submit.sqlite3", workspace=tmp_path
+        )
+        try:
+            session = await repositories.sessions.create("test-model")
+            planning = PlanningService(
+                repositories.plans, root=tmp_path / "plans"
+            )
+            plan, revision = await planning.create(
+                session.id,
+                "Implement the approved change",
+                entry_source="slash",
+                base_permission_mode="approve_for_me",
+                content="# Plan\n\n- Make the approved change.\n- Run tests.\n",
+            )
+            engine = PermissionEngine((), repositories.run_journal)
+            tools = ToolRuntime(
+                plan_tools(),
+                middleware=(
+                    PlanningBoundaryMiddleware(),
+                    PermissionMiddleware(engine),
+                ),
+            )
+            model = FakeChatModel(
+                ModelResponse(
+                    ModelMessage(
+                        None,
+                        (
+                            ModelToolCall(
+                                "submit-call",
+                                "submit_plan",
+                                '{"expected_sha256":"' + revision.sha256 + '"}',
+                            ),
+                        ),
+                    )
+                ),
+                answer("The approved plan is ready for implementation."),
+            )
+            agent = make_agent(
+                tmp_path,
+                repositories,
+                session.id,
+                model,
+                tools=tools,
+                permission_engine=engine,
+                planning=planning,
+            )
+
+            first = await collect(agent, "Submit the completed plan")
+            paused = first[-1]
+            request = await agent.resolve_plan_request(
+                str(paused.data["request_id"])
+            )
+            await agent.decide_plan_request(request.id, "implement")
+            resumed = [event async for event in agent.resume_paused_stream(paused.run_id)]
+            assert resumed[-1].kind is AgentEventKind.COMPLETED
+
+            implementation = await repositories.plans.implementation(plan.id)
+            item = await repositories.work_items.require(
+                implementation.work_item_id
+            )
+            assert item.status.value == "queued"
+            assert revision.sha256 in item.question
+            assert (await repositories.plans.require(plan.id)).status.value == "implementing"
+            assert len(
+                await repositories.database.fetch_all(
+                    "SELECT * FROM plan_implementations WHERE plan_id=?", (plan.id,)
+                )
+            ) == 1
+        finally:
+            await repositories.close()
+
+    asyncio.run(scenario())
 
 
 def test_agent_model_switch_is_session_scoped_and_blocked_during_run(
@@ -320,6 +508,138 @@ def test_ask_user_resumes_same_run_and_cancels_later_batch_calls(
             )
             assert resumed_invocation["status"] == "completed"
             assert resumed_invocation["execution_status"] == "succeeded"
+        finally:
+            await repositories.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "choice,expected_calls,expected_status",
+    [
+        (ApprovalChoice.APPROVE_ONCE, 1, "succeeded"),
+        (ApprovalChoice.REJECT, 0, "denied"),
+    ],
+)
+def test_non_action_permission_request_executes_real_tool_and_resumes(
+    tmp_path: Path,
+    choice: ApprovalChoice,
+    expected_calls: int,
+    expected_status: str,
+) -> None:
+    async def scenario() -> None:
+        repositories = await WorkspaceRepositories.open(
+            tmp_path / f"permission-{choice.value}.sqlite3", workspace=tmp_path
+        )
+        calls = 0
+        try:
+            session = await repositories.sessions.create("test-model")
+
+            async def inspect(context, arguments):
+                nonlocal calls
+                calls += 1
+                return ToolOutcome.success({"observed": True})
+
+            engine = PermissionEngine((), repositories.run_journal)
+            tools = ToolRuntime(
+                [define_tool("inspect", "Inspect.", {"type": "object"}, inspect)],
+                middleware=(PermissionMiddleware(engine),),
+            )
+            model = FakeChatModel(
+                ModelResponse(
+                    ModelMessage(
+                        None,
+                        (ModelToolCall("inspect-call", "inspect", "{}"),),
+                    )
+                ),
+                answer("Continued after permission."),
+            )
+            agent = make_agent(
+                tmp_path,
+                repositories,
+                session.id,
+                model,
+                tools=tools,
+                permission_engine=engine,
+            )
+            agent.permission_mode = PermissionMode.ASK_FOR_APPROVAL
+
+            first = await collect(agent, "Inspect after approval")
+            paused = first[-1]
+            assert paused.kind is AgentEventKind.WAITING_APPROVAL
+            request = await agent.resolve_permission_request(
+                str(paused.data["request_id"])
+            )
+            decided = await agent.decide_permission_request(
+                str(request["id"]), choice
+            )
+            assert decided["result"]["status"] == expected_status
+            assert calls == expected_calls
+
+            resumed = [event async for event in agent.resume_paused_stream(paused.run_id)]
+            assert resumed[-1].kind is AgentEventKind.COMPLETED
+            invocation = await repositories.run_journal.tool_invocation(
+                str(request["invocation_id"])
+            )
+            assert invocation is not None and invocation["status"] == (
+                "completed" if expected_status == "succeeded" else "failed"
+            )
+            tool_message = next(
+                message
+                for message in model.requests[1]["messages"]
+                if message.get("role") == "tool"
+            )
+            assert f'"status": "{expected_status}"' in tool_message["content"]
+        finally:
+            await repositories.close()
+
+    asyncio.run(scenario())
+
+
+def test_non_action_session_approval_persists_before_execution(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        repositories = await WorkspaceRepositories.open(
+            tmp_path / "permission-session.sqlite3", workspace=tmp_path
+        )
+        try:
+            session = await repositories.sessions.create("test-model")
+
+            async def inspect(context, arguments):
+                return ToolOutcome.success({"observed": True})
+
+            engine = PermissionEngine((), repositories.run_journal)
+            tools = ToolRuntime(
+                [define_tool("inspect", "Inspect.", {"type": "object"}, inspect)],
+                middleware=(PermissionMiddleware(engine),),
+            )
+            model = FakeChatModel(
+                ModelResponse(
+                    ModelMessage(
+                        None, (ModelToolCall("inspect-call", "inspect", "{}"),)
+                    )
+                ),
+                answer("Done."),
+            )
+            agent = make_agent(
+                tmp_path,
+                repositories,
+                session.id,
+                model,
+                tools=tools,
+                permission_engine=engine,
+            )
+            agent.permission_mode = PermissionMode.ASK_FOR_APPROVAL
+            paused = (await collect(agent, "Inspect"))[-1]
+            request = await agent.resolve_permission_request(
+                str(paused.data["request_id"])
+            )
+            await agent.decide_permission_request(
+                str(request["id"]), ApprovalChoice.APPROVE_SESSION
+            )
+            rules = await repositories.run_journal.session_permission_rules(session.id)
+            assert len(rules) == 1
+            assert rules[0]["behavior"] == "allow"
+            assert rules[0]["tool"] == "inspect"
         finally:
             await repositories.close()
 

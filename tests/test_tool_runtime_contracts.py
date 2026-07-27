@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import pytest
+
 from capslock.configuration.loader import load_config_document
 from capslock.permissions import PermissionMode
 from capslock.policy import WorkspacePolicy
@@ -22,7 +24,10 @@ from capslock.tooling.contracts import (
 from capslock.tooling.executor import ToolRuntime
 from capslock.tooling.authorization import (
     PermissionBehavior,
+    PermissionDestination,
     PermissionEngine,
+    PermissionUpdate,
+    PermissionUpdateOperation,
 )
 
 
@@ -135,6 +140,288 @@ def test_permission_precedence_ask_beats_allow(tmp_path: Path) -> None:
     )
     assert decision.behavior is PermissionBehavior.ASK
     assert decision.source == "project"
+
+
+def test_invalid_permission_rule_disables_automatic_grants(tmp_path: Path) -> None:
+    permissions = tmp_path / "permissions.toml"
+    permissions.write_text(
+        """permissions_version = 2
+[[rules]]
+behavior = "allow"
+tool = "read_file"
+[rules.constraints]
+unknown = true
+""",
+        encoding="utf-8",
+    )
+
+    async def execute(context, arguments):
+        return ToolOutcome.success({})
+
+    tool = define_tool(
+        "read_file", "Read.", {"type": "object"}, execute,
+        policy=ResolvedToolPolicy.safe_read(),
+    )
+    engine = PermissionEngine((("local", permissions),), object())
+    decision = asyncio.run(
+        engine.decide(
+            tool,
+            {},
+            ResolvedToolPolicy.safe_read(),
+            _context(tmp_path, permission_mode=PermissionMode.FULL_ACCESS),
+        )
+    )
+    assert decision.behavior is PermissionBehavior.ASK
+    assert decision.rule is not None and decision.rule.diagnostic
+    assert engine.diagnostics()
+
+
+def test_file_globs_are_anchored_and_double_star_crosses_directories(
+    tmp_path: Path,
+) -> None:
+    permissions = tmp_path / "permissions.toml"
+    permissions.write_text(
+        """permissions_version = 2
+[[rules]]
+behavior = "allow"
+tool = "read_file"
+[rules.constraints]
+path = "src/*.py"
+""",
+        encoding="utf-8",
+    )
+
+    async def execute(context, arguments):
+        return ToolOutcome.success({})
+
+    tool = define_tool(
+        "read_file", "Read.", {"type": "object"}, execute,
+        policy=ResolvedToolPolicy.safe_read(),
+    )
+    engine = PermissionEngine((("local", permissions),), object())
+    context = _context(tmp_path, permission_mode=PermissionMode.ASK_FOR_APPROVAL)
+
+    async def decide(path: str):
+        arguments = engine.normalize(tool, {"path": path}, context)
+        return await engine.decide(
+            tool, arguments, ResolvedToolPolicy.safe_read(), context
+        )
+
+    assert asyncio.run(decide("src/main.py")).behavior is PermissionBehavior.ALLOW
+    assert asyncio.run(decide("src/pkg/main.py")).behavior is PermissionBehavior.ASK
+    permissions.write_text(
+        permissions.read_text(encoding="utf-8").replace("src/*.py", "src/**/*.py"),
+        encoding="utf-8",
+    )
+    assert asyncio.run(decide("src/main.py")).behavior is PermissionBehavior.ALLOW
+    assert asyncio.run(decide("src/pkg/main.py")).behavior is PermissionBehavior.ALLOW
+
+
+def test_shell_classifier_and_safe_default_cannot_bypass_mode_or_rules(
+    tmp_path: Path,
+) -> None:
+    permissions = tmp_path / "permissions.toml"
+    permissions.write_text(
+        """permissions_version = 2
+[[rules]]
+behavior = "ask"
+tool = "shell"
+[rules.constraints]
+command = "custom-build"
+""",
+        encoding="utf-8",
+    )
+
+    async def execute(context, arguments):
+        return ToolOutcome.success({})
+
+    tool = define_tool("shell", "Shell.", {"type": "object"}, execute)
+    engine = PermissionEngine((("project", permissions),), object())
+
+    def context(mode: PermissionMode) -> ExecutionContext:
+        value = _context(tmp_path, permission_mode=mode)
+        value.runtime_state.update(
+            {
+                "classifier_auto_allow": True,
+                "shell_classifier": {
+                    "honored": True,
+                    "confidence": 0.99,
+                    "result": "allow",
+                },
+                "shell_deterministic_behavior": "allow",
+            }
+        )
+        return value
+
+    arguments = {
+        "command": "custom-build",
+        "cwd": ".",
+        "sandbox": "default",
+        "network": [],
+    }
+    for mode in PermissionMode:
+        decision = asyncio.run(
+            engine.decide(tool, arguments, ResolvedToolPolicy(), context(mode))
+        )
+        assert decision.behavior is PermissionBehavior.ASK
+        assert decision.reason_code == "explicit_ask"
+
+    no_rules = PermissionEngine((), object())
+    assert asyncio.run(
+        no_rules.decide(
+            tool,
+            arguments,
+            ResolvedToolPolicy(),
+            context(PermissionMode.ASK_FOR_APPROVAL),
+        )
+    ).behavior is PermissionBehavior.ASK
+    assert asyncio.run(
+        no_rules.decide(
+            tool,
+            arguments,
+            ResolvedToolPolicy(),
+            context(PermissionMode.APPROVE_FOR_ME),
+        )
+    ).reason_code == "classifier_allow"
+
+
+def test_shell_allow_rejects_compounds_dynamic_expansion_and_redirection(
+    tmp_path: Path,
+) -> None:
+    permissions = tmp_path / "permissions.toml"
+    permissions.write_text(
+        """permissions_version = 2
+[[rules]]
+behavior = "allow"
+tool = "shell"
+[rules.constraints]
+command_prefix = "git status"
+""",
+        encoding="utf-8",
+    )
+
+    async def execute(context, arguments):
+        return ToolOutcome.success({})
+
+    tool = define_tool("shell", "Shell.", {"type": "object"}, execute)
+    engine = PermissionEngine((("local", permissions),), object())
+    context = _context(tmp_path, permission_mode=PermissionMode.ASK_FOR_APPROVAL)
+
+    async def behavior(command: str) -> PermissionBehavior:
+        return (
+            await engine.decide(
+                tool,
+                {
+                    "command": command,
+                    "cwd": ".",
+                    "sandbox": "default",
+                    "network": [],
+                },
+                ResolvedToolPolicy(),
+                context,
+            )
+        ).behavior
+
+    assert asyncio.run(behavior("git status --short")) is PermissionBehavior.ALLOW
+    assert asyncio.run(behavior("git status && pwd")) is PermissionBehavior.ASK
+    assert asyncio.run(behavior("git status $(whoami)")) is PermissionBehavior.ASK
+    assert asyncio.run(behavior("git status > output.txt")) is PermissionBehavior.ASK
+
+
+def test_project_allow_requires_current_digest_trust(tmp_path: Path) -> None:
+    class Repository:
+        value: str | None = None
+
+        async def permission_setting(self, key):
+            return self.value
+
+        async def set_permission_setting(self, key, value):
+            self.value = value
+
+    repository = Repository()
+    project = tmp_path / "permissions.toml"
+    project.write_text(
+        'permissions_version=2\n[[rules]]\nbehavior="allow"\ntool="read_file"\n',
+        encoding="utf-8",
+    )
+
+    async def execute(context, arguments):
+        return ToolOutcome.success({})
+
+    tool = define_tool(
+        "read_file", "Read.", {"type": "object"}, execute,
+        policy=ResolvedToolPolicy.safe_read(),
+    )
+    engine = PermissionEngine((("project", project),), repository)
+    context = _context(tmp_path, permission_mode=PermissionMode.ASK_FOR_APPROVAL)
+
+    async def decide():
+        return await engine.decide(
+            tool, {}, ResolvedToolPolicy.safe_read(), context
+        )
+
+    assert asyncio.run(decide()).reason_code == "project_allow_untrusted"
+    asyncio.run(engine.trust_project_permissions())
+    assert asyncio.run(decide()).behavior is PermissionBehavior.ALLOW
+    project.write_text(project.read_text() + "\n# changed\n", encoding="utf-8")
+    assert asyncio.run(decide()).reason_code == "project_allow_untrusted"
+
+
+def test_mcp_rules_match_exact_server_and_tool(tmp_path: Path) -> None:
+    permissions = tmp_path / "permissions.toml"
+    permissions.write_text(
+        """permissions_version = 2
+[[rules]]
+behavior = "allow"
+tool = "mcp__docs__lookup"
+[rules.constraints]
+server = "docs"
+mcp_tool = "lookup"
+""",
+        encoding="utf-8",
+    )
+
+    async def execute(context, arguments):
+        return ToolOutcome.success({})
+
+    allowed = define_tool("mcp__docs__lookup", "MCP.", {"type": "object"}, execute)
+    other = define_tool("mcp__docs__write", "MCP.", {"type": "object"}, execute)
+    engine = PermissionEngine((("local", permissions),), object())
+    context = _context(tmp_path, permission_mode=PermissionMode.ASK_FOR_APPROVAL)
+    assert asyncio.run(
+        engine.decide(allowed, {}, ResolvedToolPolicy(), context)
+    ).behavior is PermissionBehavior.ALLOW
+    assert asyncio.run(
+        engine.decide(other, {}, ResolvedToolPolicy(), context)
+    ).behavior is PermissionBehavior.ASK
+
+
+def test_local_permission_updates_are_atomic_preserve_unknown_toml_and_reject_symlink(
+    tmp_path: Path,
+) -> None:
+    local = tmp_path / ".capslock" / "local" / "permissions.toml"
+    local.parent.mkdir(parents=True)
+    local.write_text('owner = "keep"\npermissions_version = 2\n', encoding="utf-8")
+    engine = PermissionEngine((("local", local),), object())
+    update = PermissionUpdate(
+        PermissionUpdateOperation.ADD,
+        PermissionDestination.LOCAL,
+        PermissionBehavior.ALLOW,
+        "read_file",
+        {"path": "src/**/*.py"},
+    )
+    identifier = asyncio.run(engine.apply_update("session", update))
+    contents = local.read_text(encoding="utf-8")
+    assert 'owner = "keep"' in contents
+    assert identifier in contents
+    assert not list(local.parent.glob("*.tmp"))
+
+    target = tmp_path / "target.toml"
+    local.unlink()
+    target.write_text("permissions_version = 2\n", encoding="utf-8")
+    local.symlink_to(target)
+    with pytest.raises(ValueError, match="symlink"):
+        asyncio.run(engine.apply_update("session", update))
 
 
 def test_shell_deterministic_hard_denies_and_model_threshold() -> None:

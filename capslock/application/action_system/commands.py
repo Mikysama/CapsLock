@@ -155,12 +155,9 @@ class CommandActionHandler:
             cwd=directory,
             network=network,
         )
-        force_approval = bool(
-            payload.get("force_manual_approval")
-            or assessment.behavior == "ask"
-            or network
-            or background
-        )
+        # PermissionEngine owns ask/allow semantics. This handler only preserves
+        # an upstream hard/manual decision after validating the executable plan.
+        force_approval = payload.get("force_manual_approval") is True
         return ActionProposal(
             f"Run sandboxed shell command: {command[:160]}",
             {

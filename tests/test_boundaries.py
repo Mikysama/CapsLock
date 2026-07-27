@@ -200,7 +200,7 @@ def test_only_one_shell_assessment_and_composition_constructs_managers() -> None
 def test_core_tool_schema_fingerprint_is_stable() -> None:
     runtime = workspace_tools()
     assert runtime.snapshot().fingerprint == (
-        "fb955b279567b74e5e6da2cd86e87f7495a2dfbc0765eb593cf1f8e5cc331c14"
+        "b0f54a467bd4372ac6d71576dc1e7eadd47b551c4ca75fd4101ab2424e94a668"
     )
 
 

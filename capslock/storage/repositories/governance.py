@@ -137,31 +137,27 @@ class GovernanceRepository(Repository):
         arguments: dict[str, Any],
         fingerprint: str,
     ) -> int:
-        row = await self.one(
-            "SELECT coalesce(max(sequence),0)+1 FROM tool_call_attempts WHERE run_id=?",
-            (run_id,),
-        )
-        sequence = int(row[0]) if row else 1
-        await self.execute(
-            """INSERT INTO tool_call_attempts(
-                   run_id,sequence,round_index,name,arguments_json,fingerprint,created_at)
-               VALUES(?,?,?,?,?,?,?)""",
-            (
-                run_id,
-                sequence,
-                round_index,
-                name,
-                json.dumps(arguments, ensure_ascii=False, sort_keys=True),
-                fingerprint,
-                now(),
-            ),
-        )
-        row = await self.one(
-            "SELECT id FROM tool_call_attempts WHERE run_id=? AND sequence=?",
-            (run_id, sequence),
-        )
-        assert row is not None
-        return int(row[0])
+        async with self.database.transaction() as connection:
+            cursor = await connection.execute(
+                """INSERT INTO tool_call_attempts(
+                       run_id,sequence,round_index,name,arguments_json,fingerprint,created_at)
+                   SELECT ?,coalesce(max(sequence),0)+1,?,?,?,?,?
+                   FROM tool_call_attempts WHERE run_id=?""",
+                (
+                    run_id,
+                    round_index,
+                    name,
+                    json.dumps(arguments, ensure_ascii=False, sort_keys=True),
+                    fingerprint,
+                    now(),
+                    run_id,
+                ),
+            )
+            attempt_id = cursor.lastrowid
+            await cursor.close()
+        if attempt_id is None:
+            raise RuntimeError("tool-call attempt allocation did not return an id")
+        return int(attempt_id)
 
     async def finish_attempt(
         self, attempt_id: int, *, ok: bool, duration_ms: int

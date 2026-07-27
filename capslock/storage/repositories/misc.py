@@ -346,6 +346,10 @@ class SnapshotRepository(Repository):
         "session_lineage",
         "session_context_state",
         "context_snapshots",
+        "session_plans",
+        "plan_revisions",
+        "plan_requests",
+        "plan_implementations",
         "run_governance",
         "tool_call_attempts",
     )
@@ -364,6 +368,12 @@ class SnapshotRepository(Repository):
                 "tool_call_attempts",
             }:
                 query = f"SELECT t.* FROM {table} t JOIN runs r ON r.id=t.run_id WHERE r.session_id=? ORDER BY t.rowid"
+            elif table == "plan_revisions":
+                query = """SELECT v.* FROM plan_revisions v JOIN session_plans p
+                           ON p.id=v.plan_id WHERE p.session_id=? ORDER BY v.ordinal"""
+            elif table == "plan_implementations":
+                query = """SELECT i.* FROM plan_implementations i JOIN session_plans p
+                           ON p.id=i.plan_id WHERE p.session_id=? ORDER BY i.created_at"""
             else:
                 query = f"SELECT * FROM {table} WHERE session_id=? ORDER BY rowid"
             rows = await self.all(query, (session_id,))

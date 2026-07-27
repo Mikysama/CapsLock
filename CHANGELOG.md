@@ -4,6 +4,46 @@
 
 ## [Unreleased]
 
+## [2.6.0] - 2026-07-27
+
+### Added
+
+- 新增会话级 Plan Mode：`/plan` 命令组、模型控制工具、不可变 revision、SHA-256 绑定审批、Markdown 镜像和独立 implementation run。
+- 新增 Plan Mode 专用 Inline/Fullscreen 交互：进入说明、`Ready to code?` 完整计划审阅、同页反馈、Esc 继续规划和显式底层权限提示。
+- 新增普通工具持久 permission request、一次性 grant、session/local 规则写入、项目 allow 文件摘要信任、规则诊断和完整决定审计。
+
+### Security
+
+- 权限引擎升级为工具专属 matcher，固定执行 capability/规范化、hard boundary、deny、ask、allow、模式默认；Shell 分类器不能绕过显式限制或 `ask_for_approval`。
+- Planning boundary 位于普通权限之前；`full_access`、权限规则、分类器和恢复的旧 invocation 均不能在 Plan Mode 中调用 Shell、Web、MCP、插件、Action 或修改型工具。
+- 计划批准只绑定精确 revision，不授予实施工具权限；implementation run 恢复原权限模式并重新经过完整审批。
+
+### Fixed
+
+- 修复并发只读工具调用同时计算相同 `tool_call_attempts.sequence`，触发 `(run_id, sequence)` 唯一约束失败的问题；序号现于单个写事务中原子分配。
+- 修复 `full_access` 仍可能进入 Shell 分类器或被独立 Action 风险策略重复询问的问题，统一最终权限决定来源。
+
+### Compatibility
+
+- workspace schema 从 10 经 11 升至 12；增加权限请求/grant、matcher version、计划 revision、审批和实施绑定，v6-v11 使用 backup-first 事务迁移。
+- portable archive 与 session export 升至 version 5；archive 继续读取 version 3/4。config 6、memory schema 4、JSONL schema 3 和 plugin protocol 4 保持不变。
+- 权限模式仍只有 `full_access`、`approve_for_me` 和 `ask_for_approval`；Plan Mode 是只读 overlay，不增加第四种权限模式。
+
+## [2.5.0] - 2026-07-27
+
+### Added
+
+- 新增持久记忆 extraction job、严格来源 envelope、可解释的 lexical/semantic 混合召回和 revision-aware compaction。
+- 新增事务化长期整理、受控仓库指令和经父进程验证的子 Agent memory proposal。
+
+### Changed
+
+- memory schema 升至 4，config 升至 6；默认 capture policy 改为 `automatic`，并拆分 capture、recall、manual write 与 maintenance 开关。
+
+### Compatibility
+
+- workspace schema 升至 10；memory export 升至 version 4 并继续读取 version 3。升级前执行 WAL checkpoint 和 SQLite backup。
+
 ## [2.4.0] - 2026-07-24
 
 ### Added

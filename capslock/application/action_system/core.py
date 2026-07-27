@@ -14,6 +14,7 @@ from ...domain import (
     ActionType,
     AgentEvent,
     ApprovalDecision,
+    ApprovalChoice,
 )
 from ...interaction import RunInteraction
 from ...permissions import ApprovalPolicy, PermissionMode
@@ -93,6 +94,7 @@ class ActionCoordinator:
             Callable[[ActionRecord], Awaitable[ApprovalDecision]] | None
         ) = None,
         interaction: RunInteraction | None = None,
+        permission_engine: Any = None,
     ) -> None:
         self.action_repository = action_repository
         self.run_state = run_state
@@ -104,6 +106,7 @@ class ActionCoordinator:
             action_authorizer=approval_authorizer,
         )
         self.approvals = ApprovalPolicy()
+        self.permission_engine = permission_engine
         self.handlers = {
             action_type: handler
             for handler in handlers
@@ -124,6 +127,7 @@ class ActionCoordinator:
             handlers=list(dict.fromkeys(self.handlers.values())),
             event=self.event,
             interaction=self.interaction,
+            permission_engine=self.permission_engine,
         )
 
     @property
@@ -148,13 +152,17 @@ class ActionCoordinator:
         self.interaction.action_authorizer = value
 
     async def propose(self, action_type: ActionType, **payload: Any) -> ActionRecord:
+        permission = payload.pop("_permission", None)
         proposal = await self.handlers[action_type].propose(action_type, payload)
+        request = dict(proposal.request)
+        if isinstance(permission, dict):
+            request["_permission"] = permission
         record = await self.action_repository.create(
             session_id=self.session_id,
             run_id=self.run_id,
             action_type=action_type,
             summary=proposal.summary,
-            request=proposal.request,
+            request=request,
         )
         assessment = self.approvals.assess(action_type)
         record = await self.action_repository.set_risk(
@@ -170,29 +178,89 @@ class ActionCoordinator:
             rollback=assessment.rollback,
         )
         requires_approval = (
-            record.request.get("force_manual_approval") is True
+            action_type
+            in {
+                ActionType.WORKTREE_EXIT,
+                ActionType.SESSION_REWIND,
+                ActionType.CREDENTIAL_ACCESS,
+            }
+            or record.request.get("force_manual_approval") is True
             or self._skill_change(record)
-            or self.approvals.requires_approval(self.permission_mode, action_type)
+            or (
+                not _permission_preapproved(record.request)
+                and self.approvals.requires_approval(self.permission_mode, action_type)
+            )
         )
         if requires_approval:
             if self.approval_authorizer is None:
                 return record
             try:
-                decision = ApprovalDecision(await self.approval_authorizer(record))
+                decision = _approval_choice(await self.approval_authorizer(record))
             except asyncio.CancelledError:
                 cleanup = asyncio.create_task(self.reject(record.id))
                 await _await_cleanup(cleanup)
                 raise
             except (EOFError, KeyboardInterrupt):
-                decision = ApprovalDecision.REJECT
-            if decision is ApprovalDecision.REJECT:
+                decision = ApprovalChoice.REJECT
+            if decision is ApprovalChoice.REJECT:
                 return await self.reject(record.id)
+            if decision in {
+                ApprovalChoice.APPROVE_SESSION,
+                ApprovalChoice.APPROVE_LOCAL,
+            }:
+                await self._persist_permission_choice(record, decision)
             return await self.approve_and_execute(record.id)
         if self.permission_mode is PermissionMode.FULL_ACCESS:
             self.event(
                 "auto_approved", action=action_type.value, level=assessment.level
             )
         return await self.approve_and_execute(record.id)
+
+    async def _persist_permission_choice(
+        self, record: ActionRecord, choice: ApprovalChoice
+    ) -> None:
+        if self.permission_engine is None:
+            raise ValueError("permission persistence is unavailable")
+        permission = record.request.get("_permission")
+        suggestions = permission.get("suggestions") if isinstance(permission, dict) else None
+        destination = (
+            "session" if choice is ApprovalChoice.APPROVE_SESSION else "local"
+        )
+        selected = next(
+            (
+                item
+                for item in suggestions or []
+                if isinstance(item, dict) and item.get("destination") == destination
+            ),
+            None,
+        )
+        if selected is None:
+            raise ValueError(f"no {destination} permission suggestion is available")
+        from ...tooling.authorization import (
+            PermissionBehavior,
+            PermissionDestination,
+            PermissionUpdate,
+            PermissionUpdateOperation,
+        )
+
+        update = PermissionUpdate(
+            PermissionUpdateOperation(str(selected["operation"])),
+            PermissionDestination(str(selected["destination"])),
+            PermissionBehavior(str(selected["behavior"])),
+            str(selected["tool"]),
+            dict(selected.get("constraints", {})),
+            str(selected["rule_id"]) if selected.get("rule_id") else None,
+        )
+        await self.permission_engine.apply_update(self.session_id, update)
+        allowed = await self.permission_engine.verify_explicit_allow(
+            session_id=self.session_id,
+            tool=update.tool,
+            arguments=_permission_arguments(record.request),
+        )
+        if not allowed:
+            raise ValueError(
+                "persisted permission is shadowed and cannot authorize this action"
+            )
 
     async def resolve(
         self, prefix: str, *, types: set[ActionType] | None = None
@@ -225,6 +293,22 @@ class ActionCoordinator:
         if action.status is not ActionStatus.APPROVED:
             raise ValueError("action requires approval before execution")
         return await self.execute_approved(action.id)
+
+    async def approve_with_choice(
+        self, action_id: str, choice: ApprovalChoice | ApprovalDecision | str
+    ) -> ActionRecord:
+        selected = _approval_choice(choice)
+        if selected is ApprovalChoice.REJECT:
+            return await self.reject(action_id)
+        action = await self.action_repository.require(
+            action_id, session_id=self.session_id
+        )
+        if selected in {
+            ApprovalChoice.APPROVE_SESSION,
+            ApprovalChoice.APPROVE_LOCAL,
+        }:
+            await self._persist_permission_choice(action, selected)
+        return await self.approve_and_execute(action_id)
 
     async def execute_approved(self, action_id: str) -> ActionRecord:
         try:
@@ -360,3 +444,24 @@ async def _await_cleanup(task: asyncio.Task) -> None:
         except asyncio.CancelledError:
             continue
     await task
+
+
+def _permission_preapproved(request: dict[str, Any]) -> bool:
+    permission = request.get("_permission")
+    return isinstance(permission, dict) and permission.get("behavior") == "allow"
+
+
+def _permission_arguments(request: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in request.items()
+        if key not in {"_permission", "force_manual_approval", "argv", "temporary", "safety"}
+    }
+
+
+def _approval_choice(value: object) -> ApprovalChoice:
+    if value in {ApprovalDecision.APPROVE, ApprovalDecision.APPROVE.value}:
+        return ApprovalChoice.APPROVE_ONCE
+    if value in {ApprovalDecision.REJECT, ApprovalDecision.REJECT.value}:
+        return ApprovalChoice.REJECT
+    return ApprovalChoice(value)

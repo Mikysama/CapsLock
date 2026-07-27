@@ -16,6 +16,7 @@ from .commands import (
 )
 from .context import CliContext
 from .memory import memory_command
+from .plans import plan_command
 from .skills import skills_command
 from .views.workflow import StatusView, render_queue, render_status
 
@@ -80,7 +81,13 @@ async def _builtin(context, parts, raw):
         await actions.permissions(context, raw)
     elif name == "/approvals":
         if len(parts) == 3 and parts[1] == "approve":
-            await actions.approve_action(context, parts[2])
+            item = await actions.approve_action(context, parts[2])
+            if item is not None:
+                return CommandOutcome(
+                    CommandOutcomeKind.ENQUEUE,
+                    work_item_id=item.id,
+                    question=item.question,
+                )
         elif len(parts) == 3 and parts[1] == "reject":
             await actions.reject_action(context, parts[2])
         else:
@@ -169,6 +176,16 @@ async def _status(context: CliContext) -> None:
             latest_budget.as_dict() if latest_budget else None,
         ),
     )
+    current_plan_loader = getattr(agent, "current_plan", None)
+    current_plan = (
+        await current_plan_loader() if callable(current_plan_loader) else None
+    )
+    if current_plan is not None:
+        context.console.print(
+            f"[command]plan=[/] {current_plan[0].status.value} "
+            f"id={current_plan[0].id[:12]} revision={current_plan[1].ordinal} "
+            f"sha256={current_plan[1].sha256[:12]}"
+        )
     collaboration = getattr(agent, "collaboration", None)
     if collaboration is not None:
         children = await queries.collaboration_tasks(agent.session_id)
@@ -321,6 +338,7 @@ async def _queue(context: CliContext, parts: list[str]) -> None:
 from . import new_commands as _new  # noqa: E402
 
 register_handler("/help", _help)
+register_handler("/plan", plan_command)
 register_handler("/exit", _exit)
 register_handler("/quit", _exit)
 for _path in (

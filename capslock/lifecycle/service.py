@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from ..layout import ProjectLayout
+from ..planning import plan_mirror_path, write_plan_mirror
 from ..storage.memory_repositories import workspace_key
 from .archive import (
     MAX_ARCHIVE_BYTES,
@@ -38,8 +39,8 @@ from .specs import (
 
 
 EXPORT_FORMAT = "capslock-lifecycle-export"
-ARCHIVE_VERSION = 4
-SUPPORTED_ARCHIVE_VERSIONS = frozenset({3, ARCHIVE_VERSION})
+ARCHIVE_VERSION = 5
+SUPPORTED_ARCHIVE_VERSIONS = frozenset({3, 4, ARCHIVE_VERSION})
 MAX_ARCHIVE_RECORDS = 100_000
 
 
@@ -158,6 +159,7 @@ class PortableArchiveService:
                 data_workspace,
                 data_memory,
             )
+            report["plan_mirror_failures"] = self._rebuild_plan_mirrors(report)
             if (stage / "artifacts").is_dir():
                 shutil.copytree(
                     stage / "artifacts", self.layout.artifacts, dirs_exist_ok=True
@@ -165,6 +167,48 @@ class PortableArchiveService:
             self._merge_mcp(_read_json(stage / "mcp.json"), archive_id, report)
             self._persist_import_report(archive_id, report)
             return report
+
+    def _rebuild_plan_mirrors(self, report: dict[str, Any]) -> int:
+        mappings = report.get("mappings", {})
+        plan_mapping = (
+            mappings.get("session_plans", {})
+            if isinstance(mappings, dict)
+            else {}
+        )
+        if not isinstance(plan_mapping, dict) or not plan_mapping:
+            return 0
+        failures = 0
+        connection = sqlite3.connect(self.layout.database)
+        connection.row_factory = sqlite3.Row
+        try:
+            for plan_id in set(map(str, plan_mapping.values())):
+                row = connection.execute(
+                    """SELECT p.mirror_relative_path,v.content,v.sha256
+                       FROM session_plans p JOIN plan_revisions v
+                       ON v.id=p.current_revision_id AND v.plan_id=p.id
+                       WHERE p.id=?""",
+                    (plan_id,),
+                ).fetchone()
+                if row is None:
+                    failures += 1
+                    continue
+                content = str(row["content"])
+                digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+                if digest != str(row["sha256"]):
+                    failures += 1
+                    continue
+                try:
+                    target = plan_mirror_path(
+                        self.layout.plans, str(row["mirror_relative_path"])
+                    )
+                    write_plan_mirror(target, content)
+                except (OSError, ValueError, UnicodeError):
+                    # The database revision remains authoritative. A later
+                    # show/open/resume will retry rebuilding the mirror.
+                    failures += 1
+        finally:
+            connection.close()
+        return failures
 
     def _merge(
         self,

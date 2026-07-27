@@ -60,6 +60,14 @@ class _UI:
     async def input_text(self, *args) -> str | None:
         return None
 
+    async def request_plan_entry(self, objective: str) -> bool:
+        return False
+
+    async def request_plan_approval(self, **kwargs):
+        from capslock.cli.command_ui import PlanApprovalResult
+
+        return PlanApprovalResult(self.selected or "feedback")
+
     async def copy(self, content: str) -> str:
         self.copied.append(content)
         return "test"

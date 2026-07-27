@@ -37,6 +37,13 @@ class ApprovalDecision(StrEnum):
     REJECT = "reject"
 
 
+class ApprovalChoice(StrEnum):
+    APPROVE_ONCE = "approve_once"
+    APPROVE_SESSION = "approve_session"
+    APPROVE_LOCAL = "approve_local"
+    REJECT = "reject"
+
+
 class ActionResultKind(StrEnum):
     APPLIED = "applied"
     UNDONE = "undone"

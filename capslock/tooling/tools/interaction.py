@@ -105,7 +105,7 @@ async def resume_ask_user(
 
 
 def interaction_tools():
-    from ..contracts import ResolvedToolPolicy, define_tool
+    from ..contracts import PlanToolVisibility, ResolvedToolPolicy, define_tool
     from .schemas import _schema, _str
 
     ResolvedToolPolicy.safe_read()
@@ -155,6 +155,7 @@ def interaction_tools():
             ),
             ask_user,
             policy=ResolvedToolPolicy(context_mutation=True),
+            plan_visibility=PlanToolVisibility.CONTROL,
             resume=resume_ask_user,
         ),
     ]

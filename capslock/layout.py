@@ -126,6 +126,10 @@ class ProjectLayout:
             self.root / "state" / "artifacts", "workspace tool artifacts"
         )
 
+    @property
+    def plans(self) -> Path:
+        return self._managed(self.root / "state" / "plans", "workspace plans")
+
     def _managed(self, path: Path, label: str) -> Path:
         _reject_parent_symlinks(path, self.root, label)
         _reject_symlink(path, label)

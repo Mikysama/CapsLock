@@ -19,6 +19,7 @@ from capslock.cli.fullscreen_tui.app import (
     FullscreenCommandUI,
     run_fullscreen_tui,
 )
+from capslock.cli.command_ui import PlanApprovalResult
 from capslock.cli.fullscreen_tui.models import (
     MessageKind,
     MessageViewModel,
@@ -30,8 +31,10 @@ from capslock.cli.fullscreen_tui.presentation import present_action
 from capslock.cli.fullscreen_tui.rendering import TransparentBackground
 from capslock.cli.fullscreen_tui.screens import (
     ApprovalScreen,
+    EnterPlanModeScreen,
     MarkdownContentScreen,
     ModelScreen,
+    PlanApprovalScreen,
     SideQuestionScreen,
 )
 from capslock.cli.fullscreen_tui.widgets import (
@@ -480,6 +483,87 @@ def test_fullscreen_command_ui_uses_markdown_content_screen() -> None:
             assert "Result" in rendered
             assert "important" in rendered
             assert "**important**" not in rendered
+
+    asyncio.run(scenario())
+
+
+def test_fullscreen_plan_entry_matches_read_only_confirmation_flow() -> None:
+    async def scenario() -> None:
+        app = CapsLockApp(CliContext(make_console(), _Agent()))
+        async with app.run_test(size=(100, 32)) as pilot:
+            pending = asyncio.create_task(
+                FullscreenCommandUI(app).request_plan_entry("Design the change")
+            )
+            await pilot.pause()
+
+            assert isinstance(app.screen, EnterPlanModeScreen)
+            rendered = "\n".join(
+                item.render_line(line).text
+                for item in app.screen.query(Static)
+                for line in range(item.size.height)
+            )
+            assert "Enter Plan Mode?" in rendered
+            assert "Design the change" in rendered
+            assert "No code changes" in rendered
+
+            await pilot.press("escape")
+            assert await pending is False
+
+    asyncio.run(scenario())
+
+
+def test_fullscreen_plan_approval_embeds_markdown_and_feedback() -> None:
+    async def scenario() -> None:
+        app = CapsLockApp(CliContext(make_console(), _Agent()))
+        async with app.run_test(size=(100, 36)) as pilot:
+            pending = asyncio.create_task(
+                FullscreenCommandUI(app).request_plan_approval(
+                    objective="Design the change",
+                    content="# Implementation plan\n\n- Reuse the parser",
+                    revision=3,
+                    sha256="a" * 64,
+                    permission_mode="approve_for_me",
+                )
+            )
+            await pilot.pause()
+
+            assert isinstance(app.screen, PlanApprovalScreen)
+            rendered = "\n".join(
+                item.render_line(line).text
+                for item in app.screen.query(Static)
+                for line in range(item.size.height)
+            )
+            assert "Ready to code?" in rendered
+            assert "Implementation plan" in rendered
+            assert "approve_for_me" in rendered
+
+            await pilot.press("down", "enter")
+            await pilot.pause()
+            await pilot.press(*"Add rollback coverage", "enter")
+            result = await pending
+            assert result == PlanApprovalResult(
+                "feedback", "Add rollback coverage"
+            )
+
+    asyncio.run(scenario())
+
+
+def test_fullscreen_plan_approval_escape_keeps_planning() -> None:
+    async def scenario() -> None:
+        app = CapsLockApp(CliContext(make_console(), _Agent()))
+        async with app.run_test(size=(100, 32)) as pilot:
+            pending = asyncio.create_task(
+                FullscreenCommandUI(app).request_plan_approval(
+                    objective="Design",
+                    content="# Plan",
+                    revision=1,
+                    sha256="b" * 64,
+                    permission_mode="ask_for_approval",
+                )
+            )
+            await pilot.pause()
+            await pilot.press("escape")
+            assert await pending == PlanApprovalResult("feedback")
 
     asyncio.run(scenario())
 

@@ -26,6 +26,7 @@ from .memory import MemoryService
 from .memory.embeddings import ExternalEmbeddingConfig
 from .observability import EventSink
 from .permissions import PermissionMode
+from .planning import PlanningService
 from .policy import WorkspacePolicy
 from .plugins import PluginProcessClient, PluginRegistry
 from .lsp import LspManager
@@ -133,6 +134,8 @@ class WorkspaceApplication:
             permission_mode = PermissionMode.parse(
                 stored_mode or settings.permission_mode
             )
+            planning = PlanningService(repositories.plans, root=layout.plans)
+            await planning.reconcile(session.id)
             interaction = RunInteraction(permission_mode=permission_mode)
             events = EventSink(layout.events)
             disabled = await repositories.settings.disabled_skills()
@@ -182,6 +185,7 @@ class WorkspaceApplication:
                 extra_tools=extra_tools or (),
                 allowed_names=allowed_tool_names,
                 discoveries=await repositories.run_journal.tool_discoveries(session.id),
+                planning=planning,
             )
             workflow = WorkflowService(
                 repositories.work_items,
@@ -252,6 +256,7 @@ class WorkspaceApplication:
                 plugin_client=plugin_client,
                 processes=process_manager,
                 interaction=interaction,
+                permission_engine=permission_engine,
                 emit=events.emit,
             )
             collaboration = build_collaboration(
@@ -315,6 +320,7 @@ class WorkspaceApplication:
                     )
                 ),
                 document_settings=settings.documents,
+                planning=planning,
                 input_cost_per_million=settings.model_config.input_cost_per_million,
                 output_cost_per_million=settings.model_config.output_cost_per_million,
                 max_run_tokens=settings.budget.max_run_tokens,

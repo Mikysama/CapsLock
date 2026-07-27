@@ -68,13 +68,14 @@ def skill_tools():
     from ..contracts import ResolvedToolPolicy, define_tool
     from .schemas import _int, _schema, _str
 
-    ResolvedToolPolicy.safe_read()
+    safe_read = ResolvedToolPolicy.safe_read()
     return [
         define_tool(
             "load_skill",
             "Load matching local Skill instructions.",
             _schema({"name": _str()}, ["name"]),
             load_skill,
+            policy=safe_read,
         ),
         define_tool(
             "read_skill_resource",
@@ -89,6 +90,7 @@ def skill_tools():
                 ["name", "path"],
             ),
             read_skill_resource,
+            policy=safe_read,
         ),
     ]
 

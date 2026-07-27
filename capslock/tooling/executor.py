@@ -75,16 +75,25 @@ class ToolExecutor:
                 normalized = await item.normalize(tool, normalized, context)
             compile_json_schema(tool.contract.input_schema).validate(normalized)
             await tool.validate(normalized, context)
-            policy = await tool.resolve_policy(normalized, context)
+            early_decision: ToolExecution | None = None
+            for item in self.middleware:
+                pre_authorize = getattr(item, "pre_authorize", None)
+                if callable(pre_authorize):
+                    early_decision = await pre_authorize(tool, normalized, context)
+                    if early_decision is not None:
+                        break
+            if early_decision is None:
+                policy = await tool.resolve_policy(normalized, context)
             timings["validation"] = round((time.monotonic() - phase) * 1000)
 
             phase = time.monotonic()
             await reporter(ToolEvent(ToolEventKind.PHASE, {"phase": "authorizing"}))
-            decision: ToolOutcome | None = None
-            for item in self.middleware:
-                decision = await item.authorize(tool, normalized, policy, context)
-                if decision is not None:
-                    break
+            decision: ToolExecution | None = early_decision
+            if decision is None:
+                for item in self.middleware:
+                    decision = await item.authorize(tool, normalized, policy, context)
+                    if decision is not None:
+                        break
             timings["authorization"] = round((time.monotonic() - phase) * 1000)
             if decision is not None:
                 execution: ToolExecution = decision
@@ -189,11 +198,37 @@ class ToolExecutor:
                 {},
             )
         started = time.monotonic()
-        policy = await self.resolve(name, context, arguments)
-        execution = await tool.resume(context, arguments, pause, response, reporter)
+        normalized = dict(arguments)
+        for item in self.middleware:
+            normalized = await item.normalize(tool, normalized, context)
+        compile_json_schema(tool.contract.input_schema).validate(normalized)
+        await tool.validate(normalized, context)
+        for item in self.middleware:
+            pre_authorize = getattr(item, "pre_authorize", None)
+            if not callable(pre_authorize):
+                continue
+            denied = await pre_authorize(tool, normalized, context)
+            if denied is not None:
+                if isinstance(denied, ToolPause):
+                    return ToolInvocationResult(
+                        denied,
+                        normalized,
+                        ResolvedToolPolicy(),
+                        {"resume": round((time.monotonic() - started) * 1000)},
+                    )
+                return ToolInvocationResult(
+                    denied,
+                    normalized,
+                    ResolvedToolPolicy(),
+                    {"resume": round((time.monotonic() - started) * 1000)},
+                )
+        policy = await tool.resolve_policy(normalized, context)
+        execution = await tool.resume(
+            context, normalized, pause, response, reporter
+        )
         return ToolInvocationResult(
             execution,
-            arguments,
+            normalized,
             policy,
             {"resume": round((time.monotonic() - started) * 1000)},
         )
@@ -233,6 +268,10 @@ class ToolRuntime:
     def schemas(self) -> list[dict[str, object]]:
         return self.catalog.schemas
 
+    @property
+    def plan_schemas(self) -> list[dict[str, object]]:
+        return self.catalog.plan_schemas
+
     def get(self, name: str) -> ToolDefinition | None:
         return self.catalog.get(name)
 
@@ -245,8 +284,12 @@ class ToolRuntime:
     def discover(self, names: Iterable[str]) -> tuple[str, ...]:
         return self.catalog.discover(names)
 
-    def search(self, query: str, limit: int = 5) -> tuple[str, ...]:
-        return self.catalog.search(query, limit)
+    def search(
+        self, query: str, limit: int = 5, *, plan_visible_only: bool = False
+    ) -> tuple[str, ...]:
+        return self.catalog.search(
+            query, limit, plan_visible_only=plan_visible_only
+        )
 
     def configure_dynamic(
         self, provider, initial: Iterable[ToolDefinition] = ()

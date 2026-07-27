@@ -17,6 +17,7 @@ from .collaboration import CollaborationRepository
 from .compactions import ContextCompactionRepository
 from .governance import GovernanceRepository
 from .models import ModelRepository
+from .plans import PlanRepository
 from .run_journal import RunJournalRepository
 from .runs import RunRepository
 from .sessions import SessionRepository
@@ -41,6 +42,7 @@ class WorkspaceRepositories:
     governance: GovernanceRepository
     collaboration: CollaborationRepository
     compactions: ContextCompactionRepository
+    plans: PlanRepository
 
     @classmethod
     async def open(
@@ -72,6 +74,7 @@ class WorkspaceRepositories:
             GovernanceRepository(database),
             collaboration,
             ContextCompactionRepository(database),
+            PlanRepository(database),
         )
 
     async def close(self) -> None:
@@ -82,6 +85,7 @@ __all__ = [
     "ActionRepository",
     "SessionRepository",
     "ModelRepository",
+    "PlanRepository",
     "GovernanceRepository",
     "CollaborationRepository",
     "ContextCompactionRepository",

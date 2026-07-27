@@ -454,9 +454,10 @@ class MemoryService:
         return await self.recall_service.context(query, run_id=run_id)
 
     async def context(self, run_id: str | None = None):
-        return await self.repositories.recalls.hits(
+        hits = await self.repositories.recalls.hits(
             workspace=self.workspace_key, session_id=self.session_id, run_id=run_id
         )
+        return [hit for hit in hits if hit.selected_reason is not None]
 
     async def capture_candidates(self, chat_model, **kwargs) -> MemoryExtractionResult:
         view = await self.settings()

@@ -133,9 +133,24 @@ async def _shell_policy(arguments, context):
     from ..contracts import InterruptBehavior, ResolvedToolPolicy
 
     assessment = assess_shell(str(arguments.get("command", "")))
+    context.runtime_state["shell_deterministic_behavior"] = assessment.behavior
     network = arguments.get("network", [])
+    explicitly_restricted = False
     if (
         assessment.behavior == "ask"
+        and context.permission_engine is not None
+        and hasattr(context.permission_engine, "has_explicit_restriction")
+    ):
+        explicitly_restricted = await context.permission_engine.has_explicit_restriction(
+            session_id=context.session_id,
+            tool="shell",
+            arguments=arguments,
+            context=context,
+        )
+    if (
+        assessment.behavior == "ask"
+        and context.permission_mode.value == "approve_for_me"
+        and not explicitly_restricted
         and context.shell_classifier is not None
         and arguments.get("sandbox", "default") == "default"
         and not network

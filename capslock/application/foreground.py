@@ -164,6 +164,7 @@ class ForegroundRunController:
                 )
 
     async def _run(self, item_id: str, question: str, resume_from: str | None) -> None:
+        final_run_id: str | None = None
         async for event in self.session.run_stream(
             RunRequest(
                 question=question,
@@ -173,6 +174,7 @@ class ForegroundRunController:
                 authorize_limit=self.authorize_limit,
             )
         ):
+            final_run_id = event.run_id
             await self.consumer(
                 ControllerEvent(
                     ControllerEventKind.RUN_EVENT,
@@ -180,6 +182,16 @@ class ForegroundRunController:
                     event=event,
                 )
             )
+        if final_run_id is not None and hasattr(
+            self.session, "implementation_for_planning_run"
+        ):
+            implementation = await self.session.implementation_for_planning_run(
+                final_run_id
+            )
+            if implementation is not None:
+                await self.enqueue_item(
+                    implementation.id, implementation.question
+                )
 
     async def _delete_empty_session(self) -> None:
         memory = self.session.memory

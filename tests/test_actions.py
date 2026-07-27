@@ -277,6 +277,66 @@ def test_authorizer_obeys_permission_granularity(
     asyncio.run(scenario())
 
 
+def test_full_access_shell_allow_is_not_overridden_by_action_risk_classifier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        repositories = await WorkspaceRepositories.open(
+            tmp_path / "full-access-date.sqlite3", workspace=tmp_path
+        )
+        approvals = []
+
+        async def reject(action):
+            approvals.append(action.id)
+            return ApprovalDecision.REJECT
+
+        try:
+            session, prepared = await workspace_run(repositories)
+            handler = CommandActionHandler(
+                WorkspacePolicy(tmp_path),
+                timeout_seconds=120,
+                output_limit_bytes=1000,
+            )
+
+            async def execute(action):
+                return SimpleNamespace(
+                    result={"stdout": "test-date\n", "exit_code": 0},
+                    result_kind=ActionResultKind.EXIT_ZERO,
+                )
+
+            monkeypatch.setattr(handler, "execute", execute)
+            actions = coordinator(
+                repositories,
+                session.id,
+                prepared.run.id,
+                [handler],
+                mode=PermissionMode.FULL_ACCESS,
+                approval_authorizer=reject,
+            )
+            result = await actions.propose(
+                ActionType.COMMAND,
+                command="date",
+                cwd=".",
+                sandbox="default",
+                network=[],
+                background=False,
+                _permission={
+                    "behavior": "allow",
+                    "source": "permission_mode",
+                    "mode": "full_access",
+                },
+            )
+            assert approvals == []
+            assert result.status is ActionStatus.COMPLETED
+            assert result.request["safety"]["behavior"] == "ask"
+            assert result.request["force_manual_approval"] is False
+            assert result.result == {"stdout": "test-date\n", "exit_code": 0}
+        finally:
+            await repositories.close()
+
+    asyncio.run(scenario())
+
+
 def test_full_access_skill_file_change_still_uses_authorizer(tmp_path: Path) -> None:
     async def scenario() -> None:
         repositories = await WorkspaceRepositories.open(
@@ -304,6 +364,49 @@ def test_full_access_skill_file_change_still_uses_authorizer(tmp_path: Path) -> 
                 content="instructions",
             )
             assert len(calls) == 1
+            assert result.status is ActionStatus.REJECTED
+        finally:
+            await repositories.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "action_type",
+    [
+        ActionType.WORKTREE_EXIT,
+        ActionType.SESSION_REWIND,
+        ActionType.CREDENTIAL_ACCESS,
+    ],
+)
+def test_explicit_allow_cannot_bypass_mandatory_action_confirmation(
+    tmp_path: Path, action_type: ActionType
+) -> None:
+    async def scenario() -> None:
+        repositories = await WorkspaceRepositories.open(
+            tmp_path / f"mandatory-{action_type.value}.sqlite3", workspace=tmp_path
+        )
+        seen = []
+
+        async def reject(action):
+            seen.append(action.id)
+            return ApprovalDecision.REJECT
+
+        try:
+            session, prepared = await workspace_run(repositories)
+            actions = coordinator(
+                repositories,
+                session.id,
+                prepared.run.id,
+                [StubActionHandler(set(ActionType))],
+                mode=PermissionMode.FULL_ACCESS,
+                approval_authorizer=reject,
+            )
+            result = await actions.propose(
+                action_type,
+                _permission={"behavior": "allow", "source": "test"},
+            )
+            assert len(seen) == 1
             assert result.status is ActionStatus.REJECTED
         finally:
             await repositories.close()

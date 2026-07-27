@@ -23,6 +23,7 @@ from ..domain import (
     AgentEvent,
     AgentEventKind,
     ApprovalDecision,
+    ApprovalChoice,
     BudgetRequest,
     BudgetSnapshot,
 )
@@ -36,6 +37,7 @@ from .prompt import (
     prompt_prelude,
     prompt_tokens,
     select_action_decision,
+    select_permission_request_decision,
 )
 from .presentation import ToolPresentation, present_tool
 from .views.common import error, startup
@@ -66,6 +68,10 @@ async def run_tui(
     queries = context.require_queries()
     session = await queries.session(agent.session_id)
     render_history(console, session, await queries.transcript(agent.session_id))
+    current_plan_loader = getattr(agent, "current_plan", None)
+    initial_plan = (
+        await current_plan_loader() if callable(current_plan_loader) else None
+    )
     state: dict[str, object] = {
         "task": None,
         "activity": None,
@@ -75,6 +81,7 @@ async def run_tui(
         "details_expanded": False,
         "queued_items": {},
         "usage": (0, 0, 0.0),
+        "plan_status": initial_plan[0].status.value if initial_plan else None,
     }
 
     def toggle_details() -> None:
@@ -91,7 +98,11 @@ async def run_tui(
             spinner_frame=int(state.get("spinner_frame", 0)),
             details_expanded=bool(state.get("details_expanded", False)),
             model=agent.model,
-            permission=agent.permission_mode.value,
+            permission=(
+                f"⏸ plan mode on · {state['plan_status']} · {agent.permission_mode.value}"
+                if state.get("plan_status")
+                else agent.permission_mode.value
+            ),
             workspace=str(agent.workspace),
             usage=usage_value,
         )
@@ -159,6 +170,51 @@ async def run_tui(
                         run.question,
                         item.event.run_id,
                     )
+            elif item.event.kind is AgentEventKind.WAITING_APPROVAL:
+                try:
+                    plan_request = await agent.resolve_plan_request(
+                        str(item.event.data.get("request_id", ""))
+                    )
+                except ValueError:
+                    plan_request = None
+                if plan_request is not None:
+                    from .plans import decide_plan_request_interactively
+
+                    await decide_plan_request_interactively(context, plan_request)
+                    run = await agent.runs.require(
+                        item.event.run_id, session_id=agent.session_id
+                    )
+                    await controller.enqueue_item(
+                        item.event.work_item_id,
+                        run.question,
+                        item.event.run_id,
+                    )
+                    return
+                try:
+                    request = await agent.resolve_permission_request(
+                        str(item.event.data.get("request_id", ""))
+                    )
+                except ValueError:
+                    request = None
+                if request is not None:
+                    try:
+                        decision = await run_in_terminal(
+                            lambda: select_permission_request_decision(request),
+                            in_executor=True,
+                        )
+                    except (EOFError, KeyboardInterrupt):
+                        decision = ApprovalChoice.REJECT
+                    await agent.decide_permission_request(
+                        str(request["id"]), decision
+                    )
+                    run = await agent.runs.require(
+                        item.event.run_id, session_id=agent.session_id
+                    )
+                    await controller.enqueue_item(
+                        item.event.work_item_id,
+                        run.question,
+                        item.event.run_id,
+                    )
         elif item.kind is ControllerEventKind.CANCELLED and isinstance(
             renderer, _RunRenderer
         ):
@@ -214,7 +270,22 @@ async def run_tui(
                         )
                     else:
                         outcome = await dispatch_slash_command(context, question)
-                        if outcome.kind is not CommandOutcomeKind.HANDLED:
+                        current_plan_loader = getattr(agent, "current_plan", None)
+                        current_plan = (
+                            await current_plan_loader()
+                            if callable(current_plan_loader)
+                            else None
+                        )
+                        state["plan_status"] = (
+                            current_plan[0].status.value if current_plan else None
+                        )
+                        if outcome.kind is CommandOutcomeKind.ENQUEUE:
+                            assert outcome.work_item_id and outcome.question
+                            console.print(user_message(outcome.question))
+                            await controller.enqueue_item(
+                                outcome.work_item_id, outcome.question
+                            )
+                        elif outcome.kind is not CommandOutcomeKind.HANDLED:
                             return outcome
                 except (ValueError, OSError) as exc:
                     error(console, exc)
@@ -256,8 +327,8 @@ async def _animate_activity(inputs: object, state: dict[str, object]) -> None:
 
 async def _authorize_action(
     context: CliContext, action: ActionRecord
-) -> ApprovalDecision:
-    def choose() -> ApprovalDecision:
+) -> ApprovalDecision | ApprovalChoice:
+    def choose() -> ApprovalDecision | ApprovalChoice:
         size = shutil.get_terminal_size(fallback=(80, 24))
         if size.columns < 48 or size.lines < 14:
             context.console.print(
@@ -269,7 +340,7 @@ async def _authorize_action(
         return select_action_decision(action)
 
     try:
-        return ApprovalDecision(await run_in_terminal(choose, in_executor=True))
+        return await run_in_terminal(choose, in_executor=True)
     except (EOFError, KeyboardInterrupt):
         return ApprovalDecision.REJECT
 

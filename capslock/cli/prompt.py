@@ -20,7 +20,7 @@ from prompt_toolkit.shortcuts import CompleteStyle
 from prompt_toolkit.shortcuts import choice
 from prompt_toolkit.utils import get_cwidth
 
-from ..domain import ActionRecord, ApprovalDecision
+from ..domain import ActionRecord, ApprovalChoice, ApprovalDecision
 from ..models import SELECTABLE_MODELS
 from ..permissions import PermissionMode
 from ..status import SPINNER_FRAMES
@@ -350,20 +350,84 @@ def select_model(current: str) -> str:
     )
 
 
-def select_action_decision(_action: ActionRecord) -> ApprovalDecision:
+def select_action_decision(
+    action: ActionRecord,
+) -> ApprovalChoice | ApprovalDecision:
     header = FormattedText(
         [
             ("class:command-name", "Allow CapsLock to execute this action?\n"),
             ("class:footer", "↑/↓ choose · Enter confirm"),
         ]
     )
-    return choice(
-        header,
-        options=[
+    permission = action.request.get("_permission")
+    suggestions = permission.get("suggestions") if isinstance(permission, dict) else []
+    destinations = {
+        item.get("destination") for item in suggestions if isinstance(item, dict)
+    }
+    if not destinations:
+        options = [
             (ApprovalDecision.REJECT, "No, do not execute"),
             (ApprovalDecision.APPROVE, "Yes, execute"),
-        ],
-        default=ApprovalDecision.REJECT,
+        ]
+        default = ApprovalDecision.REJECT
+    else:
+        options = [
+            (ApprovalChoice.REJECT, "No, do not execute"),
+            (ApprovalChoice.APPROVE_ONCE, "Yes, execute once"),
+        ]
+        default = ApprovalChoice.REJECT
+    if "session" in destinations:
+        options.append(
+            (ApprovalChoice.APPROVE_SESSION, "Yes, allow for this session")
+        )
+    if "local" in destinations:
+        options.append(
+            (ApprovalChoice.APPROVE_LOCAL, "Yes, always allow in this workspace")
+        )
+    return choice(
+        header,
+        options=options,
+        default=default,
+        style=PROMPT_STYLE,
+        symbol="❯",
+    )
+
+
+def select_permission_request_decision(
+    request: dict[str, object],
+) -> ApprovalChoice:
+    suggestions = request.get("suggestions", [])
+    destinations = {
+        item.get("destination")
+        for item in suggestions
+        if isinstance(item, dict)
+    }
+    options = [
+        (ApprovalChoice.REJECT, "No, reject this invocation"),
+        (ApprovalChoice.APPROVE_ONCE, "Yes, allow this invocation once"),
+    ]
+    if "session" in destinations:
+        options.append(
+            (ApprovalChoice.APPROVE_SESSION, "Yes, allow for this session")
+        )
+    if "local" in destinations:
+        options.append(
+            (ApprovalChoice.APPROVE_LOCAL, "Yes, always allow in this workspace")
+        )
+    return choice(
+        FormattedText(
+            [
+                ("class:command-name", "Allow this tool invocation?\n"),
+                (
+                    "class:footer",
+                    f"{request.get('tool', 'tool')} · {request.get('reason', 'approval required')}\n"
+                    f"{request.get('preview', '')}\n"
+                    "↑/↓ choose · Enter confirm · default reject",
+                ),
+            ]
+        ),
+        options=options,
+        default=ApprovalChoice.REJECT,
         style=PROMPT_STYLE,
         symbol="❯",
     )

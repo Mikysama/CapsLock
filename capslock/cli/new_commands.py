@@ -139,6 +139,13 @@ async def branch(context, parts: list[str], raw: str) -> CommandOutcome:
     child = await context.session.sessions.derive(
         parent.id, title=title, derivation_kind="branch"
     )
+    if context.session.planning is not None:
+        await context.session.planning.clone_active(
+            parent.id,
+            child.id,
+            entry_source="branch",
+            base_permission_mode=context.session.permission_mode.value,
+        )
     context.console.print(f"[success]Created branch:[/] {child.title} ({child.id[:8]})")
     return CommandOutcome(CommandOutcomeKind.SWITCH_SESSION, child.id)
 
@@ -630,6 +637,13 @@ async def rewind(context, parts: list[str], raw: str) -> CommandOutcome:
             derivation_kind="rewind",
             target_run_id=str(target["id"]),
         )
+        if context.session.planning is not None:
+            await context.session.planning.clone_active(
+                session_id,
+                child.id,
+                entry_source="rewind",
+                base_permission_mode=context.session.permission_mode.value,
+            )
         return CommandOutcome(CommandOutcomeKind.SWITCH_SESSION, child.id)
     detail = (
         "\n\n".join(
@@ -651,6 +665,13 @@ async def rewind(context, parts: list[str], raw: str) -> CommandOutcome:
         derivation_kind="rewind",
         target_run_id=str(target["id"]),
     )
+    if context.session.planning is not None:
+        await context.session.planning.clone_active(
+            session_id,
+            child.id,
+            entry_source="rewind",
+            base_permission_mode=context.session.permission_mode.value,
+        )
     try:
         for _, request in requests:
             path = context.session.policy.writable_file(

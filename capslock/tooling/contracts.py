@@ -42,6 +42,12 @@ class ToolEventKind(StrEnum):
     USAGE = "usage"
 
 
+class PlanToolVisibility(StrEnum):
+    HIDDEN = "hidden"
+    LOCAL_READ = "local_read"
+    CONTROL = "control"
+
+
 @dataclass(frozen=True)
 class ToolContent:
     """Provider-neutral model-facing content block."""
@@ -163,6 +169,7 @@ class ToolContract:
     deferred: bool = False
     inline_result_bytes: int = 16_384
     max_capture_bytes: int = 5 * 1024 * 1024
+    plan_visibility: PlanToolVisibility = PlanToolVisibility.HIDDEN
 
     def __post_init__(self) -> None:
         if not self.name or not self.version or not self.description.strip():
@@ -196,6 +203,7 @@ class ToolContract:
             "deferred": self.deferred,
             "inline_result_bytes": self.inline_result_bytes,
             "max_capture_bytes": self.max_capture_bytes,
+            "plan_visibility": self.plan_visibility.value,
         }
 
 
@@ -318,6 +326,7 @@ class ExecutionContext:
     discoveries: Any = None
     runtime_state: dict[str, object] = field(default_factory=dict)
     shell_classifier: Any = None
+    planning: Any = None
 
 
 ToolExecuteCallable = Callable[
@@ -444,6 +453,7 @@ def define_tool(
     validate: ToolValidator = _no_validation,
     resume: ToolResumer | None = None,
     presenter: ToolPresenter | None = None,
+    plan_visibility: PlanToolVisibility = PlanToolVisibility.HIDDEN,
 ) -> ToolDefinition:
     if isinstance(policy, ResolvedToolPolicy):
         resolved = policy
@@ -467,6 +477,7 @@ def define_tool(
             deferred,
             inline_result_bytes,
             max_capture_bytes,
+            plan_visibility,
         ),
         adapt_executor(executor),
         validate,
