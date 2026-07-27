@@ -180,7 +180,7 @@ reasoning = ["main"]
         encoding="utf-8",
     )
     document = load_config_document(path)
-    assert document["config_version"] == 5
+    assert document["config_version"] == 6
     assert document["tools"]["schema_budget_tokens"] == 8000
     assert document["shell"]["classifier_threshold"] == 0.95
     backups = list(tmp_path.glob("config.toml.*.bak"))

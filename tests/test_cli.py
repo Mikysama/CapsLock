@@ -148,6 +148,7 @@ def test_slash_command_catalog_has_no_removed_aliases() -> None:
         "/approvals",
         "/queue",
         "/memory",
+        "/instructions",
         "/skills",
         "/agents",
         "/sources",

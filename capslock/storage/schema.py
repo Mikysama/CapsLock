@@ -2,8 +2,8 @@
 
 WORKSPACE_APPLICATION_ID = 0x434C4B32  # CLK2
 MEMORY_APPLICATION_ID = 0x434C4D32  # CLM2
-WORKSPACE_SCHEMA_VERSION = 9
-MEMORY_SCHEMA_VERSION = 3
+WORKSPACE_SCHEMA_VERSION = 10
+MEMORY_SCHEMA_VERSION = 4
 
 WORKSPACE_SCHEMA = """
 CREATE TABLE database_metadata (
@@ -290,6 +290,7 @@ CREATE TABLE context_compactions (
   target_tokens INTEGER NOT NULL CHECK(target_tokens>=0),
   model_profile TEXT NOT NULL,
   source_digest TEXT NOT NULL,
+  memory_revision_digest TEXT NOT NULL DEFAULT '',
   focus_instructions TEXT,
   valid INTEGER NOT NULL DEFAULT 1 CHECK(valid IN (0,1)),
   created_at TEXT NOT NULL,
@@ -511,9 +512,10 @@ CREATE TABLE lifecycle_import_items (
 ) STRICT;
 CREATE TABLE memories (
   id TEXT PRIMARY KEY,
-  scope TEXT NOT NULL CHECK(scope IN ('global','workspace','session')),
+  scope TEXT NOT NULL CHECK(scope IN ('global','workspace','session','agent')),
   workspace_key TEXT,
   session_id TEXT,
+  namespace TEXT,
   status TEXT NOT NULL CHECK(status IN ('active','forgotten','purged')),
   current_revision INTEGER,
   origin TEXT NOT NULL CHECK(origin IN ('manual','imported','reviewed','automatic')),
@@ -522,9 +524,10 @@ CREATE TABLE memories (
   updated_at TEXT NOT NULL,
   purged_at TEXT,
   CHECK(
-    (scope='global' AND workspace_key IS NULL AND session_id IS NULL) OR
-    (scope='workspace' AND workspace_key IS NOT NULL AND session_id IS NULL) OR
-    (scope='session' AND workspace_key IS NOT NULL AND session_id IS NOT NULL)
+    (scope='global' AND workspace_key IS NULL AND session_id IS NULL AND namespace IS NULL) OR
+    (scope='workspace' AND workspace_key IS NOT NULL AND session_id IS NULL AND namespace IS NULL) OR
+    (scope='session' AND workspace_key IS NOT NULL AND session_id IS NOT NULL AND namespace IS NULL) OR
+    (scope='agent' AND workspace_key IS NOT NULL AND session_id IS NULL AND namespace IS NOT NULL)
   ),
   CHECK((status='purged' AND current_revision IS NULL) OR status!='purged')
 ) STRICT;
@@ -534,18 +537,26 @@ CREATE TABLE memory_revisions (
   revision INTEGER NOT NULL CHECK(revision>=1),
   operation TEXT NOT NULL CHECK(operation IN ('create','edit','forget','undo','import','adopt')),
   content TEXT NOT NULL,
-  memory_type TEXT NOT NULL CHECK(memory_type IN ('fact','preference','decision','todo','note')),
+  memory_type TEXT NOT NULL CHECK(memory_type IN ('fact','preference','decision','todo','note','project','temporary')),
   source_kind TEXT NOT NULL,
   source_ref TEXT,
   confidence REAL NOT NULL CHECK(confidence>=0 AND confidence<=1),
   expires_at TEXT,
+  subject TEXT,
+  durability TEXT NOT NULL DEFAULT 'durable' CHECK(durability IN ('temporary','session','project','durable')),
+  why TEXT,
+  how_to_apply TEXT,
+  last_verified_at TEXT,
   created_at TEXT NOT NULL,
   PRIMARY KEY(memory_id,revision)
 ) STRICT;
 CREATE TABLE memory_workspace_settings (
   workspace_key TEXT PRIMARY KEY,
   write_enabled INTEGER NOT NULL DEFAULT 1 CHECK(write_enabled IN (0,1)),
-  policy TEXT NOT NULL DEFAULT 'review' CHECK(policy IN ('off','review','automatic')),
+  capture_enabled INTEGER NOT NULL DEFAULT 1 CHECK(capture_enabled IN (0,1)),
+  manual_write_enabled INTEGER NOT NULL DEFAULT 1 CHECK(manual_write_enabled IN (0,1)),
+  maintenance_enabled INTEGER NOT NULL DEFAULT 1 CHECK(maintenance_enabled IN (0,1)),
+  policy TEXT NOT NULL DEFAULT 'automatic' CHECK(policy IN ('off','review','automatic')),
   recall_enabled INTEGER NOT NULL DEFAULT 1 CHECK(recall_enabled IN (0,1)),
   embedding_backend TEXT NOT NULL DEFAULT 'off' CHECK(embedding_backend IN ('off','fastembed','local_http','external')),
   embedding_model TEXT,
@@ -559,6 +570,7 @@ CREATE TABLE memory_extractions (
   workspace_key TEXT NOT NULL,
   session_id TEXT NOT NULL,
   source_run_id TEXT NOT NULL,
+  envelope_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(envelope_json)),
   model TEXT NOT NULL,
   prompt_version TEXT NOT NULL,
   policy TEXT NOT NULL CHECK(policy IN ('off','review','automatic')),
@@ -574,8 +586,13 @@ CREATE TABLE memory_candidates (
   id TEXT PRIMARY KEY,
   extraction_id TEXT NOT NULL REFERENCES memory_extractions(id) ON DELETE CASCADE,
   content TEXT,
-  memory_type TEXT NOT NULL CHECK(memory_type IN ('fact','preference','decision','todo','note')),
-  scope TEXT NOT NULL CHECK(scope IN ('global','workspace','session')),
+  memory_type TEXT NOT NULL CHECK(memory_type IN ('fact','preference','decision','todo','note','project','temporary')),
+  scope TEXT NOT NULL CHECK(scope IN ('global','workspace','session','agent')),
+  namespace TEXT,
+  subject TEXT,
+  durability TEXT NOT NULL DEFAULT 'durable' CHECK(durability IN ('temporary','session','project','durable')),
+  why TEXT,
+  how_to_apply TEXT,
   workspace_key TEXT NOT NULL,
   session_id TEXT NOT NULL,
   source_run_id TEXT NOT NULL,
@@ -589,6 +606,17 @@ CREATE TABLE memory_candidates (
   decided_at TEXT
 ) STRICT;
 CREATE INDEX idx_memory_candidates_queue ON memory_candidates(workspace_key,session_id,status,created_at);
+CREATE TABLE memory_candidate_sources (
+  id INTEGER PRIMARY KEY,
+  candidate_id TEXT NOT NULL REFERENCES memory_candidates(id) ON DELETE CASCADE,
+  message_id TEXT,
+  evidence_id TEXT,
+  quote TEXT NOT NULL,
+  direct INTEGER NOT NULL DEFAULT 0 CHECK(direct IN (0,1)),
+  verified INTEGER NOT NULL DEFAULT 0 CHECK(verified IN (0,1)),
+  created_at TEXT NOT NULL,
+  CHECK(message_id IS NOT NULL OR evidence_id IS NOT NULL)
+) STRICT;
 CREATE TABLE memory_sources (
   id INTEGER PRIMARY KEY,
   memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
@@ -598,10 +626,66 @@ CREATE TABLE memory_sources (
   workspace_key TEXT,
   session_id TEXT,
   run_id TEXT,
+  message_id TEXT,
+  evidence_id TEXT,
+  quote TEXT,
+  direct INTEGER NOT NULL DEFAULT 0 CHECK(direct IN (0,1)),
+  verified INTEGER NOT NULL DEFAULT 0 CHECK(verified IN (0,1)),
   valid INTEGER NOT NULL DEFAULT 1 CHECK(valid IN (0,1)),
   created_at TEXT NOT NULL,
   invalidated_at TEXT,
   UNIQUE(memory_id,source_kind,source_ref,extraction_id)
+) STRICT;
+CREATE TABLE memory_relations (
+  id INTEGER PRIMARY KEY,
+  source_memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+  target_memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+  relation TEXT NOT NULL CHECK(relation IN ('duplicate','conflict','supersedes')),
+  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','confirmed','rejected')),
+  confidence REAL NOT NULL DEFAULT 1 CHECK(confidence>=0 AND confidence<=1),
+  created_by TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  decided_at TEXT,
+  UNIQUE(source_memory_id,target_memory_id,relation),
+  CHECK(source_memory_id<>target_memory_id)
+) STRICT;
+CREATE INDEX idx_memory_relations_status ON memory_relations(status,relation,created_at);
+CREATE TABLE memory_jobs (
+  id TEXT PRIMARY KEY,
+  job_type TEXT NOT NULL CHECK(job_type IN ('extract_run','consolidate_workspace','promote_agent_memory')),
+  workspace_key TEXT NOT NULL,
+  session_id TEXT,
+  run_id TEXT,
+  status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued','running','completed','failed')),
+  idempotency_key TEXT NOT NULL UNIQUE,
+  payload_json TEXT NOT NULL CHECK(json_valid(payload_json)),
+  attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count>=0 AND attempt_count<=3),
+  available_at TEXT NOT NULL,
+  error_code TEXT,
+  created_at TEXT NOT NULL,
+  started_at TEXT,
+  completed_at TEXT
+) STRICT;
+CREATE INDEX idx_memory_jobs_ready ON memory_jobs(status,available_at,created_at);
+CREATE TABLE memory_review_proposals (
+  id TEXT PRIMARY KEY,
+  workspace_key TEXT NOT NULL,
+  proposal_type TEXT NOT NULL CHECK(proposal_type IN ('near_duplicate','conflict','rewrite','instruction_promotion')),
+  memory_ids_json TEXT NOT NULL CHECK(json_valid(memory_ids_json)),
+  proposed_content TEXT,
+  confidence REAL NOT NULL CHECK(confidence>=0 AND confidence<=1),
+  payload_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(payload_json)),
+  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','accepted','rejected')),
+  job_id TEXT REFERENCES memory_jobs(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL,
+  decided_at TEXT
+) STRICT;
+CREATE INDEX idx_memory_review_queue ON memory_review_proposals(workspace_key,status,created_at);
+CREATE TABLE memory_maintenance_state (
+  workspace_key TEXT PRIMARY KEY,
+  last_consolidated_at TEXT,
+  completed_sessions_at_last_run INTEGER NOT NULL DEFAULT 0 CHECK(completed_sessions_at_last_run>=0),
+  last_job_id TEXT REFERENCES memory_jobs(id) ON DELETE SET NULL
 ) STRICT;
 CREATE TABLE memory_embeddings (
   memory_id TEXT NOT NULL,
@@ -629,6 +713,10 @@ CREATE TABLE memory_recall_items (
   score REAL NOT NULL,
   lexical_rank INTEGER,
   semantic_rank INTEGER,
+  cosine REAL,
+  retrieval_score REAL NOT NULL DEFAULT 0,
+  selected_reason TEXT,
+  filter_reason TEXT,
   reasons_json TEXT NOT NULL CHECK(json_valid(reasons_json)),
   PRIMARY KEY(run_id,memory_id),
   FOREIGN KEY(memory_id,revision) REFERENCES memory_revisions(memory_id,revision) ON DELETE CASCADE

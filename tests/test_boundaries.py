@@ -200,7 +200,7 @@ def test_only_one_shell_assessment_and_composition_constructs_managers() -> None
 def test_core_tool_schema_fingerprint_is_stable() -> None:
     runtime = workspace_tools()
     assert runtime.snapshot().fingerprint == (
-        "284617dd91e2ce795cf50c27371839de61b83a7209bbf18a3ca37465c3389f3a"
+        "fb955b279567b74e5e6da2cd86e87f7495a2dfbc0765eb593cf1f8e5cc331c14"
     )
 
 
@@ -407,6 +407,10 @@ enabled = false
     assert settings.web.web_max_redirects == 1
     assert settings.mcp.mcp_output_bytes == 2048
     assert settings.memory.project_write_enabled is False
+    assert settings.memory.capture_enabled is False
+    assert settings.memory.recall_enabled is False
+    assert settings.memory.manual_write_enabled is False
+    assert settings.memory.maintenance_enabled is False
 
 
 @pytest.mark.parametrize(

@@ -1,6 +1,6 @@
 # 当前运行内核与安全边界
 
-本文描述 CapsLock 2.4.0 的开发边界。产品在本机运行，支持直接能力工具、类型化斜杠命令、可审批 Action、受沙箱保护的通用 Shell、session 隔离后台进程、受管理 MCP/LSP 和单层子 Agent；不提供远程控制、后台 daemon 或第三方可执行 Hook。
+本文描述 CapsLock 2.5.0 的开发边界。产品在本机运行，支持直接能力工具、类型化斜杠命令、可审批 Action、受沙箱保护的通用 Shell、session 隔离后台进程、受管理 MCP/LSP、受控仓库指令和单层子 Agent；不提供远程控制、后台 daemon 或第三方可执行 Hook。
 
 ## 模块边界
 
@@ -28,9 +28,15 @@ MCP 使用唯一的受管理长连接路径，负责 tools/resources discovery�
 
 插件 manifest、grant 和 stdio protocol 使用版本 4。普通调用使用独立沙箱进程；只有显式授权的 session 生命周期插件可以池化。插件 capability 必须是 manifest grant 的子集，宿主 broker 重新执行文件、网络、进程和 credential 边界。
 
+## 记忆与指令
+
+普通记忆始终作为不可信数据注入。run 完成只排队幂等的 extraction job，后台 worker 从用户消息和已验证 evidence/source 构造严格来源 envelope；自动采用受来源、置信度、风险和 scope 门槛约束。召回批量融合词法与语义排名，语义不可用时降级为词法，并记录过滤和选择原因。edit、forget、purge 或来源失效会通过 revision digest 使旧 compaction 失效。
+
+consolidation 只自动合并完全重复的 automatic memory、遗忘来源已全部失效的 automatic memory，以及降级已确认 supersedes 的旧 automatic memory；冲突、manual/reviewed 修改和 instruction promotion 均进入 review。仓库指令按受控层级加载，拒绝 include 与符号链接，且始终低于系统安全、工具权限和审批策略。子 Agent 只能提交带 namespace 和验证 provenance 的 memory proposal，由父进程持久化晋升。
+
 ## 当前数据协议
 
-当前格式为 config 5、workspace schema 9、memory schema 3、portable archive 4、session export 4、JSONL schema 3 和 plugin protocol 4。workspace 启动支持 backup-first、事务化的 v6/v7/v8→v9 升级；config v3/v4 自动备份并转换为 v5。迁移失败保留原库和备份，不继续部分升级。
+当前格式为 config 6、workspace schema 10、memory schema 4、portable archive 4、session export 4、JSONL schema 3 和 plugin protocol 4。workspace 启动支持 backup-first、事务化的 v6-v9→v10 升级；memory schema v3 与 config v3-v5 自动备份并升级。迁移失败保留原库和备份，不继续部分升级。
 
 ## 发布门禁
 

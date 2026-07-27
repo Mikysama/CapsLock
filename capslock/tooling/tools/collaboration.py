@@ -74,6 +74,10 @@ def delegation_tool() -> ToolDefinition:
                                 },
                             },
                             "model_profile": {"type": "string"},
+                            "memory_namespace": {
+                                "type": "string",
+                                "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+                            },
                             "limits": {"type": "object"},
                             "verification_requirements": {
                                 "type": "object",
@@ -148,6 +152,7 @@ async def _delegate(
                     verification_requirements=_verification_requirements(
                         item.get("verification_requirements")
                     ),
+                    memory_namespace=item.get("memory_namespace"),
                 )
             )
         contracts = await _reserve_parent_budget(context, contracts)

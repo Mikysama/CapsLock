@@ -151,8 +151,17 @@ class McpSettings:
 
 @dataclass(frozen=True)
 class MemorySettings:
-    project_write_enabled: bool = True
+    capture_enabled: bool = True
+    recall_enabled: bool = True
+    manual_write_enabled: bool = True
+    maintenance_enabled: bool = True
+    policy: str = "automatic"
     database: Path | None = None
+
+    @property
+    def project_write_enabled(self) -> bool:
+        """Compatibility alias for integrations written against config v5."""
+        return self.manual_write_enabled
 
 
 @dataclass(frozen=True)

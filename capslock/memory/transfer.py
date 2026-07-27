@@ -1,4 +1,4 @@
-"""Version 3 memory import and export."""
+"""Version 4 memory import/export with safe v3 compatibility."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
-from ..domain import MemoryOrigin, MemoryScope, MemoryType
+from ..domain import MemoryDurability, MemoryOrigin, MemoryScope, MemoryType
 from ..storage.memory_repositories import MemoryRepositories
 from .validation import (
     MAX_TRANSFER_BYTES,
@@ -21,7 +21,7 @@ from .validation import (
 )
 
 EXPORT_FORMAT = "capslock-memory-export"
-EXPORT_VERSION = 3
+EXPORT_VERSION = 4
 
 
 class MemoryTransferService:
@@ -69,6 +69,12 @@ class MemoryTransferService:
                     "confidence": item.confidence,
                     "expires_at": item.expires_at,
                     "origin": item.origin.value,
+                    "subject": item.subject,
+                    "durability": item.durability.value,
+                    "why": item.why,
+                    "how_to_apply": item.how_to_apply,
+                    "last_verified_at": item.last_verified_at,
+                    "namespace": item.namespace,
                     "sources": await self.repositories.sources.list(item.id),
                 }
             )
@@ -127,9 +133,9 @@ class MemoryTransferService:
         if (
             not isinstance(document, dict)
             or document.get("format") != EXPORT_FORMAT
-            or document.get("version") != EXPORT_VERSION
+            or document.get("version") not in {3, EXPORT_VERSION}
         ):
-            raise ValueError("only CapsLock memory export version 3 is supported")
+            raise ValueError("only CapsLock memory export version 3 or 4 is supported")
         records = document.get("records")
         if not isinstance(records, list) or len(records) > MAX_TRANSFER_RECORDS:
             raise ValueError("memory import records must be a bounded list")
@@ -143,8 +149,16 @@ class MemoryTransferService:
                 "expires_at",
                 "origin",
                 "sources",
+                "subject",
+                "durability",
+                "why",
+                "how_to_apply",
+                "last_verified_at",
+                "namespace",
             }:
                 raise ValueError("imported memory has invalid fields")
+            if scope is MemoryScope.AGENT and not record.get("namespace"):
+                raise ValueError("agent-scope imports require a namespace")
             safe, redactions = validated_text(record.get("content"))
             rules.extend(redactions)
             output.append(
@@ -160,6 +174,24 @@ class MemoryTransferService:
                     expires_at=expiry(record.get("expires_at")),
                     origin=MemoryOrigin.IMPORTED,
                     operation="import",
+                    namespace=(
+                        str(record["namespace"])
+                        if scope is MemoryScope.AGENT and record.get("namespace")
+                        else None
+                    ),
+                    subject=str(record["subject"]) if record.get("subject") else None,
+                    durability=MemoryDurability(record.get("durability", "durable")),
+                    why=str(record["why"]) if record.get("why") else None,
+                    how_to_apply=(
+                        str(record["how_to_apply"])
+                        if record.get("how_to_apply")
+                        else None
+                    ),
+                    last_verified_at=(
+                        str(record["last_verified_at"])
+                        if record.get("last_verified_at")
+                        else None
+                    ),
                 )
             )
         self.event("memory_imported", scope=scope.value, count=len(output))
@@ -189,5 +221,7 @@ def _scope_keys(
     if scope is MemoryScope.GLOBAL:
         return None, None
     if scope is MemoryScope.WORKSPACE:
+        return workspace, None
+    if scope is MemoryScope.AGENT:
         return workspace, None
     return workspace, session_id

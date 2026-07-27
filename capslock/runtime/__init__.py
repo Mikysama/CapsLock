@@ -1,7 +1,7 @@
 """Asynchronous CapsLock runtime."""
 
 from .agent import AgentRuntimeError, AgentSession
-from .engine import RunEngine, RunRequest
+from .engine import MemoryRunMode, RunEngine, RunRequest
 from .model import (
     AsyncOpenAIChatModel,
     ChatModel,
@@ -35,5 +35,6 @@ __all__ = [
     "RunGovernor",
     "RunEngine",
     "RunRequest",
+    "MemoryRunMode",
     "open_model_session",
 ]

@@ -226,7 +226,17 @@ def _initial_config(**values: object) -> str:
     document.add("models", models)
     document.add("routing", {"reasoning": ["primary"], "fast": ["primary"]})
     document.add("runtime", {"permission_mode": values["permission"]})
-    document.add("memory", {"enabled": values["memory_enabled"]})
+    memory_enabled = bool(values["memory_enabled"])
+    document.add(
+        "memory",
+        {
+            "capture_enabled": memory_enabled,
+            "recall_enabled": memory_enabled,
+            "manual_write_enabled": memory_enabled,
+            "maintenance_enabled": memory_enabled,
+            "policy": "automatic" if memory_enabled else "off",
+        },
+    )
     document.add(
         "lsp",
         {

@@ -5,11 +5,19 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from ...domain import MemoryInfo, MemoryOrigin, MemoryScope, MemoryStatus, MemoryType
+from ...domain import (
+    MemoryDurability,
+    MemoryInfo,
+    MemoryOrigin,
+    MemoryScope,
+    MemoryStatus,
+    MemoryType,
+)
 
-MEMORY_COLUMNS = """m.id,m.scope,m.workspace_key,m.session_id,m.status,m.current_revision,m.origin,
+MEMORY_COLUMNS = """m.id,m.scope,m.workspace_key,m.session_id,m.namespace,m.status,m.current_revision,m.origin,
  m.source_valid,m.created_at AS memory_created_at,m.updated_at,m.purged_at,
- r.content,r.memory_type,r.source_kind,r.source_ref,r.confidence,r.expires_at"""
+ r.content,r.memory_type,r.source_kind,r.source_ref,r.confidence,r.expires_at,
+ r.subject,r.durability,r.why,r.how_to_apply,r.last_verified_at"""
 SELECT_MEMORY = f"""SELECT {MEMORY_COLUMNS}
  FROM memories m LEFT JOIN memory_revisions r ON r.memory_id=m.id AND r.revision=m.current_revision"""
 
@@ -60,4 +68,10 @@ def memory_from_row(row) -> MemoryInfo:
         purged_at=row["purged_at"],
         origin=MemoryOrigin(row["origin"]),
         source_valid=bool(row["source_valid"]),
+        namespace=row["namespace"],
+        subject=row["subject"],
+        durability=MemoryDurability(row["durability"] or "durable"),
+        why=row["why"],
+        how_to_apply=row["how_to_apply"],
+        last_verified_at=row["last_verified_at"],
     )

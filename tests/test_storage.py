@@ -206,8 +206,8 @@ def test_current_state_reopens_without_mutation(tmp_path: Path) -> None:
         try:
             workspace_version = (await workspace.fetch_one("PRAGMA user_version"))[0]
             memory_version = (await memory.fetch_one("PRAGMA user_version"))[0]
-            assert workspace_version == WORKSPACE_SCHEMA_VERSION == 9
-            assert memory_version == MEMORY_SCHEMA_VERSION == 3
+            assert workspace_version == WORKSPACE_SCHEMA_VERSION == 10
+            assert memory_version == MEMORY_SCHEMA_VERSION == 4
         finally:
             await workspace.close()
             await memory.close()
@@ -219,7 +219,7 @@ def test_current_state_reopens_without_mutation(tmp_path: Path) -> None:
             assert (await workspace.fetch_one("PRAGMA user_version"))[
                 0
             ] == WORKSPACE_SCHEMA_VERSION
-            assert (await memory.fetch_one("PRAGMA user_version"))[0] == 3
+            assert (await memory.fetch_one("PRAGMA user_version"))[0] == 4
         finally:
             await workspace.close()
             await memory.close()

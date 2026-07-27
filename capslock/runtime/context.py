@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import asyncio
 from dataclasses import dataclass
 from typing import Any
 
@@ -78,22 +79,51 @@ class ContextBudgetManager:
         run_id: str,
         instructions: str,
         summarizer: ChatModel,
+        memory_enabled: bool = True,
     ) -> ContextBuildResult:
         if self.failures >= self.settings.max_compaction_failures:
             raise ContextBudgetExceeded("context compaction failure limit reached")
-        excluded = (
-            await self.memory.excluded_runs() if self.memory is not None else set()
-        )
-        entries = await self.sessions.context_entries(
-            session_id, excluded_run_ids=excluded | {run_id}
-        )
-        memory_context, recalls = "", []
-        if self.memory is not None:
-            memory_context, recalls = await self.memory.recall_context(
-                question, run_id=run_id
+
+        async def history():
+            try:
+                excluded = (
+                    await self.memory.excluded_runs()
+                    if self.memory is not None and memory_enabled
+                    else set()
+                )
+            except Exception:
+                excluded = set()
+            return await self.sessions.context_entries(
+                session_id, excluded_run_ids=excluded | {run_id}
             )
+
+        history_task = asyncio.create_task(history())
+        recall_task = (
+            asyncio.create_task(self.memory.recall_context(question, run_id=run_id))
+            if self.memory is not None and memory_enabled
+            else None
+        )
+        entries = await history_task
+        try:
+            memory_context, recalls = await recall_task if recall_task else ("", [])
+        except Exception:
+            memory_context, recalls = "", []
+        try:
+            memory_revision_digest = (
+                await self.memory.revision_digest()
+                if self.memory is not None and memory_enabled
+                else ""
+            )
+        except Exception:
+            memory_revision_digest = ""
         system = instructions + ("\n\n" + memory_context if memory_context else "")
         active = await self.compactions.active(session_id)
+        if (
+            active is not None
+            and active.memory_revision_digest != memory_revision_digest
+        ):
+            await self.compactions.invalidate(active.id)
+            active = None
         if active is not None and active.last_message_id is not None:
             active_entries = [
                 item for item in entries if int(item["id"]) > active.last_message_id
@@ -145,7 +175,9 @@ class ContextBudgetManager:
             self.failures += 1
             raise ContextBudgetExceeded("recent turns exceed the model context budget")
         digest = _digest(older)
-        cached = await self.compactions.matching(session_id, digest)
+        cached = await self.compactions.matching(
+            session_id, digest, memory_revision_digest
+        )
         compaction_id: str | None = None
         if cached is not None:
             summary = cached.summary
@@ -174,6 +206,7 @@ class ContextBudgetManager:
                 target_tokens=int(self.input_budget * self.settings.target_ratio),
                 model_profile=self.model_profile,
                 source_digest=digest,
+                memory_revision_digest=memory_revision_digest,
                 activate=True,
             )
             compaction_id = cached.id

@@ -113,14 +113,20 @@ def resolve_settings(
         tools=ToolSettings(
             schema_budget_tokens=int(group("tools").get("schema_budget_tokens", 8_000)),
             max_read_concurrency=int(group("tools").get("max_read_concurrency", 4)),
-            aggregate_result_bytes=int(group("tools").get("aggregate_result_bytes", 65_536)),
+            aggregate_result_bytes=int(
+                group("tools").get("aggregate_result_bytes", 65_536)
+            ),
         ),
         shell=ShellSettings(
             enabled=boolean(group("shell").get("enabled", True)),
-            default_timeout_seconds=float(group("shell").get("default_timeout_seconds", 120)),
+            default_timeout_seconds=float(
+                group("shell").get("default_timeout_seconds", 120)
+            ),
             max_timeout_seconds=float(group("shell").get("max_timeout_seconds", 600)),
             classifier_enabled=boolean(group("shell").get("classifier_enabled", True)),
-            classifier_threshold=float(group("shell").get("classifier_threshold", 0.95)),
+            classifier_threshold=float(
+                group("shell").get("classifier_threshold", 0.95)
+            ),
             background_enabled=boolean(group("shell").get("background_enabled", True)),
             output_bytes=int(group("shell").get("output_bytes", 100_000)),
         ),
@@ -128,15 +134,11 @@ def resolve_settings(
             auto_compact=boolean(group("context").get("auto_compact", True)),
             trigger_ratio=float(group("context").get("trigger_ratio", 0.80)),
             target_ratio=float(group("context").get("target_ratio", 0.60)),
-            preserve_recent_turns=int(
-                group("context").get("preserve_recent_turns", 6)
-            ),
+            preserve_recent_turns=int(group("context").get("preserve_recent_turns", 6)),
             inline_tool_result_bytes=int(
                 group("context").get("inline_tool_result_bytes", 16_384)
             ),
-            summary_max_tokens=int(
-                group("context").get("summary_max_tokens", 2_048)
-            ),
+            summary_max_tokens=int(group("context").get("summary_max_tokens", 2_048)),
             max_compaction_failures=int(
                 group("context").get("max_compaction_failures", 3)
             ),
@@ -150,9 +152,7 @@ def resolve_settings(
             request_timeout_seconds=float(
                 group("lsp").get("request_timeout_seconds", 15)
             ),
-            idle_timeout_seconds=float(
-                group("lsp").get("idle_timeout_seconds", 300)
-            ),
+            idle_timeout_seconds=float(group("lsp").get("idle_timeout_seconds", 300)),
             servers=lsp_servers,
         ),
         documents=DocumentSettings(
@@ -163,9 +163,7 @@ def resolve_settings(
             max_notebook_bytes=int(
                 group("documents").get("max_notebook_bytes", 10 * 1024 * 1024)
             ),
-            max_notebook_cells=int(
-                group("documents").get("max_notebook_cells", 50)
-            ),
+            max_notebook_cells=int(group("documents").get("max_notebook_cells", 50)),
             max_cell_output_bytes=int(
                 group("documents").get("max_cell_output_bytes", 65_536)
             ),
@@ -202,7 +200,15 @@ def resolve_settings(
             value("runtime", "CAPSLOCK_PERMISSION_MODE", "approve_for_me")
         ),
         memory=MemorySettings(
-            project_write_enabled=boolean(group("memory").get("enabled", True)),
+            capture_enabled=boolean(group("memory").get("capture_enabled", True)),
+            recall_enabled=boolean(group("memory").get("recall_enabled", True)),
+            manual_write_enabled=boolean(
+                group("memory").get("manual_write_enabled", True)
+            ),
+            maintenance_enabled=boolean(
+                group("memory").get("maintenance_enabled", True)
+            ),
+            policy=str(group("memory").get("policy", "automatic")),
             database=layout.user.memory,
         ),
         providers=providers,

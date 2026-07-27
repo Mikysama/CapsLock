@@ -88,7 +88,10 @@ class RecallRepository(Repository):
                 "DELETE FROM memory_recall_items WHERE run_id=?", (run_id,)
             )
             await connection.executemany(
-                "INSERT INTO memory_recall_items VALUES(?,?,?,?,?,?,?)",
+                """INSERT INTO memory_recall_items(
+                   run_id,memory_id,revision,score,lexical_rank,semantic_rank,cosine,
+                   retrieval_score,selected_reason,filter_reason,reasons_json)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
                 [
                     (
                         run_id,
@@ -97,6 +100,10 @@ class RecallRepository(Repository):
                         hit.score,
                         hit.lexical_rank,
                         hit.semantic_rank,
+                        hit.cosine,
+                        hit.retrieval_score,
+                        hit.selected_reason,
+                        hit.filter_reason,
                         json.dumps(hit.reasons, ensure_ascii=False),
                     )
                     for hit in hits
@@ -115,7 +122,8 @@ class RecallRepository(Repository):
                 return []
             run_id = str(row[0])
         rows = await self.all(
-            f"""SELECT {MEMORY_COLUMNS},i.score,i.lexical_rank,i.semantic_rank,i.reasons_json
+            f"""SELECT {MEMORY_COLUMNS},i.score,i.lexical_rank,i.semantic_rank,i.cosine,
+                       i.retrieval_score,i.selected_reason,i.filter_reason,i.reasons_json
                 FROM memories m LEFT JOIN memory_revisions r ON r.memory_id=m.id AND r.revision=m.current_revision
                 JOIN memory_recall_items i ON i.memory_id=m.id AND i.revision=m.current_revision
                 JOIN memory_recalls rr ON rr.run_id=i.run_id
@@ -129,6 +137,10 @@ class RecallRepository(Repository):
                 row["lexical_rank"],
                 row["semantic_rank"],
                 tuple(json.loads(row["reasons_json"])),
+                row["cosine"],
+                float(row["retrieval_score"]),
+                row["selected_reason"],
+                row["filter_reason"],
             )
             for row in rows
         ]

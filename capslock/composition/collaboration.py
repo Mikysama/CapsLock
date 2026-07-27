@@ -27,6 +27,7 @@ def build_collaboration(
     interaction: RunInteraction,
     repository: Any,
     open_application: Any,
+    memory: Any = None,
 ) -> CollaborationService | None:
     if child_mode or not settings.agents.enabled:
         return None
@@ -48,8 +49,13 @@ def build_collaboration(
         child_runner=runner,
         verifier=AgentOutputVerifier(),
         background_enabled=settings.agents.background_enabled,
+        proposal_handler=(
+            memory.promote_agent_proposals if memory is not None else None
+        ),
     )
     runner.collaboration = service
+    if memory is not None:
+        runner.memory_loader = memory.agent_memories
     return service
 
 

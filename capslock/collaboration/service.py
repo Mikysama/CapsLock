@@ -42,6 +42,10 @@ class CollaborationService:
         child_runner: ChildRunner | None = None,
         verifier: AgentOutputVerifier | None = None,
         background_enabled: bool = True,
+        proposal_handler: Callable[
+            [AgentTaskContract, ValidatedAgentOutput], Awaitable[None]
+        ]
+        | None = None,
     ) -> None:
         if max_children < 1 or max_concurrency < 1:
             raise ValueError("collaboration limits must be positive")
@@ -55,6 +59,7 @@ class CollaborationService:
         self.child_runner = child_runner
         self.verifier = verifier or AgentOutputVerifier()
         self.background_enabled = background_enabled
+        self.proposal_handler = proposal_handler
         self._tasks: dict[str, asyncio.Task[ValidatedAgentOutput]] = {}
         self._contracts: dict[str, AgentTaskContract] = {}
 
@@ -383,6 +388,13 @@ class CollaborationService:
             return rejected
         await self.repository.set_state(contract.task_id, AgentTaskState.COMPLETED)
         await self.repository.record_output(verified)
+        if verified.memory_proposals and self.proposal_handler is not None:
+            try:
+                await self.proposal_handler(contract, verified)
+            except Exception:
+                # Promotion is an optional parent-side persistence path and must not
+                # invalidate an otherwise verified child result.
+                pass
         await self._audit(
             contract,
             AgentMessageKind.OUTPUT_VERIFIED,

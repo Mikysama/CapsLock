@@ -220,6 +220,40 @@ class EmbeddingService:
             for rank, (identifier, _) in enumerate(scores[:limit], start=1)
         }
 
+    async def semantic_matches(
+        self, query: str, *, limit: int = 20, run_id: str | None = None
+    ) -> dict[str, tuple[int, float]]:
+        """Return semantic rank and the actual cosine using one vector-table read."""
+        configured = await self.provider()
+        if configured is None:
+            return {}
+        backend, model, provider = configured
+        query_vector = (
+            await self._embed(provider, [query], operation="recall", run_id=run_id)
+        )[0]
+        vectors = await self.repositories.embeddings.list(
+            workspace=self.workspace,
+            session_id=self.session_id,
+            backend=backend,
+            model=model,
+        )
+
+        def rank() -> dict[str, tuple[int, float]]:
+            scores = [
+                (
+                    item.id,
+                    cosine_similarity(query_vector, unpack_vector(packed, dimensions)),
+                )
+                for item, packed, dimensions in vectors
+            ]
+            scores.sort(key=lambda pair: (-pair[1], pair[0]))
+            return {
+                identifier: (position, score)
+                for position, (identifier, score) in enumerate(scores[:limit], 1)
+            }
+
+        return await asyncio.to_thread(rank)
+
     async def _embed(
         self,
         provider: EmbeddingProvider,

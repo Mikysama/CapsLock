@@ -92,6 +92,8 @@ async def _builtin(context, parts, raw):
         await _queue(context, parts)
     elif name == "/memory":
         await memory_command(context, raw)
+    elif name == "/instructions":
+        await _instructions(context, parts)
     elif name == "/skills":
         await skills_command(context, raw)
     elif name == "/agents":
@@ -110,6 +112,37 @@ async def _builtin(context, parts, raw):
         session = await context.session.rename(" ".join(parts[1:]))
         context.console.print(f"[success]Renamed:[/] {session.title}")
     return CommandOutcome()
+
+
+async def _instructions(context: CliContext, parts: list[str]) -> None:
+    operation = parts[1] if len(parts) > 1 else "list"
+    loader = context.session.instruction_loader
+    if operation == "reload":
+        bundle = await __import__("asyncio").to_thread(
+            loader.load, context.session.workspace
+        )
+        context.console.print(
+            f"[success]Reloaded instructions:[/] {bundle.digest[:12]}"
+        )
+    elif operation in {"list", "explain"}:
+        bundle = loader.last
+        if not bundle.records:
+            bundle = await __import__("asyncio").to_thread(
+                loader.load, context.session.workspace
+            )
+        for item in bundle.records:
+            if operation == "list" and not item.loaded:
+                continue
+            detail = f"tokens={item.token_count} sha256={item.sha256[:12]} scope={item.scope}"
+            if item.match_rule:
+                detail += f" match={item.match_rule}"
+            if item.diagnostic:
+                detail += f" diagnostic={item.diagnostic}"
+            context.console.print(
+                f"{item.path} {'loaded' if item.loaded else 'skipped'} {detail}"
+            )
+    else:
+        raise ValueError("usage: /instructions [list|explain|reload]")
 
 
 async def _status(context: CliContext) -> None:

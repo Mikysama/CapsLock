@@ -6,6 +6,7 @@ import uuid
 
 from ...domain import (
     MemoryInfo,
+    MemoryDurability,
     MemoryOrigin,
     MemoryScope,
     MemoryStatus,
@@ -40,25 +41,39 @@ class MemoryLifecycleRepository(Repository):
         operation: str = "create",
         extraction_id: str | None = None,
         run_id: str | None = None,
+        namespace: str | None = None,
+        subject: str | None = None,
+        durability: MemoryDurability = MemoryDurability.DURABLE,
+        why: str | None = None,
+        how_to_apply: str | None = None,
+        last_verified_at: str | None = None,
+        source_message_id: str | None = None,
+        source_evidence_id: str | None = None,
+        source_quote: str | None = None,
+        source_direct: bool = False,
+        source_verified: bool = False,
     ) -> MemoryInfo:
         identifier, created = f"mem_{uuid.uuid4().hex}", timestamp()
         async with self.database.transaction() as connection:
             await connection.execute(
-                """INSERT INTO memories(id,scope,workspace_key,session_id,status,current_revision,origin,created_at,updated_at)
-                   VALUES(?,?,?,?, 'active',1,?,?,?)""",
+                """INSERT INTO memories(id,scope,workspace_key,session_id,namespace,status,current_revision,origin,created_at,updated_at)
+                   VALUES(?,?,?,?,?,'active',1,?,?,?)""",
                 (
                     identifier,
                     scope.value,
                     workspace,
                     session_id,
+                    namespace,
                     origin.value,
                     created,
                     created,
                 ),
             )
             await connection.execute(
-                """INSERT INTO memory_revisions(memory_id,revision,operation,content,memory_type,source_kind,source_ref,confidence,expires_at,created_at)
-                   VALUES(?,1,?,?,?,?,?,?,?,?)""",
+                """INSERT INTO memory_revisions(memory_id,revision,operation,content,memory_type,
+                   source_kind,source_ref,confidence,expires_at,subject,durability,why,
+                   how_to_apply,last_verified_at,created_at)
+                   VALUES(?,1,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     identifier,
                     operation,
@@ -68,6 +83,11 @@ class MemoryLifecycleRepository(Repository):
                     source_ref,
                     confidence,
                     expires_at,
+                    subject,
+                    durability.value,
+                    why,
+                    how_to_apply,
+                    last_verified_at,
                     created,
                 ),
             )
@@ -76,8 +96,9 @@ class MemoryLifecycleRepository(Repository):
                 (identifier, content),
             )
             await connection.execute(
-                """INSERT INTO memory_sources(memory_id,source_kind,source_ref,extraction_id,workspace_key,session_id,run_id,created_at)
-                   VALUES(?,?,?,?,?,?,?,?)""",
+                """INSERT INTO memory_sources(memory_id,source_kind,source_ref,extraction_id,
+                   workspace_key,session_id,run_id,message_id,evidence_id,quote,direct,verified,created_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     identifier,
                     source_kind,
@@ -86,6 +107,11 @@ class MemoryLifecycleRepository(Repository):
                     workspace,
                     session_id,
                     run_id,
+                    source_message_id,
+                    source_evidence_id,
+                    source_quote,
+                    int(source_direct),
+                    int(source_verified),
                     created,
                 ),
             )
@@ -218,6 +244,22 @@ class MemoryLifecycleRepository(Repository):
             await connection.execute(
                 "DELETE FROM memory_revisions WHERE memory_id=?", (memory_id,)
             )
+            rows = await (
+                await connection.execute(
+                    "SELECT id,payload_json FROM memory_jobs WHERE status IN ('queued','running') AND payload_json LIKE ?",
+                    (f"%{memory_id}%",),
+                )
+            ).fetchall()
+            for row in rows:
+                import json
+
+                await connection.execute(
+                    "UPDATE memory_jobs SET payload_json=? WHERE id=?",
+                    (
+                        json.dumps({"redacted": True, "purged_memory_id": memory_id}),
+                        row["id"],
+                    ),
+                )
             changed = timestamp()
             await connection.execute(
                 "UPDATE memories SET status='purged',current_revision=NULL,purged_at=?,updated_at=? WHERE id=?",

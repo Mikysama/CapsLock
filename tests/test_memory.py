@@ -12,6 +12,7 @@ from capslock.domain import (
     EmbeddingBackend,
     MemoryCandidateStatus,
     MemoryOrigin,
+    MemoryPolicy,
     MemoryScope,
     MemoryStatus,
     MemoryType,
@@ -244,6 +245,7 @@ def test_candidate_extraction_review_and_adoption(
             service = MemoryService(
                 repositories, workspace=tmp_path, session_id="session"
             )
+            await service.set_policy(MemoryPolicy.REVIEW)
             model = FakeChatModel(
                 answer(
                     json.dumps(
@@ -326,5 +328,43 @@ def test_memory_database_file_permissions(tmp_path: Path) -> None:
         repositories = await MemoryRepositories.open(path)
         await repositories.close()
         assert path.stat().st_mode & 0o777 == 0o600
+
+    asyncio.run(scenario())
+
+
+def test_version_three_memory_export_imports_with_safe_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        monkeypatch.setenv("CAPSLOCK_HOME", str(tmp_path / "home"))
+        repositories = await MemoryRepositories.open(tmp_path / "memory.sqlite3")
+        try:
+            service = MemoryService(repositories, workspace=tmp_path, session_id="s")
+            (tmp_path / "exports").mkdir()
+            document = {
+                "format": EXPORT_FORMAT,
+                "version": 3,
+                "scope": "workspace",
+                "records": [
+                    {
+                        "type": "fact",
+                        "content": "Imported legacy fact",
+                        "confidence": 0.9,
+                        "expires_at": None,
+                        "origin": "manual",
+                        "sources": [],
+                    }
+                ],
+                "candidates": [],
+            }
+            path = tmp_path / "exports" / "old.json"
+            path.write_text(json.dumps(document), encoding="utf-8")
+            imported, _ = await service.import_json(
+                MemoryScope.WORKSPACE, "exports/old.json"
+            )
+            assert imported[0].subject is None
+            assert imported[0].durability.value == "durable"
+        finally:
+            await repositories.close()
 
     asyncio.run(scenario())

@@ -10,6 +10,7 @@ class MemoryScope(StrEnum):
     GLOBAL = "global"
     WORKSPACE = "workspace"
     SESSION = "session"
+    AGENT = "agent"
 
 
 class MemoryType(StrEnum):
@@ -18,6 +19,8 @@ class MemoryType(StrEnum):
     DECISION = "decision"
     TODO = "todo"
     NOTE = "note"
+    PROJECT = "project"
+    TEMPORARY = "temporary"
 
 
 class MemoryStatus(StrEnum):
@@ -48,6 +51,32 @@ class MemoryOrigin(StrEnum):
     AUTOMATIC = "automatic"
 
 
+class MemoryDurability(StrEnum):
+    TEMPORARY = "temporary"
+    SESSION = "session"
+    PROJECT = "project"
+    DURABLE = "durable"
+
+
+class MemoryRelationType(StrEnum):
+    DUPLICATE = "duplicate"
+    CONFLICT = "conflict"
+    SUPERSEDES = "supersedes"
+
+
+class MemoryJobType(StrEnum):
+    EXTRACT_RUN = "extract_run"
+    CONSOLIDATE_WORKSPACE = "consolidate_workspace"
+    PROMOTE_AGENT_MEMORY = "promote_agent_memory"
+
+
+class MemoryJobStatus(StrEnum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
 class EmbeddingBackend(StrEnum):
     OFF = "off"
     FASTEMBED = "fastembed"
@@ -74,6 +103,12 @@ class MemoryInfo:
     purged_at: str | None = None
     origin: MemoryOrigin = MemoryOrigin.MANUAL
     source_valid: bool = True
+    namespace: str | None = None
+    subject: str | None = None
+    durability: MemoryDurability = MemoryDurability.DURABLE
+    why: str | None = None
+    how_to_apply: str | None = None
+    last_verified_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -94,6 +129,16 @@ class MemoryCandidateInfo:
     adopted_memory_id: str | None
     created_at: str
     decided_at: str | None = None
+    source_message_id: str | None = None
+    source_evidence_id: str | None = None
+    source_quote: str | None = None
+    direct: bool = False
+    verified: bool = False
+    namespace: str | None = None
+    subject: str | None = None
+    durability: MemoryDurability = MemoryDurability.DURABLE
+    why: str | None = None
+    how_to_apply: str | None = None
 
 
 @dataclass(frozen=True)
@@ -103,3 +148,7 @@ class MemoryRecallHit:
     lexical_rank: int | None
     semantic_rank: int | None
     reasons: tuple[str, ...]
+    cosine: float | None = None
+    retrieval_score: float = 0.0
+    selected_reason: str | None = None
+    filter_reason: str | None = None

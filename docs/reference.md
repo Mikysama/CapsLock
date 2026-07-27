@@ -4,7 +4,7 @@
 
 ## 稳定契约
 
-CapsLock 2.4.0 支持 Linux/macOS 与 Python 3.12。当前开发协议为 `config_version = 5`、workspace schema 9、memory schema 3、portable archive 4、session export 4、JSONL schema 3 和插件 manifest/protocol/grant 4。config v3/v4 与 workspace schema v6/v7/v8 使用 backup-first 自动迁移；删除的 Python 接口不提供兼容入口。
+CapsLock 2.5.0 支持 Linux/macOS 与 Python 3.12。当前开发协议为 `config_version = 6`、workspace schema 10、memory schema 4、portable archive 4、session export 4、JSONL schema 3 和插件 manifest/protocol/grant 4。config v3-v5、workspace schema v6-v9 与 memory schema v3 使用 backup-first 自动迁移。
 
 公开运行入口为 `AgentSession.run_stream(RunRequest)`。CLI 通过应用查询面读取状态，不应依赖 repository 聚合对象。
 
@@ -99,7 +99,8 @@ pending -> approved -> running -> completed
 | `/permissions [full|approve|ask]` | 无参数时打开权限选择框；带参数时直接切换。 |
 | `/approvals` | 处理非交互运行留下的待审批动作。 |
 | `/queue` | 查看队列；`start <id>` 显式启动导入队列，另有 `move`、`cancel` 和 `retry`。 |
-| `/memory ...` | 管理记忆、候选、召回、导入导出和 embeddings。 |
+| `/memory ...` | 管理记忆、独立 capture/recall 开关、候选、整理、导入导出和 embeddings。 |
+| `/instructions ...` | 列出、解释或重新加载受控仓库指令。 |
 | `/skills ...` | 列出、查看、校验、启用或禁用 Skill。 |
 | `/agents [inspect|cancel|cleanup <id>]` | 查看、取消或清理本机会话的子 Agent。 |
 | `/sources` | 查看当前会话 Web 来源。 |
@@ -219,7 +220,7 @@ ToolLoop 每个模型或工具阶段写 `run_steps`。只有 completed 且带 ch
 
 调度器按契约顺序返回结果，兄弟任务失败不会互相取消，父运行取消会传播到全部未完成子任务。子快照排除 `.git`、`.capslock`、环境文件和符号链接，并使用自己的 workspace/memory 数据库。`AgentOutputVerifier` 校验输出对象、allowlist 路径、必需检查、文件大小和 SHA-256；未通过的输出只返回失败诊断。
 
-workspace schema 9 使用 Agent、Tool invocation、input request、task dependency、session lineage、active compaction、context snapshot 和 session worktree 表保存可恢复状态、审计与验证结果。portable archive 默认不包含 artifact 正文。
+workspace schema 10 使用 Agent、Tool invocation、input request、task dependency、session lineage、active compaction、context snapshot 和 session worktree 表保存可恢复状态、审计与验证结果。portable archive 默认不包含 artifact 正文。
 
 ## 记忆契约
 
@@ -231,18 +232,19 @@ workspace schema 9 使用 Agent、Tool invocation、input request、task depende
 - `memory_sources`：来源有效性。
 - `memory_embeddings`：revision 绑定的向量。
 - `memory_recalls` / `memory_recall_items`：run 级召回解释。
+- `memory_relations` / `memory_jobs`：重复、冲突、替代关系与持久后台作业。
 - `memory_audit`：包括 purge 后仍保留的操作轨迹。
 - `memory_fts`：仅索引当前 active revision。
 
-默认策略为 `review`。`automatic` 只接受用户直接陈述、无风险、workspace/session 作用域的新候选；global、冲突与推断仍要求审核。外部网页或 MCP 内容不会直接成为记忆。
+默认策略为 `automatic`。自动采用只接受用户直接陈述或带有效 evidence/source 的工具事实、置信度至少 0.90、无风险且属于 workspace/session/agent 作用域的新候选；global、冲突、推断与可从仓库重新推导的内容仍要求审核或丢弃。外部网页或 MCP 内容不会仅凭模型总结直接成为记忆。
 
-记忆 context 最多 5 条、合计最多 4 KiB，并标记为不可信 JSON 数据。`purge` 删除全部 revision 正文、FTS、向量和来源。导入只接受 `capslock-memory-export` version 3。
+记忆 context 最多 5 条、合计最多 4 KiB，并标记为不可信 JSON 数据。召回要求 lexical top-10 或 cosine ≥ 0.45 且最终分数 ≥ 0.50；超长内容按 UTF-8 截断。`purge` 删除全部 revision 正文、FTS、向量、来源和作业关联正文。导入接受 `capslock-memory-export` version 3/4。
 
 ## 数据库与布局
 
 工作区数据库使用 application ID `0x434C4B32`，记忆数据库使用 `0x434C4D32`。两者开启 foreign keys、WAL 和 5 秒 busy timeout；记忆库额外开启 secure delete 并设置文件权限 `0600`。
 
-应用先读取 application ID 和 schema version，确认是当前格式或可迁移的 v6/v7/v8 后才切换 WAL。workspace schema 为 9，memory schema 为 3；其他 application ID 或 schema 只报错，不修改原数据库。
+应用先读取 application ID 和 schema version，确认是当前格式或可迁移格式后才切换 WAL。workspace schema 为 10，memory schema 为 4；其他 application ID 或 schema 只报错，不修改原数据库。
 
 portable import 使用 archive ID 幂等记录。相同 ID 与内容跳过，同 ID 不同内容确定性重映射并重写引用。running run 转为 interrupted，approved/running action 转为 pending；导入的历史副作用不能在目标工作区执行 undo。
 

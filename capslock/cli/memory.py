@@ -68,12 +68,24 @@ async def memory_command(context: CliContext, text: str) -> None:
                 await memory.set_policy(MemoryPolicy(arguments[0]))
             view = await memory.settings()
             console.print(
-                f"policy={view.policy.value} writes={view.write_enabled} recall={view.recall_enabled} embeddings={view.embedding_backend.value}"
+                f"policy={view.policy.value} writes={view.write_enabled} capture={view.capture_enabled} recall={view.recall_enabled} maintenance={view.maintenance_enabled} embeddings={view.embedding_backend.value}"
             )
-        elif operation == "enable":
-            await memory.set_local_write_enabled(True)
-        elif operation in {"disable", "off"}:
+        elif operation in {"on", "enable"}:
+            await memory.set_capture_enabled(True)
+            await memory.set_recall_enabled(True)
+            if operation == "enable":
+                await memory.set_local_write_enabled(True)
+        elif operation == "disable":
             await memory.set_local_write_enabled(False)
+        elif operation == "off":
+            await memory.set_capture_enabled(False)
+            await memory.set_recall_enabled(False)
+        elif operation in {"capture", "recall"}:
+            if len(arguments) != 1 or arguments[0] not in {"on", "off"}:
+                raise ValueError(f"usage: /memory {operation} on|off")
+            await getattr(memory, f"set_{operation}_enabled")(arguments[0] == "on")
+        elif operation == "maintain":
+            await _maintain(context, arguments)
         elif operation == "candidates":
             render_candidates(
                 console, await memory.candidates(include_all="--all" in arguments)
@@ -83,8 +95,10 @@ async def memory_command(context: CliContext, text: str) -> None:
         elif operation == "context":
             hits = await memory.context(arguments[0] if arguments else None)
             for hit in hits:
+                decision = hit.selected_reason or hit.filter_reason or "unclassified"
                 console.print(
-                    f"{hit.memory.id[:12]} score={hit.score:.4f} {'; '.join(hit.reasons)}"
+                    f"{hit.memory.id[:12]} score={hit.score:.4f} decision={decision} "
+                    f"{'; '.join(hit.reasons)}"
                 )
         elif operation == "embeddings":
             await _embeddings(context, arguments)
@@ -176,3 +190,30 @@ def _one(arguments: list[str], operation: str) -> str:
     if len(arguments) != 1:
         raise ValueError(f"usage: /memory {operation} <id>")
     return arguments[0]
+
+
+async def _maintain(context: CliContext, arguments: list[str]) -> None:
+    memory = context.session.memory
+    operation = arguments[0] if arguments else "status"
+    if operation == "status":
+        status = await memory.maintenance_status()
+        context.console.print(
+            " ".join(f"{key}={value}" for key, value in status.items())
+        )
+    elif operation == "run":
+        context.console.print(str(await memory.run_maintenance()))
+    elif operation == "review":
+        render_candidates(context.console, await memory.candidates())
+        for item in await memory.maintenance_reviews():
+            if "relation" in item:
+                context.console.print(
+                    f"relation={item['relation']} source={str(item['source_memory_id'])[:12]} "
+                    f"target={str(item['target_memory_id'])[:12]} confidence={item['confidence']}"
+                )
+            else:
+                context.console.print(
+                    f"proposal={item['proposal_type']} memories={item['memory_ids_json']} "
+                    f"confidence={item['confidence']}"
+                )
+    else:
+        raise ValueError("usage: /memory maintain status|run|review")

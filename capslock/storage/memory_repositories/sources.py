@@ -3,12 +3,24 @@
 from __future__ import annotations
 
 from typing import Any
+import hashlib
 
 from ...domain import MemoryInfo
 from .core import Repository, timestamp
 
 
 class MemorySourceRepository(Repository):
+    async def revision_digest(self, *, workspace: str, session_id: str) -> str:
+        rows = await self.all(
+            """SELECT a.run_id,a.memory_id,a.revision,m.current_revision,m.status,m.source_valid
+               FROM memory_accesses a JOIN memories m ON m.id=a.memory_id
+               WHERE a.workspace_key=? AND a.session_id=?
+               ORDER BY a.run_id,a.memory_id,a.revision""",
+            (workspace, session_id),
+        )
+        payload = "\n".join("|".join(str(value) for value in row) for row in rows)
+        return hashlib.sha256(payload.encode()).hexdigest()
+
     async def record_access(
         self,
         memories: list[MemoryInfo],
@@ -29,7 +41,12 @@ class MemorySourceRepository(Repository):
     async def excluded_runs(self, *, workspace: str, session_id: str) -> set[str]:
         rows = await self.all(
             """SELECT DISTINCT a.run_id FROM memory_accesses a JOIN memories m ON m.id=a.memory_id
-               WHERE a.workspace_key=? AND a.session_id=? AND m.status!='active'""",
+               WHERE a.workspace_key=? AND a.session_id=? AND (
+                 m.status!='active' OR a.revision<>m.current_revision OR
+                 (m.origin='automatic' AND NOT EXISTS(
+                   SELECT 1 FROM memory_sources s WHERE s.memory_id=m.id AND s.valid=1
+                 ))
+               )""",
             (workspace, session_id),
         )
         return {str(row[0]) for row in rows}
@@ -62,8 +79,9 @@ class MemorySourceRepository(Repository):
 
     async def add(self, memory_id: str, **source: Any) -> None:
         await self.execute(
-            """INSERT OR IGNORE INTO memory_sources(memory_id,source_kind,source_ref,extraction_id,workspace_key,session_id,run_id,created_at)
-               VALUES(?,?,?,?,?,?,?,?)""",
+            """INSERT OR IGNORE INTO memory_sources(memory_id,source_kind,source_ref,extraction_id,
+               workspace_key,session_id,run_id,message_id,evidence_id,quote,direct,verified,created_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 memory_id,
                 source["source_kind"],
@@ -72,6 +90,11 @@ class MemorySourceRepository(Repository):
                 source.get("workspace"),
                 source.get("session_id"),
                 source.get("run_id"),
+                source.get("message_id"),
+                source.get("evidence_id"),
+                source.get("quote"),
+                int(bool(source.get("direct"))),
+                int(bool(source.get("verified"))),
                 timestamp(),
             ),
         )

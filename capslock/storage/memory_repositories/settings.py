@@ -19,6 +19,9 @@ class MemorySettingsRepository(Repository):
         assert row is not None
         return {
             "write_enabled": bool(row["write_enabled"]),
+            "capture_enabled": bool(row["capture_enabled"]),
+            "manual_write_enabled": bool(row["manual_write_enabled"]),
+            "maintenance_enabled": bool(row["maintenance_enabled"]),
             "policy": MemoryPolicy(row["policy"]),
             "recall_enabled": bool(row["recall_enabled"]),
             "embedding_backend": EmbeddingBackend(row["embedding_backend"]),
@@ -32,6 +35,9 @@ class MemorySettingsRepository(Repository):
     async def set(self, workspace: str, name: str, value: object) -> None:
         allowed = {
             "write_enabled",
+            "capture_enabled",
+            "manual_write_enabled",
+            "maintenance_enabled",
             "policy",
             "recall_enabled",
             "embedding_backend",

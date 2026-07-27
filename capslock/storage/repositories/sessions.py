@@ -141,10 +141,10 @@ class SessionRepository(Repository):
 
     async def append_message(
         self, session_id: str, run_id: str, role: str, content: str
-    ) -> None:
+    ) -> int:
         timestamp = now()
         async with self.database.transaction() as connection:
-            await connection.execute(
+            cursor = await connection.execute(
                 "INSERT INTO messages(session_id,run_id,role,content,created_at) VALUES(?,?,?,?,?)",
                 (session_id, run_id, role, content, timestamp),
             )
@@ -155,6 +155,7 @@ class SessionRepository(Repository):
             await connection.execute(
                 "UPDATE sessions SET updated_at=? WHERE id=?", (timestamp, session_id)
             )
+            return int(cursor.lastrowid)
 
     async def assistant_answers(self, session_id: str) -> list[dict[str, object]]:
         rows = await self.all(

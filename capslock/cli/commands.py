@@ -147,6 +147,7 @@ COMMANDS = (
     _spec("/approvals", "Review, approve, or reject pending actions"),
     _spec("/queue", "List, move, cancel, or retry foreground work"),
     _spec("/memory", "Manage local memory"),
+    _spec("/instructions", "Inspect loaded repository instructions"),
     _spec("/skills", "Manage local Skills"),
     _spec("/agents", "Inspect, cancel, or clean local child Agents"),
     _spec("/sources", "List external sources", group="inspect"),

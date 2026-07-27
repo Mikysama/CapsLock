@@ -6,8 +6,14 @@ import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass
+from enum import StrEnum
 
 from ..domain import AgentEvent, BudgetSnapshot, RunLimits, RunMode
+
+
+class MemoryRunMode(StrEnum):
+    DEFAULT = "default"
+    IGNORE = "ignore"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -18,6 +24,7 @@ class RunRequest:
     mode: RunMode = RunMode.INTERACTIVE
     limits: RunLimits | None = None
     authorize_limit: Callable[[BudgetSnapshot], Awaitable[bool]] | None = None
+    memory_mode: MemoryRunMode = MemoryRunMode.DEFAULT
 
 
 RunConsumer = Callable[[AgentEvent], Awaitable[None]]
@@ -53,6 +60,7 @@ class RunEngine:
                         mode=request.mode,
                         limits=request.limits,
                         authorize_limit=request.authorize_limit,
+                        memory_mode=request.memory_mode,
                         consumer=consume,
                     )
                 finally:

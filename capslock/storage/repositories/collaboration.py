@@ -192,6 +192,7 @@ class CollaborationRepository(Repository):
             usage=value.get("usage", {}),
             verified=bool(value.get("verified", False)),
             error=value.get("error"),
+            memory_proposals=tuple(value.get("memory_proposals", ())),
         )
 
     async def list_tasks(self, parent_run_id: str) -> list[dict[str, Any]]:

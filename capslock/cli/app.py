@@ -37,6 +37,11 @@ def build_parser() -> argparse.ArgumentParser:
     execute.add_argument("--max-duration-seconds", type=_positive_float)
     execute.add_argument("--max-tokens", type=_positive_int)
     execute.add_argument("--max-budget-usd", type=_positive_float)
+    execute.add_argument(
+        "--no-memory",
+        action="store_true",
+        help="Do not read, cite, or capture memory for this run",
+    )
     resume = subparsers.add_parser("resume", help="Resume a saved TUI session")
     resume.add_argument("session_id", nargs="?")
     resume.add_argument("--limit", type=int, default=20)
@@ -332,6 +337,15 @@ async def async_main(
                     application.queries,
                     application=application,
                 )
+                if (
+                    args.command != "exec"
+                    and application.session.memory is not None
+                    and await application.session.memory.automatic_capture_notice()
+                ):
+                    output.print(
+                        "[warning]Memory automatic capture is enabled.[/] "
+                        "Use [command]/memory off[/] to disable capture and recall."
+                    )
                 if args.command == "exec":
                     from .exec import run_exec
 
@@ -342,6 +356,7 @@ async def async_main(
                         spinner=not args.no_spinner,
                         quiet=args.quiet,
                         limits=_exec_limits(application.session.default_limits, args),
+                        no_memory=args.no_memory,
                     )
                 from .status import dynamic_status_supported
 

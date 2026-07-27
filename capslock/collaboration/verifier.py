@@ -32,6 +32,9 @@ class AgentOutputVerifier:
         artifacts = self._artifacts(contract, snapshot, output.get("artifacts", ()))
         checks = self._checks(contract, output.get("checks", ()))
         usage = self._usage(output.get("_usage", {}), output.get("_budget", {}))
+        proposals = self._memory_proposals(
+            contract, output.get("memory_proposals", ()), evidence
+        )
         return ValidatedAgentOutput(
             task_id=contract.task_id,
             state=AgentTaskState.COMPLETED,
@@ -41,6 +44,7 @@ class AgentOutputVerifier:
             checks=tuple(checks),
             usage=usage,
             verified=True,
+            memory_proposals=tuple(proposals),
         )
 
     def rejected(self, contract: AgentTaskContract, error: str) -> ValidatedAgentOutput:
@@ -211,6 +215,58 @@ class AgentOutputVerifier:
         if failed:
             raise VerificationError(f"required checks failed: {', '.join(failed)}")
         return records
+
+    def _memory_proposals(
+        self,
+        contract: AgentTaskContract,
+        value: Any,
+        evidence: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        records = self._records(value, "memory_proposals")
+        if records and contract.memory_namespace is None:
+            raise VerificationError("memory proposals require a memory_namespace")
+        valid_evidence = {str(item.get("id") or item.get("path")) for item in evidence}
+        output = []
+        for item in records:
+            allowed = {
+                "content",
+                "type",
+                "confidence",
+                "evidence_ids",
+                "applies_to_parent",
+                "subject",
+                "why",
+                "how_to_apply",
+                "risk_flags",
+            }
+            if set(item) - allowed or not isinstance(item.get("content"), str):
+                raise VerificationError("memory proposal has invalid fields")
+            confidence = item.get("confidence")
+            if (
+                not isinstance(confidence, (int, float))
+                or isinstance(confidence, bool)
+                or not 0 <= float(confidence) <= 1
+            ):
+                raise VerificationError("memory proposal confidence is invalid")
+            identifiers = item.get("evidence_ids", [])
+            if (
+                not isinstance(identifiers, list)
+                or not identifiers
+                or any(
+                    not isinstance(value, str) or value not in valid_evidence
+                    for value in identifiers
+                )
+            ):
+                raise VerificationError("memory proposal evidence is not verified")
+            risks = item.get("risk_flags", [])
+            if not isinstance(risks, list) or any(
+                not isinstance(risk, str) for risk in risks
+            ):
+                raise VerificationError("memory proposal risk flags are invalid")
+            output.append(
+                {**item, "confidence": float(confidence), "evidence_ids": identifiers}
+            )
+        return output
 
     def _usage(self, usage: Any, budget: Any) -> dict[str, int | float]:
         usage = usage if isinstance(usage, Mapping) else {}

@@ -95,12 +95,24 @@ class AsyncDatabase:
         if (
             self.label == "workspace"
             and app_id == self.application_id
-            and version in {6, 7, 8}
-            and self.schema_version == 9
+            and version in {6, 7, 8, 9}
+            and self.schema_version == 10
         ):
             from .upgrades import upgrade_workspace_schema
 
             await upgrade_workspace_schema(
+                self.path, self.connection, source_version=version
+            )
+            return
+        if (
+            self.label == "memory"
+            and app_id == self.application_id
+            and version == 3
+            and self.schema_version == 4
+        ):
+            from .upgrades import upgrade_memory_schema
+
+            await upgrade_memory_schema(
                 self.path, self.connection, source_version=version
             )
             return

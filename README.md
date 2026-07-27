@@ -2,7 +2,7 @@
 
 CapsLock 是一个本机工作区 Agent，用于读取和修改代码、检索证据、运行受沙箱保护的 Shell、查询代码语义，以及按审批策略访问 Web、MCP 和本地插件。Tool Runtime v2 将工具契约、参数级策略、可恢复暂停、调度、富结果与审计统一到异步执行链。
 
-当前源码版本为 `2.4.0`。本次升级引入 inline/fullscreen 共用的类型化斜杠命令系统，新增 session 导航、临时 `/btw` 问答、上下文压缩、派生与回退、worktree、统计和诊断命令。workspace schema 升至 9，portable/backup/session export 升至格式 4；config 5、memory schema 3、JSONL schema 3 和 plugin protocol 4 保持不变。架构与部署边界见 [当前开发者文档](docs/development/v2/current.md)，发布摘要见 [2.4.0 发布说明](docs/releases/v2.4.0.md)。
+当前源码版本为 `2.5.0`。记忆系统使用后台持久作业、严格来源 envelope、可解释混合召回、revision-aware compaction、长期整理、受控仓库指令和验证后的子 Agent 记忆提案。workspace schema 为 10、memory schema 为 4、config 为 6。完整升级边界见 [2.5.0 发布说明](docs/releases/v2.5.0.md)。
 
 正式支持矩阵：Linux/macOS，Python 3.12。发布 CI 会在两个操作系统组合中执行测试、构建、依赖审计和安装冒烟。
 
@@ -191,7 +191,7 @@ capslock plugin uninstall my-plugin --yes
 
 ## 记忆
 
-记忆分为 `global`、`workspace` 和 `session` 作用域。identity 保存在 `memories`，内容写入不可变的 `memory_revisions`。`forget` 与 `undo` 通过新 revision 完成；`purge` 删除正文、FTS、向量和来源，仅保留无正文 identity 与审计。
+记忆分为 `global`、`workspace`、`session` 和 namespace 隔离的 `agent` 作用域。identity 保存在 `memories`，内容写入不可变的 `memory_revisions`。普通记忆始终是不可信数据，不会变成指令。`forget` 与 `undo` 通过新 revision 完成；`purge` 删除正文、FTS、向量、来源及待处理作业中的关联正文，仅保留无正文 identity 与审计。
 
 常用命令：
 
@@ -208,6 +208,10 @@ capslock plugin uninstall my-plugin --yes
 /memory export <scope> <path.json>
 /memory import <scope> <path.json>
 /memory policy off|review|automatic
+/memory capture on|off
+/memory recall on|off
+/memory on|off
+/memory maintain status|run|review
 /memory embeddings enable fastembed
 /memory embeddings enable local-http <endpoint> <model>
 /memory embeddings enable external <model-profile>
@@ -215,9 +219,11 @@ capslock plugin uninstall my-plugin --yes
 /memory embeddings rebuild
 ```
 
-召回保持 4 KiB、最多 5 条的限制，并按词法/语义相关性、作用域、置信度、时效和来源排序。FastEmbed 在工作线程执行；本地 HTTP embedding 使用 `AsyncClient` 且只允许回环地址。
+召回保持 4 KiB、最多 5 条的限制，使用 72% retrieval 与 scope、confidence、类型化 freshness、source validity 融合；候选必须命中 lexical top-10 或 cosine ≥ 0.45，最终分数至少 0.50。长内容按 UTF-8 边界截断。FastEmbed 和向量计算在工作线程执行；语义不可用时显式降级为词法召回。`capslock exec --no-memory` 对本轮禁用读取、引用和捕获。
 
-记忆导入导出格式固定为 `capslock-memory-export` version 3，只接受 version 3。会话导出格式为 version 3，并包含 run 治理快照与停止原因。v1/v2 记忆导出和旧会话导出不提供导入或转换。
+记忆导入导出格式为 `capslock-memory-export` version 4；导入接受 version 3/4，v3 字段使用安全默认值。
+
+仓库指令使用 `/instructions list|explain|reload` 检查。加载顺序从用户 `CAPSLOCK.md`、目录 `AGENTS.md`/`CAPSLOCK.md`、路径规则到本机 local 文件；单文件 40 KiB、总预算 12k tokens，不支持 `@include` 或符号链接。文件指令不能覆盖系统安全、工具权限和审批策略。
 
 ## Skill
 
@@ -236,10 +242,10 @@ Inspect relevant files and return an evidence-backed summary.
 
 ## 配置
 
-配置根必须包含 `config_version = 5`。config v3/v4 会在原子备份后自动迁移；其他非当前格式拒绝加载。多模型使用 provider、credential reference、profile 和角色路由：
+配置根必须包含 `config_version = 6`。config v3/v4/v5 会在原子备份后自动迁移；其他非当前格式拒绝加载。多模型使用 provider、credential reference、profile 和角色路由：
 
 ```toml
-config_version = 5
+config_version = 6
 
 [providers.primary]
 kind = "openai_compatible"
@@ -353,7 +359,11 @@ mcp_timeout_seconds = 30
 mcp_output_bytes = 100000
 
 [memory]
-enabled = true
+capture_enabled = true
+recall_enabled = true
+manual_write_enabled = true
+maintenance_enabled = true
+policy = "automatic"
 ```
 
 `CAPSLOCK_HOME` 与 `CAPSLOCK_MEMORY_DATABASE` 必须是 shell 中的绝对路径。
@@ -369,7 +379,7 @@ CapsLock 只接受 canonical 布局：
 - 事件日志：`.capslock/state/events.jsonl`
 - 用户记忆：`${CAPSLOCK_HOME:-~/.capslock}/state/memory.sqlite3`
 
-工作区库和记忆库使用不同的 SQLite `application_id`。当前 workspace schema 为 9，memory schema 为 3；workspace schema v6/v7/v8 在 WAL checkpoint 和 SQLite backup 后事务升级。旧 application ID、其他非当前 schema 或未知已有表均拒绝启动。
+工作区库和记忆库使用不同的 SQLite `application_id`。当前 workspace schema 为 10，memory schema 为 4；workspace schema v6-v9 与 memory schema v3 在 WAL checkpoint 和 SQLite backup 后事务升级。旧 application ID、其他非当前 schema 或未知已有表均拒绝启动。
 
 ## 架构
 

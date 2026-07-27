@@ -14,7 +14,7 @@ from .rules import (
 from .types import ConfigIssue
 
 
-CONFIG_VERSION = 5
+CONFIG_VERSION = 6
 _GROUP_FIELDS = {
     "runtime": {"max_tool_rounds", "permission_mode"},
     "tools": {"schema_budget_tokens", "max_read_concurrency", "aggregate_result_bytes"},
@@ -68,7 +68,13 @@ _GROUP_FIELDS = {
         "web_max_redirects",
     },
     "mcp": {"mcp_timeout_seconds", "mcp_output_bytes"},
-    "memory": {"enabled"},
+    "memory": {
+        "capture_enabled",
+        "recall_enabled",
+        "manual_write_enabled",
+        "maintenance_enabled",
+        "policy",
+    },
     "routing": {"reasoning", "fast", "embedding", "vision"},
     "budget": {"max_run_tokens", "max_run_usd", "max_session_usd"},
     "loop_detection": {
@@ -223,7 +229,10 @@ def validate_semantics(document: dict[str, object]) -> None:
                 raise ValueError(
                     f"lsp.servers.{name}.command must be a non-empty array"
                 )
-            if not isinstance(server.get("extensions"), list) or not server["extensions"]:
+            if (
+                not isinstance(server.get("extensions"), list)
+                or not server["extensions"]
+            ):
                 raise ValueError(
                     f"lsp.servers.{name}.extensions must be a non-empty array"
                 )
@@ -278,7 +287,19 @@ def validate_semantics(document: dict[str, object]) -> None:
             raise ValueError("runtime.permission_mode is invalid")
     memory = document.get("memory", {})
     if isinstance(memory, dict):
-        boolean(memory.get("enabled", True))
+        for field in (
+            "capture_enabled",
+            "recall_enabled",
+            "manual_write_enabled",
+            "maintenance_enabled",
+        ):
+            boolean(memory.get(field, True))
+        if str(memory.get("policy", "automatic")) not in {
+            "off",
+            "review",
+            "automatic",
+        }:
+            raise ValueError("memory.policy must be off, review, or automatic")
     context = document.get("context", {})
     if isinstance(context, dict):
         boolean(context.get("auto_compact", True))

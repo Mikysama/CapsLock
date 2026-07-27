@@ -15,6 +15,8 @@ from .settings import MemorySettingsRepository
 from .audit import MemoryAuditRepository
 from .semantic import EmbeddingRepository, RecallRepository
 from .external import EmbeddingAuditRepository
+from .jobs import MemoryJobRepository
+from .maintenance import MemoryMaintenanceRepository
 
 
 @dataclass(frozen=True)
@@ -29,6 +31,8 @@ class MemoryRepositories:
     embeddings: EmbeddingRepository
     recalls: RecallRepository
     embedding_audit: EmbeddingAuditRepository
+    jobs: MemoryJobRepository
+    maintenance: MemoryMaintenanceRepository
 
     @classmethod
     async def open(cls, path: str | Path) -> "MemoryRepositories":
@@ -46,6 +50,8 @@ class MemoryRepositories:
             EmbeddingRepository(database),
             RecallRepository(database),
             EmbeddingAuditRepository(database),
+            MemoryJobRepository(database),
+            MemoryMaintenanceRepository(database),
         )
 
     async def close(self) -> None:
@@ -61,6 +67,8 @@ __all__ = [
     "MemoryQueryRepository",
     "MemorySourceRepository",
     "MemorySettingsRepository",
+    "MemoryJobRepository",
+    "MemoryMaintenanceRepository",
     "MemoryAuditRepository",
     "RecallRepository",
     "workspace_key",

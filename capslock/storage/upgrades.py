@@ -19,7 +19,7 @@ async def upgrade_workspace_schema(
     if source_version is None:
         row = await (await connection.execute("PRAGMA user_version")).fetchone()
         source_version = int(row[0])
-    if source_version not in {6, 7, 8}:
+    if source_version not in {6, 7, 8, 9}:
         raise ValueError(f"unsupported workspace upgrade source: {source_version}")
     checkpoint = await connection.execute("PRAGMA wal_checkpoint(FULL)")
     await checkpoint.close()
@@ -39,7 +39,42 @@ async def upgrade_workspace_schema(
             await connection.executescript(_UPGRADE_FIRST_STEP)
         if source_version in {6, 7}:
             await connection.executescript(_UPGRADE_SECOND_STEP)
-        await connection.executescript(_UPGRADE_THIRD_STEP)
+        if source_version in {6, 7, 8}:
+            await connection.executescript(_UPGRADE_THIRD_STEP)
+        await connection.executescript(_UPGRADE_WORKSPACE_CURRENT)
+    except BaseException:
+        await connection.rollback()
+        raise
+    return backup
+
+
+async def upgrade_memory_schema(
+    path: Path,
+    connection: aiosqlite.Connection,
+    *,
+    source_version: int | None = None,
+) -> Path:
+    """Backup and transactionally migrate the user memory database to v4."""
+    if source_version is None:
+        row = await (await connection.execute("PRAGMA user_version")).fetchone()
+        source_version = int(row[0])
+    if source_version != 3:
+        raise ValueError(f"unsupported memory upgrade source: {source_version}")
+    checkpoint = await connection.execute("PRAGMA wal_checkpoint(FULL)")
+    await checkpoint.close()
+    await connection.commit()
+    backup = (
+        path.parent
+        / "backups"
+        / (
+            f"memory-v{source_version}-"
+            + datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+            + ".sqlite3"
+        )
+    )
+    await asyncio.to_thread(_backup, path, backup)
+    try:
+        await connection.executescript(_UPGRADE_MEMORY_CURRENT)
     except BaseException:
         await connection.rollback()
         raise
@@ -455,6 +490,199 @@ CREATE TABLE context_snapshots (
 CREATE INDEX idx_context_snapshots_session ON context_snapshots(session_id,created_at);
 
 PRAGMA user_version=9;
+COMMIT;
+PRAGMA legacy_alter_table=OFF;
+PRAGMA foreign_keys=ON;
+"""
+
+
+_UPGRADE_WORKSPACE_CURRENT = """
+BEGIN IMMEDIATE;
+ALTER TABLE context_compactions ADD COLUMN memory_revision_digest TEXT NOT NULL DEFAULT '';
+PRAGMA user_version=10;
+COMMIT;
+"""
+
+
+_UPGRADE_MEMORY_CURRENT = """
+PRAGMA foreign_keys=OFF;
+PRAGMA legacy_alter_table=ON;
+BEGIN IMMEDIATE;
+
+ALTER TABLE memories RENAME TO memories_v3;
+CREATE TABLE memories (
+  id TEXT PRIMARY KEY,
+  scope TEXT NOT NULL CHECK(scope IN ('global','workspace','session','agent')),
+  workspace_key TEXT,
+  session_id TEXT,
+  namespace TEXT,
+  status TEXT NOT NULL CHECK(status IN ('active','forgotten','purged')),
+  current_revision INTEGER,
+  origin TEXT NOT NULL CHECK(origin IN ('manual','imported','reviewed','automatic')),
+  source_valid INTEGER NOT NULL DEFAULT 1 CHECK(source_valid IN (0,1)),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  purged_at TEXT,
+  CHECK(
+    (scope='global' AND workspace_key IS NULL AND session_id IS NULL AND namespace IS NULL) OR
+    (scope='workspace' AND workspace_key IS NOT NULL AND session_id IS NULL AND namespace IS NULL) OR
+    (scope='session' AND workspace_key IS NOT NULL AND session_id IS NOT NULL AND namespace IS NULL) OR
+    (scope='agent' AND workspace_key IS NOT NULL AND session_id IS NULL AND namespace IS NOT NULL)
+  ),
+  CHECK((status='purged' AND current_revision IS NULL) OR status!='purged')
+) STRICT;
+INSERT INTO memories(id,scope,workspace_key,session_id,status,current_revision,origin,
+ source_valid,created_at,updated_at,purged_at)
+ SELECT id,scope,workspace_key,session_id,status,current_revision,origin,
+ source_valid,created_at,updated_at,purged_at FROM memories_v3;
+DROP TABLE memories_v3;
+CREATE INDEX idx_memories_scope ON memories(scope,workspace_key,session_id,status);
+
+ALTER TABLE memory_revisions RENAME TO memory_revisions_previous;
+CREATE TABLE memory_revisions (
+  memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+  revision INTEGER NOT NULL CHECK(revision>=1),
+  operation TEXT NOT NULL CHECK(operation IN ('create','edit','forget','undo','import','adopt')),
+  content TEXT NOT NULL,
+  memory_type TEXT NOT NULL CHECK(memory_type IN ('fact','preference','decision','todo','note','project','temporary')),
+  source_kind TEXT NOT NULL,
+  source_ref TEXT,
+  confidence REAL NOT NULL CHECK(confidence>=0 AND confidence<=1),
+  expires_at TEXT,
+  subject TEXT,
+  durability TEXT NOT NULL DEFAULT 'durable' CHECK(durability IN ('temporary','session','project','durable')),
+  why TEXT,
+  how_to_apply TEXT,
+  last_verified_at TEXT,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(memory_id,revision)
+) STRICT;
+INSERT INTO memory_revisions(memory_id,revision,operation,content,memory_type,
+ source_kind,source_ref,confidence,expires_at,created_at)
+ SELECT memory_id,revision,operation,content,memory_type,source_kind,source_ref,
+ confidence,expires_at,created_at FROM memory_revisions_previous;
+DROP TABLE memory_revisions_previous;
+
+ALTER TABLE memory_workspace_settings ADD COLUMN capture_enabled INTEGER NOT NULL DEFAULT 1
+ CHECK(capture_enabled IN (0,1));
+ALTER TABLE memory_workspace_settings ADD COLUMN manual_write_enabled INTEGER NOT NULL DEFAULT 1
+ CHECK(manual_write_enabled IN (0,1));
+ALTER TABLE memory_workspace_settings ADD COLUMN maintenance_enabled INTEGER NOT NULL DEFAULT 1
+ CHECK(maintenance_enabled IN (0,1));
+UPDATE memory_workspace_settings
+ SET capture_enabled=write_enabled,
+     manual_write_enabled=write_enabled,
+     maintenance_enabled=CASE WHEN write_enabled=0 THEN 0 ELSE 1 END,
+     policy='automatic';
+
+ALTER TABLE memory_extractions ADD COLUMN envelope_json TEXT NOT NULL DEFAULT '{}'
+ CHECK(json_valid(envelope_json));
+ALTER TABLE memory_candidates RENAME TO memory_candidates_previous;
+CREATE TABLE memory_candidates (
+  id TEXT PRIMARY KEY,
+  extraction_id TEXT NOT NULL REFERENCES memory_extractions(id) ON DELETE CASCADE,
+  content TEXT,
+  memory_type TEXT NOT NULL CHECK(memory_type IN ('fact','preference','decision','todo','note','project','temporary')),
+  scope TEXT NOT NULL CHECK(scope IN ('global','workspace','session','agent')),
+  namespace TEXT,
+  subject TEXT,
+  durability TEXT NOT NULL DEFAULT 'durable' CHECK(durability IN ('temporary','session','project','durable')),
+  why TEXT,
+  how_to_apply TEXT,
+  workspace_key TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  source_run_id TEXT NOT NULL,
+  confidence REAL NOT NULL CHECK(confidence>=0 AND confidence<=1),
+  status TEXT NOT NULL CHECK(status IN ('pending','accepted','rejected','duplicate','conflict','purged')),
+  relation TEXT NOT NULL CHECK(relation IN ('new','duplicate','conflict')),
+  related_memory_id TEXT REFERENCES memories(id) ON DELETE SET NULL,
+  risk_flags_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(risk_flags_json)),
+  adopted_memory_id TEXT REFERENCES memories(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL,
+  decided_at TEXT
+) STRICT;
+INSERT INTO memory_candidates(id,extraction_id,content,memory_type,scope,workspace_key,
+ session_id,source_run_id,confidence,status,relation,related_memory_id,risk_flags_json,
+ adopted_memory_id,created_at,decided_at)
+ SELECT id,extraction_id,content,memory_type,scope,workspace_key,session_id,
+ source_run_id,confidence,status,relation,related_memory_id,risk_flags_json,
+ adopted_memory_id,created_at,decided_at FROM memory_candidates_previous;
+DROP TABLE memory_candidates_previous;
+CREATE INDEX idx_memory_candidates_queue ON memory_candidates(workspace_key,session_id,status,created_at);
+ALTER TABLE memory_sources ADD COLUMN message_id TEXT;
+ALTER TABLE memory_sources ADD COLUMN evidence_id TEXT;
+ALTER TABLE memory_sources ADD COLUMN quote TEXT;
+ALTER TABLE memory_sources ADD COLUMN direct INTEGER NOT NULL DEFAULT 0 CHECK(direct IN (0,1));
+ALTER TABLE memory_sources ADD COLUMN verified INTEGER NOT NULL DEFAULT 0 CHECK(verified IN (0,1));
+ALTER TABLE memory_recall_items ADD COLUMN cosine REAL;
+ALTER TABLE memory_recall_items ADD COLUMN retrieval_score REAL NOT NULL DEFAULT 0;
+ALTER TABLE memory_recall_items ADD COLUMN selected_reason TEXT;
+ALTER TABLE memory_recall_items ADD COLUMN filter_reason TEXT;
+
+CREATE TABLE memory_candidate_sources (
+  id INTEGER PRIMARY KEY,
+  candidate_id TEXT NOT NULL REFERENCES memory_candidates(id) ON DELETE CASCADE,
+  message_id TEXT,
+  evidence_id TEXT,
+  quote TEXT NOT NULL,
+  direct INTEGER NOT NULL DEFAULT 0 CHECK(direct IN (0,1)),
+  verified INTEGER NOT NULL DEFAULT 0 CHECK(verified IN (0,1)),
+  created_at TEXT NOT NULL,
+  CHECK(message_id IS NOT NULL OR evidence_id IS NOT NULL)
+) STRICT;
+CREATE TABLE memory_relations (
+  id INTEGER PRIMARY KEY,
+  source_memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+  target_memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+  relation TEXT NOT NULL CHECK(relation IN ('duplicate','conflict','supersedes')),
+  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','confirmed','rejected')),
+  confidence REAL NOT NULL DEFAULT 1 CHECK(confidence>=0 AND confidence<=1),
+  created_by TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  decided_at TEXT,
+  UNIQUE(source_memory_id,target_memory_id,relation),
+  CHECK(source_memory_id<>target_memory_id)
+) STRICT;
+CREATE INDEX idx_memory_relations_status ON memory_relations(status,relation,created_at);
+CREATE TABLE memory_jobs (
+  id TEXT PRIMARY KEY,
+  job_type TEXT NOT NULL CHECK(job_type IN ('extract_run','consolidate_workspace','promote_agent_memory')),
+  workspace_key TEXT NOT NULL,
+  session_id TEXT,
+  run_id TEXT,
+  status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued','running','completed','failed')),
+  idempotency_key TEXT NOT NULL UNIQUE,
+  payload_json TEXT NOT NULL CHECK(json_valid(payload_json)),
+  attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count>=0 AND attempt_count<=3),
+  available_at TEXT NOT NULL,
+  error_code TEXT,
+  created_at TEXT NOT NULL,
+  started_at TEXT,
+  completed_at TEXT
+) STRICT;
+CREATE INDEX idx_memory_jobs_ready ON memory_jobs(status,available_at,created_at);
+CREATE TABLE memory_review_proposals (
+  id TEXT PRIMARY KEY,
+  workspace_key TEXT NOT NULL,
+  proposal_type TEXT NOT NULL CHECK(proposal_type IN ('near_duplicate','conflict','rewrite','instruction_promotion')),
+  memory_ids_json TEXT NOT NULL CHECK(json_valid(memory_ids_json)),
+  proposed_content TEXT,
+  confidence REAL NOT NULL CHECK(confidence>=0 AND confidence<=1),
+  payload_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(payload_json)),
+  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','accepted','rejected')),
+  job_id TEXT REFERENCES memory_jobs(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL,
+  decided_at TEXT
+) STRICT;
+CREATE INDEX idx_memory_review_queue ON memory_review_proposals(workspace_key,status,created_at);
+CREATE TABLE memory_maintenance_state (
+  workspace_key TEXT PRIMARY KEY,
+  last_consolidated_at TEXT,
+  completed_sessions_at_last_run INTEGER NOT NULL DEFAULT 0 CHECK(completed_sessions_at_last_run>=0),
+  last_job_id TEXT REFERENCES memory_jobs(id) ON DELETE SET NULL
+) STRICT;
+
+PRAGMA user_version=4;
 COMMIT;
 PRAGMA legacy_alter_table=OFF;
 PRAGMA foreign_keys=ON;

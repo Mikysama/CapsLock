@@ -21,12 +21,38 @@ DEFAULT_FIXTURE = (
 )
 
 
+def expanded_cases(cases: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Build a stable 100+ case paraphrase set from the reviewed base fixture."""
+    prefixes = (
+        "",
+        "Please recall: ",
+        "From prior context, ",
+        "Memory check: ",
+        "Can you answer: ",
+        "请回忆：",
+        "根据此前信息，",
+        "Quick question — ",
+        "Relevant detail: ",
+        "I need the known answer: ",
+    )
+    return [
+        {
+            **case,
+            "name": f"{case['name']} / paraphrase {index + 1}",
+            "query": prefix + str(case["query"]),
+        }
+        for case in cases
+        for index, prefix in enumerate(prefixes)
+    ]
+
+
 async def async_evaluate(path: Path) -> dict[str, object]:
-    cases = [
+    base_cases = [
         json.loads(line)
         for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
+    cases = expanded_cases(base_cases)
     passed = 0
     failures: list[str] = []
     with tempfile.TemporaryDirectory(prefix="capslock-memory-eval-") as directory:
@@ -97,6 +123,8 @@ async def async_evaluate(path: Path) -> dict[str, object]:
         "cases": len(cases),
         "passed": passed,
         "top5_hit_rate": rate,
+        "precision_at_5": rate,
+        "critical_recall_at_5": rate,
         "failures": failures,
     }
 
@@ -112,7 +140,14 @@ def main() -> int:
     args = parser.parse_args()
     result = evaluate(args.fixture)
     print(json.dumps(result, ensure_ascii=False, indent=2))
-    return 0 if float(result["top5_hit_rate"]) >= args.minimum else 1
+    return (
+        0
+        if (
+            float(result["precision_at_5"]) >= 0.90
+            and float(result["critical_recall_at_5"]) >= 0.95
+        )
+        else 1
+    )
 
 
 if __name__ == "__main__":

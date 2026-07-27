@@ -17,7 +17,7 @@ def read_config_document(path: Path) -> dict[str, object]:
 
 def load_config_document(path: Path) -> dict[str, object]:
     document = read_config_document(path)
-    if document.get("config_version") in {3, 4}:
+    if document.get("config_version") in {3, 4, 5}:
         _upgrade_config(path)
         document = read_config_document(path)
     errors = [
@@ -30,18 +30,26 @@ def load_config_document(path: Path) -> dict[str, object]:
 
 
 def _upgrade_config(path: Path) -> None:
-    """Backup and atomically upgrade a v3/v4 document without losing comments."""
+    """Backup and atomically upgrade a v3-v5 document without losing comments."""
     import tomlkit
 
     source = path.read_text(encoding="utf-8")
     document = tomlkit.parse(source)
     source_version = document.get("config_version")
-    if source_version not in {3, 4}:
+    if source_version not in {3, 4, 5}:
         return
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     backup = path.with_name(f"{path.name}.v{source_version}-{timestamp}.bak")
     backup.write_text(source, encoding="utf-8")
-    document["config_version"] = 5
+    document["config_version"] = 6
+    memory = document.setdefault("memory", {})
+    if isinstance(memory, dict):
+        old_enabled = bool(memory.pop("enabled", True))
+        memory.setdefault("capture_enabled", old_enabled)
+        memory.setdefault("recall_enabled", old_enabled)
+        memory.setdefault("manual_write_enabled", old_enabled)
+        memory.setdefault("maintenance_enabled", old_enabled)
+        memory.setdefault("policy", "automatic" if old_enabled else "off")
     document.setdefault(
         "tools",
         {
@@ -88,7 +96,7 @@ def _upgrade_config(path: Path) -> None:
     temporary: str | None = None
     try:
         with tempfile.NamedTemporaryFile(
-            "w", encoding="utf-8", dir=path.parent, prefix=".config-v5-", delete=False
+            "w", encoding="utf-8", dir=path.parent, prefix=".config-v6-", delete=False
         ) as handle:
             temporary = handle.name
             handle.write(tomlkit.dumps(document))

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+import re
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -107,6 +108,7 @@ class AgentTaskContract:
     verification_requirements: VerificationRequirement = field(
         default_factory=VerificationRequirement
     )
+    memory_namespace: str | None = None
 
     def __post_init__(self) -> None:
         if not self.task_id or not self.parent_run_id:
@@ -145,6 +147,10 @@ class AgentTaskContract:
                 raise ValueError(f"unsupported task limit: {key}")
             if value is not None and float(value) <= 0:
                 raise ValueError(f"task limit must be positive: {key}")
+        if self.memory_namespace is not None and not re.fullmatch(
+            r"[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?", self.memory_namespace
+        ):
+            raise ValueError("memory_namespace must be a restricted lowercase slug")
 
     @classmethod
     def create(
@@ -159,6 +165,7 @@ class AgentTaskContract:
         model_profile: str | None = None,
         limits: Mapping[str, int | float | None] | None = None,
         verification_requirements: VerificationRequirement | None = None,
+        memory_namespace: str | None = None,
     ) -> "AgentTaskContract":
         return cls(
             task_id=task_id or uuid.uuid4().hex,
@@ -171,6 +178,7 @@ class AgentTaskContract:
             limits=limits or {"max_tool_rounds": 16},
             verification_requirements=verification_requirements
             or VerificationRequirement(),
+            memory_namespace=memory_namespace,
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -184,6 +192,7 @@ class AgentTaskContract:
             "model_profile": self.model_profile,
             "limits": dict(self.limits),
             "verification_requirements": self.verification_requirements.as_dict(),
+            "memory_namespace": self.memory_namespace,
         }
 
     def digest(self) -> str:
@@ -236,6 +245,7 @@ class ValidatedAgentOutput:
     usage: Mapping[str, int | float] = field(default_factory=dict)
     verified: bool = False
     error: str | None = None
+    memory_proposals: tuple[dict[str, Any], ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -248,4 +258,5 @@ class ValidatedAgentOutput:
             "usage": dict(self.usage),
             "verified": self.verified,
             "error": self.error,
+            "memory_proposals": list(self.memory_proposals),
         }

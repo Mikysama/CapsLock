@@ -5,6 +5,7 @@ from __future__ import annotations
 from ...domain import MemoryInfo, MemoryScope
 from .core import Repository, timestamp
 from .records import (
+    MEMORY_COLUMNS,
     SELECT_MEMORY,
     escape_like,
     fts_query,
@@ -15,6 +16,23 @@ from .records import (
 
 
 class MemoryQueryRepository(Repository):
+    async def get_many(
+        self, memory_ids: list[str], *, include_inactive: bool = False
+    ) -> dict[str, MemoryInfo]:
+        """Load recall candidates in one query (avoids per-memory lookups)."""
+        if not memory_ids:
+            return {}
+        placeholders = ",".join("?" for _ in memory_ids)
+        query = SELECT_MEMORY + f" WHERE m.id IN ({placeholders})"
+        values: list[object] = list(memory_ids)
+        if not include_inactive:
+            query += (
+                " AND m.status='active' AND (r.expires_at IS NULL OR r.expires_at>?)"
+            )
+            values.append(timestamp())
+        rows = await self.all(query, tuple(values))
+        return {str(row["id"]): memory_from_row(row) for row in rows}
+
     async def get(
         self, memory_id: str, *, include_inactive: bool = False
     ) -> MemoryInfo | None:
@@ -82,16 +100,32 @@ class MemoryQueryRepository(Repository):
         values.append(limit)
         return [memory_from_row(row) for row in await self.all(query, tuple(values))]
 
+    async def list_agent(
+        self, *, workspace: str, namespace: str, limit: int = 100
+    ) -> list[MemoryInfo]:
+        rows = await self.all(
+            SELECT_MEMORY
+            + """ WHERE m.scope='agent' AND m.workspace_key=? AND m.namespace=?
+                 AND m.status='active' AND (r.expires_at IS NULL OR r.expires_at>?)
+                 ORDER BY m.updated_at DESC LIMIT ?""",
+            (workspace, namespace, timestamp(), limit),
+        )
+        return [memory_from_row(row) for row in rows]
+
     async def search_ranked(
         self, query: str, *, workspace: str, session_id: str, limit: int = 20
     ) -> list[tuple[MemoryInfo, int]]:
         where, values = visible_where(workspace, session_id)
-        sql = (
-            SELECT_MEMORY
-            + f" JOIN memory_fts f ON f.memory_id=m.id AND f.revision=m.current_revision WHERE {where} AND memory_fts MATCH ? AND m.status='active' AND (r.expires_at IS NULL OR r.expires_at>?) ORDER BY bm25(memory_fts) LIMIT ?"
-        )
+        # Drive the query from FTS so SQLite does not scan the visible memory set
+        # before applying MATCH at large cardinalities.
+        sql = f"""SELECT {MEMORY_COLUMNS} FROM memory_fts f
+                  JOIN memories m ON m.id=f.memory_id AND m.current_revision=f.revision
+                  JOIN memory_revisions r ON r.memory_id=m.id AND r.revision=m.current_revision
+                  WHERE memory_fts MATCH ? AND {where} AND m.status='active'
+                  AND (r.expires_at IS NULL OR r.expires_at>?)
+                  ORDER BY bm25(memory_fts) LIMIT ?"""
         try:
-            rows = await self.all(sql, (*values, fts_query(query), timestamp(), limit))
+            rows = await self.all(sql, (fts_query(query), *values, timestamp(), limit))
         except Exception:
             rows = []
         if not rows:

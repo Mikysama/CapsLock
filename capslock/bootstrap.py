@@ -228,11 +228,17 @@ class WorkspaceApplication:
                 memory_repositories,
                 workspace=root,
                 session_id=session.id,
-                project_write_enabled=settings.memory.project_write_enabled,
+                project_write_enabled=settings.memory.manual_write_enabled,
+                capture_enabled=settings.memory.capture_enabled,
+                recall_enabled=settings.memory.recall_enabled,
+                maintenance_enabled=settings.memory.maintenance_enabled,
+                capture_policy=settings.memory.policy,
                 event=events.emit,
                 source_validator=repositories.runs.completed,
+                task_repository=repositories.tasks,
                 external_embedding_profiles=external_embedding_profiles,
             )
+            await memory.recover_jobs()
 
             actions = build_action_factory(
                 settings=settings,
@@ -258,6 +264,7 @@ class WorkspaceApplication:
                 interaction=interaction,
                 repository=repositories.collaboration,
                 open_application=cls.open,
+                memory=memory,
             )
 
             agent_session = AgentSession(
@@ -381,6 +388,8 @@ class WorkspaceApplication:
                 await _close_clients(self.client)
         finally:
             try:
+                if self.session.memory is not None:
+                    await self.session.memory.close()
                 await self._repositories.close()
             finally:
                 await self._memory_repositories.close()

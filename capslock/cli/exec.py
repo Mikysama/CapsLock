@@ -8,7 +8,7 @@ import sys
 from typing import TextIO
 
 from ..domain import AgentEvent, AgentEventKind, RunLimits, RunMode
-from ..runtime import RunRequest
+from ..runtime import MemoryRunMode, RunRequest
 from ..status import AgentStatus, status_for_event
 from .context import CliContext
 from .status import AsyncStatusRenderer
@@ -29,6 +29,7 @@ async def run_exec(
     status_renderer: AsyncStatusRenderer | None = None,
     limits: RunLimits | None = None,
     resume_from_run_id: str | None = None,
+    no_memory: bool = False,
 ) -> int:
     prompt = question if question is not None else sys.stdin.read()
     if not prompt.strip():
@@ -53,6 +54,9 @@ async def run_exec(
                 mode=RunMode.EXEC,
                 limits=limits,
                 resume_from_run_id=resume_from_run_id,
+                memory_mode=(
+                    MemoryRunMode.IGNORE if no_memory else MemoryRunMode.DEFAULT
+                ),
             )
         )
         async for event in stream:

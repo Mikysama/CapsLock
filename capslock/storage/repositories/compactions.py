@@ -15,6 +15,7 @@ class CompactionRecord:
     session_id: str
     summary: dict[str, object]
     source_digest: str
+    memory_revision_digest: str
     first_message_id: int | None
     last_message_id: int | None
     source_tokens: int
@@ -28,13 +29,13 @@ class CompactionRecord:
 
 class ContextCompactionRepository(Repository):
     async def matching(
-        self, session_id: str, source_digest: str
+        self, session_id: str, source_digest: str, memory_revision_digest: str = ""
     ) -> CompactionRecord | None:
         row = await self.one(
             """SELECT * FROM context_compactions
-               WHERE session_id=? AND source_digest=? AND valid=1
+               WHERE session_id=? AND source_digest=? AND memory_revision_digest=? AND valid=1
                ORDER BY created_at DESC LIMIT 1""",
-            (session_id, source_digest),
+            (session_id, source_digest, memory_revision_digest),
         )
         return None if row is None else _record(row)
 
@@ -71,6 +72,11 @@ class ContextCompactionRepository(Repository):
         )
         return _record(record)
 
+    async def invalidate(self, compaction_id: str) -> None:
+        await self.execute(
+            "UPDATE context_compactions SET valid=0 WHERE id=?", (compaction_id,)
+        )
+
     async def create(
         self,
         *,
@@ -86,6 +92,7 @@ class ContextCompactionRepository(Repository):
         target_tokens: int,
         model_profile: str,
         source_digest: str,
+        memory_revision_digest: str = "",
         focus_instructions: str | None = None,
         activate: bool = False,
     ) -> CompactionRecord:
@@ -94,8 +101,9 @@ class ContextCompactionRepository(Repository):
             """INSERT INTO context_compactions(
                  id,session_id,run_id,first_message_id,last_message_id,summary_json,
                  source_compaction_id,input_tokens,output_tokens,source_tokens,
-                 target_tokens,model_profile,source_digest,focus_instructions,created_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 target_tokens,model_profile,source_digest,memory_revision_digest,
+                 focus_instructions,created_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 identifier,
                 session_id,
@@ -110,11 +118,12 @@ class ContextCompactionRepository(Repository):
                 target_tokens,
                 model_profile,
                 source_digest,
+                memory_revision_digest,
                 focus_instructions,
                 now(),
             ),
         )
-        record = await self.matching(session_id, source_digest)
+        record = await self.matching(session_id, source_digest, memory_revision_digest)
         assert record is not None
         if activate:
             await self.activate(session_id, record.id)
@@ -127,6 +136,7 @@ def _record(row) -> CompactionRecord:
         str(row["session_id"]),
         json.loads(row["summary_json"]),
         str(row["source_digest"]),
+        str(row["memory_revision_digest"]),
         int(row["first_message_id"]) if row["first_message_id"] is not None else None,
         int(row["last_message_id"]) if row["last_message_id"] is not None else None,
         int(row["source_tokens"]),
