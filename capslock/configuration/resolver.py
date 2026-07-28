@@ -19,6 +19,7 @@ from .rules import (
 )
 from .types import (
     CommandSettings,
+    BridgeSettings,
     ContextSettings,
     DocumentSettings,
     LspServerSettings,
@@ -27,6 +28,7 @@ from .types import (
     MemorySettings,
     ModelProfileSettings,
     ModelSettings,
+    ObservabilitySettings,
     ProviderSettings,
     RoutingSettings,
     RuntimeSettings,
@@ -142,6 +144,7 @@ def resolve_settings(
             max_compaction_failures=int(
                 group("context").get("max_compaction_failures", 3)
             ),
+            tokenizer=str(group("context").get("tokenizer", "adaptive")),
         ),
         agents=agent_settings(group("agents")),
         lsp=LspSettings(
@@ -195,6 +198,7 @@ def resolve_settings(
         mcp=McpSettings(
             mcp_timeout_seconds=float(value("mcp", "CAPSLOCK_MCP_TIMEOUT_SECONDS", 30)),
             mcp_output_bytes=int(value("mcp", "CAPSLOCK_MCP_OUTPUT_BYTES", 100_000)),
+            remote_enabled=boolean(group("mcp").get("remote_enabled", True)),
         ),
         permission_mode=str(
             value("runtime", "CAPSLOCK_PERMISSION_MODE", "approve_for_me")
@@ -216,4 +220,16 @@ def resolve_settings(
         routing=routing,
         budget=budget_settings(group("budget")),
         loop_detection=loop_detection_settings(group("loop_detection")),
+        bridge=BridgeSettings(
+            enabled=boolean(group("bridge").get("enabled", False)),
+            max_selection_bytes=int(
+                group("bridge").get("max_selection_bytes", 65_536)
+            ),
+            max_diagnostics=int(group("bridge").get("max_diagnostics", 500)),
+        ),
+        observability=ObservabilitySettings(
+            enabled=boolean(group("observability").get("enabled", True)),
+            retention_days=int(group("observability").get("retention_days", 30)),
+            max_spans=int(group("observability").get("max_spans", 100_000)),
+        ),
     )

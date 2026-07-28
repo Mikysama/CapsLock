@@ -2,7 +2,7 @@
 
 WORKSPACE_APPLICATION_ID = 0x434C4B32  # CLK2
 MEMORY_APPLICATION_ID = 0x434C4D32  # CLM2
-WORKSPACE_SCHEMA_VERSION = 12
+WORKSPACE_SCHEMA_VERSION = 14
 MEMORY_SCHEMA_VERSION = 4
 
 WORKSPACE_SCHEMA = """
@@ -551,6 +551,22 @@ CREATE TABLE agent_messages (
   UNIQUE(task_id,sequence)
 ) STRICT;
 CREATE INDEX idx_agent_messages_task ON agent_messages(task_id,sequence);
+CREATE TABLE agent_mailbox (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
+  parent_run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  sender TEXT NOT NULL CHECK(sender IN ('parent','child','system')),
+  recipient TEXT NOT NULL CHECK(recipient IN ('parent','child')),
+  message_kind TEXT NOT NULL CHECK(message_kind IN ('instruction','question','response','progress','artifact_offer','cancel')),
+  payload_json TEXT NOT NULL CHECK(json_valid(payload_json)),
+  payload_sha256 TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued','delivered','acknowledged','expired')),
+  created_at TEXT NOT NULL,
+  expires_at TEXT,
+  delivered_at TEXT,
+  acknowledged_at TEXT
+) STRICT;
+CREATE INDEX idx_agent_mailbox_delivery ON agent_mailbox(task_id,recipient,status,created_at);
 CREATE TABLE agent_outputs (
   task_id TEXT PRIMARY KEY REFERENCES agent_tasks(id) ON DELETE CASCADE,
   state TEXT NOT NULL CHECK(state IN ('completed','failed','cancelled','interrupted')),
@@ -572,6 +588,21 @@ CREATE TABLE session_worktrees (
   UNIQUE(session_id,path)
 ) STRICT;
 CREATE UNIQUE INDEX idx_session_worktree_active ON session_worktrees(session_id) WHERE active=1;
+CREATE TABLE performance_spans (
+  id TEXT PRIMARY KEY,
+  trace_id TEXT NOT NULL,
+  session_id TEXT REFERENCES sessions(id) ON DELETE CASCADE,
+  run_id TEXT REFERENCES runs(id) ON DELETE CASCADE,
+  parent_span_id TEXT REFERENCES performance_spans(id) ON DELETE SET NULL,
+  category TEXT NOT NULL,
+  name TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('ok','error','cancelled')),
+  duration_ms REAL NOT NULL CHECK(duration_ms>=0),
+  attributes_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(attributes_json)),
+  created_at TEXT NOT NULL
+) STRICT;
+CREATE INDEX idx_performance_spans_trace ON performance_spans(trace_id,created_at);
+CREATE INDEX idx_performance_spans_name ON performance_spans(category,name,created_at);
 """
 
 MEMORY_SCHEMA = """

@@ -13,6 +13,7 @@ from ..configuration import ContextSettings
 from ..evidence import Evidence
 from ..ports import SourcePort
 from .model import ChatModel
+from .tokens import AdaptiveTokenEstimator, TokenBreakdown, heuristic_tokens
 
 
 SUMMARY_KEYS = (
@@ -38,6 +39,8 @@ class ContextBuildResult:
     input_budget: int
     estimated_tokens: int
     compaction_id: str | None = None
+    breakdown: TokenBreakdown = TokenBreakdown()
+    micro_compaction_saved_tokens: int = 0
 
 
 class ContextBudgetManager:
@@ -55,6 +58,8 @@ class ContextBudgetManager:
         model_name: str,
         tool_schemas: list[dict[str, object]],
         memory: Any = None,
+        attachment_resolver: Any = None,
+        settings_store: Any = None,
     ) -> None:
         self.sessions = sessions
         self.compactions = compactions
@@ -65,6 +70,12 @@ class ContextBudgetManager:
         self.model_name = model_name
         self.tool_schemas = tool_schemas
         self.memory = memory
+        self.attachment_resolver = attachment_resolver
+        self.estimator = AdaptiveTokenEstimator(
+            model_profile,
+            settings_store=settings_store,
+            strategy=settings.tokenizer,
+        )
         self.failures = 0
 
     @property
@@ -81,6 +92,7 @@ class ContextBudgetManager:
         summarizer: ChatModel,
         memory_enabled: bool = True,
     ) -> ContextBuildResult:
+        await self.estimator.load()
         if self.failures >= self.settings.max_compaction_failures:
             raise ContextBudgetExceeded("context compaction failure limit reached")
 
@@ -117,6 +129,11 @@ class ContextBudgetManager:
         except Exception:
             memory_revision_digest = ""
         system = instructions + ("\n\n" + memory_context if memory_context else "")
+        expanded_question = (
+            await asyncio.to_thread(self.attachment_resolver.expand, question)
+            if self.attachment_resolver is not None
+            else question
+        )
         active = await self.compactions.active(session_id)
         if (
             active is not None
@@ -141,7 +158,7 @@ class ContextBudgetManager:
                     {"role": item["role"], "content": item["content"]}
                     for item in active_entries
                 ],
-                {"role": "user", "content": question},
+                {"role": "user", "content": expanded_question},
             ]
             active_estimate = self.estimate(active_messages)
             trigger = int(self.input_budget * self.settings.trigger_ratio)
@@ -152,6 +169,7 @@ class ContextBudgetManager:
                     self.input_budget,
                     active_estimate,
                     active.id,
+                    self.breakdown(active_messages),
                 )
         history = [
             {"role": item["role"], "content": item["content"]} for item in entries
@@ -159,14 +177,32 @@ class ContextBudgetManager:
         messages = [
             {"role": "system", "content": system},
             *history,
-            {"role": "user", "content": question},
+            {"role": "user", "content": expanded_question},
         ]
         estimate = self.estimate(messages)
         trigger = int(self.input_budget * self.settings.trigger_ratio)
         if not self.settings.auto_compact or estimate <= trigger:
             if estimate > self.input_budget:
                 raise ContextBudgetExceeded("context input exceeds the model budget")
-            return ContextBuildResult(messages, recalls, self.input_budget, estimate)
+            return ContextBuildResult(
+                messages,
+                recalls,
+                self.input_budget,
+                estimate,
+                breakdown=self.breakdown(messages),
+            )
+
+        messages, saved = self.micro_compact(messages)
+        estimate = self.estimate(messages)
+        if estimate <= trigger:
+            return ContextBuildResult(
+                messages,
+                recalls,
+                self.input_budget,
+                estimate,
+                breakdown=self.breakdown(messages),
+                micro_compaction_saved_tokens=saved,
+            )
 
         preserve = self.settings.preserve_recent_turns * 2
         recent_entries = entries[-preserve:]
@@ -223,7 +259,7 @@ class ContextBudgetManager:
                 {"role": item["role"], "content": item["content"]}
                 for item in recent_entries
             ],
-            {"role": "user", "content": question},
+            {"role": "user", "content": expanded_question},
         ]
         estimate = self.estimate(messages)
         if estimate > self.input_budget:
@@ -233,11 +269,75 @@ class ContextBudgetManager:
             raise ContextBudgetExceeded("compacted context exceeds the model budget")
         self.failures = 0
         return ContextBuildResult(
-            messages, recalls, self.input_budget, estimate, compaction_id
+            messages,
+            recalls,
+            self.input_budget,
+            estimate,
+            compaction_id,
+            self.breakdown(messages),
+            saved,
         )
 
     def estimate(self, messages: list[dict[str, object]]) -> int:
-        return estimate_tokens(messages) + estimate_tokens(self.tool_schemas)
+        return self.estimator.estimate(messages) + self.estimator.estimate(
+            self.tool_schemas
+        )
+
+    def breakdown(self, messages: list[dict[str, object]]) -> TokenBreakdown:
+        system_messages = [item for item in messages if item.get("role") == "system"]
+        history = [item for item in messages if item.get("role") != "system"]
+        system_text = "\n".join(str(item.get("content", "")) for item in system_messages)
+        all_text = "\n".join(str(item.get("content", "")) for item in messages)
+        attachment_text = "\n".join(
+            part
+            for part in all_text.split("\n")
+            if "workspace-attachment" in part
+        )
+        memory_text = "\n".join(
+            part for part in system_text.split("\n") if "memory" in part.casefold()
+        )
+        system = self.estimator.estimate(system_messages)
+        attachment = self.estimator.estimate(attachment_text) if attachment_text else 0
+        memory = self.estimator.estimate(memory_text) if memory_text else 0
+        tools = self.estimator.estimate(self.tool_schemas)
+        history_tokens = self.estimator.estimate(history)
+        return TokenBreakdown(
+            system=system,
+            history=history_tokens,
+            attachments=attachment,
+            memory=memory,
+            tools=tools,
+            total=system + history_tokens + tools,
+        )
+
+    def micro_compact(
+        self, messages: list[dict[str, object]], *, preserve_messages: int = 12
+    ) -> tuple[list[dict[str, object]], int]:
+        """Replace old large tool results while retaining role and call identity."""
+        before = self.estimate(messages)
+        boundary = max(0, len(messages) - preserve_messages)
+        compacted: list[dict[str, object]] = []
+        for index, item in enumerate(messages):
+            value = dict(item)
+            content = str(value.get("content", ""))
+            if index < boundary and value.get("role") == "tool" and len(content) > 1024:
+                digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+                value["content"] = (
+                    "[older tool result externalized by micro-compaction; "
+                    f"sha256={digest}; bytes={len(content.encode('utf-8'))}]"
+                )
+            compacted.append(value)
+        return compacted, max(0, before - self.estimate(compacted))
+
+    async def observe_usage(
+        self,
+        messages: list[dict[str, object]],
+        tool_schemas: list[dict[str, object]],
+        actual_input_tokens: int,
+    ) -> None:
+        await self.estimator.observe(
+            {"messages": messages, "tools": tool_schemas}, actual_input_tokens
+        )
 
     async def compact_checkpoint(
         self,
@@ -252,6 +352,10 @@ class ContextBudgetManager:
             return messages
         if self.failures >= self.settings.max_compaction_failures:
             raise ContextBudgetExceeded("context compaction failure limit reached")
+        messages, _saved = self.micro_compact(messages)
+        estimate = self.estimate(messages)
+        if estimate <= int(self.input_budget * self.settings.trigger_ratio):
+            return messages
         system = next(
             (item for item in messages if item.get("role") == "system"),
             {"role": "system", "content": ""},
@@ -344,10 +448,7 @@ class ContextBudgetManager:
 
 
 def estimate_tokens(value: object) -> int:
-    encoded = json.dumps(value, ensure_ascii=False, default=str).encode("utf-8")
-    # Conservative provider-neutral estimate: one token per three UTF-8 bytes plus
-    # a small framing allowance.
-    return max(1, (len(encoded) + 2) // 3 + 8)
+    return heuristic_tokens(value)
 
 
 def _digest(entries: list[dict[str, object]]) -> str:

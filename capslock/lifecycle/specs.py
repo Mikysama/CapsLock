@@ -45,7 +45,9 @@ WORKSPACE_IMPORT_SPECS = tuple(
         ("agent_tasks", "id"),
         ("agent_capabilities", ("task_id", "ordinal")),
         ("agent_messages", "id"),
+        ("agent_mailbox", "id"),
         ("agent_outputs", "task_id"),
+        ("performance_spans", "id"),
     )
 )
 
@@ -101,4 +103,5 @@ REFERENCE_FIELDS = {
     "current_revision_id": "plan_revisions",
     "request_id": "plan_requests",
     "created_by_run_id": "runs",
+    "parent_span_id": "performance_spans",
 }

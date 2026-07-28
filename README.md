@@ -2,7 +2,7 @@
 
 CapsLock 是一个本机工作区 Agent，用于读取和修改代码、检索证据、运行受沙箱保护的 Shell、查询代码语义，以及按审批策略访问 Web、MCP 和本地插件。Tool Runtime v2 将工具契约、参数级策略、可恢复暂停、调度、富结果与审计统一到异步执行链。
 
-当前源码版本为 `2.6.0`。本版本新增工具专属权限 v2 判定链、可恢复审批、会话级 Plan Mode、Claude Code 风格规划交互，以及并发工具调用序号的原子分配。当前协议为 workspace schema 12、memory schema 4、portable archive 5、session export 5 和 config 6。完整升级边界见 [2.6.0 发布说明](docs/releases/v2.6.0.md)。
+当前源码版本为 `2.7.0`。本版本完成 Shell AST 安全分析、Composer 文件引用与可配置按键、自适应 token/context、IDE Bridge、远程 MCP、本地性能追踪，以及可双向通信的多 Agent mailbox/artifact 协作。当前协议为 workspace schema 14、memory schema 4、portable archive 6、session export 6 和 config 9。完整升级边界见 [2.7.0 发布说明](docs/releases/v2.7.0.md)。
 
 正式支持矩阵：Linux/macOS，Python 3.12。发布 CI 会在两个操作系统组合中执行测试、构建、依赖审计和安装冒烟。
 
@@ -17,7 +17,7 @@ python -m pip install --upgrade pip
 python -m pip install -e '.[test]'
 ```
 
-运行时依赖包括 `aiosqlite`、`openai`、`httpx`、`rich`、`prompt-toolkit`、`textual`、`mcp`、`PyYAML`、`tomlkit` 和 `keyring`。本地 FastEmbed 是可选能力：
+运行时依赖包括 `aiosqlite`、`openai`、`httpx`、`rich`、`prompt-toolkit`、`textual`、`mcp`、`tree-sitter`、`tree-sitter-bash`、`PyYAML`、`tomlkit` 和 `keyring`。本地 FastEmbed 是可选能力：
 
 ```bash
 python -m pip install -e '.[local-embeddings]'
@@ -75,6 +75,7 @@ printf '%s\n' "总结最近的改动" | capslock exec --json
 - `capslock backup create|list|verify|restore`：本机状态回滚快照。
 - `capslock export` / `capslock import`：创建或安全合并 portable 数据包。
 - `capslock doctor [--json|--strict|--network|--fix]`：检查配置、凭据、数据库、MCP、Skill 与生命周期 journal。
+- `capslock trace list|show|summary|prune`：查看或清理只保存在本机的脱敏性能 span。
 
 TUI 保留以下命令：
 
@@ -89,7 +90,7 @@ TUI 保留以下命令：
 
 输入 `/model` 可用方向键在 `deepseek-v4-flash` 与 `deepseek-v4-pro` 之间选择，也可直接执行 `/model <name>`。选择仅作用于当前 session 并随 session 恢复；新 session 仍采用配置默认模型。活跃 run 期间不能切换，队列中尚未开始的请求会使用切换后的模型。
 
-inline TUI 将原 full-screen 设计系统映射到终端主缓冲区：用户、回答和系统消息保留语义化左边框，Queue、Activity、会话元数据、用量和 Composer 组成一个带完整边框的普通 inline prompt block。该输入块不锚定窗口底部，而是始终出现在最新上下文之后，并随新输出向下移动。reasoning 默认折叠成一行摘要，`Ctrl-O` 可切换当前及后续活动的详细显示；`◆ CapsLock` 下的回答使用透明背景的 Rich Markdown、代码高亮、表格和终端链接。连续读取/搜索工具合并为一条 `Explored` 摘要，编辑、命令和失败结果单独突出。状态信息按 `>=100`、`72–99`、`<72` 三档隐藏次要元数据；模型思考、读取文件和工具执行期间显示动态状态，回答开始流出后不再重复显示 Thinking。`Ctrl-J` 插入换行，`Enter` 提交，`Ctrl-C` 取消当前 run 或在空闲时退出。可通过 `--no-spinner`、`--quiet`、`CAPSLOCK_NO_SPINNER=1` 或 `CI=true` 禁用动态状态。启动 banner 保留 v1.7.1 的 `Welcome back`、CapsLock 字符画和 Tips 布局。
+inline TUI 将原 full-screen 设计系统映射到终端主缓冲区：用户、回答和系统消息保留语义化左边框，Queue、Activity、会话元数据、用量和 Composer 组成一个带完整边框的普通 inline prompt block。该输入块不锚定窗口底部，而是始终出现在最新上下文之后，并随新输出向下移动。reasoning 默认折叠成一行摘要，`Ctrl-O` 可切换当前及后续活动的详细显示；`◆ CapsLock` 下的回答使用透明背景的 Rich Markdown、代码高亮、表格和终端链接。连续读取/搜索工具合并为一条 `Explored` 摘要，编辑、命令和失败结果单独突出。Composer 支持 `$skill` 与 `@file[:line[-line]]` 补全，只有显式引用才会把有界文件内容作为不可信数据加入当前请求；`${CAPSLOCK_HOME:-~/.capslock}/keybindings.json` 可覆盖提交、换行、取消和详情按键并启用 Vim mode。`Ctrl-J` 插入换行，`Enter` 提交，`Ctrl-C` 取消当前 run 或在空闲时退出。可通过 `--no-spinner`、`--quiet`、`CAPSLOCK_NO_SPINNER=1` 或 `CI=true` 禁用动态状态。
 
 保留的 fullscreen TUI 使用 Textual 的固定输入区和可滚动 transcript，并进入
 终端 alternate screen。最终回答按
@@ -176,7 +177,7 @@ path = "**/.env*"
 - 文件动作在提案和执行时校验路径、内容与哈希，且支持安全 `/undo`。
 - Shell 通过确定性规则、结构化权限和 OS 沙箱执行；默认断网，越界、联网或宿主执行必须单独授权，取消使用 TERM→KILL 收尾。
 - Web 只访问公开 HTTP/HTTPS 地址，拒绝私网、重定向越界和非文本响应；来源始终是不可信数据。
-- MCP 只使用显式配置的本地 stdio server 和工具 allowlist。
+- MCP 只连接显式配置且带工具 allowlist 的 server；本地支持 stdio，远程支持公开 HTTPS 上的 Streamable HTTP/SSE。项目配置不得保存 header/env 凭据，Authorization 必须从本机 `env:` 或 `keyring:` 引用解析，远程 mutating tool 失败不会自动重放。
 - 本地工具插件必须显式安装和逐工作区启用；安装、升级、权限变化和卸载均展示内容摘要与 capability 并记录审计。插件默认在 OS sandbox 中运行，通过宿主 broker 请求受限能力；没有 sandbox backend 时拒绝执行。
 
 ## Plan Mode
@@ -219,6 +220,8 @@ capslock plugin uninstall my-plugin --yes
 父 Agent 可通过 `delegate_agents` 一次委派最多四个本机子任务，默认最多并行两个。子 Agent 只有一层，使用排除 `.git`、`.capslock`、环境凭据和符号链接的私有快照；子数据库、session 和记忆上下文不会与父运行共享。
 
 子任务默认只有只读类工具，文件访问仍必须命中任务契约的路径 allowlist，空 allowlist 不授予文件访问。文件写入、Shell、Web 和 MCP 必须在任务契约中逐项声明；子工具目录不包含 `delegate_agents`，也不自动包含工作区插件。自由文本、证据和产物均是不可信数据，只有通过路径、schema、实际检查状态和 SHA-256 校验的输出才返回父 Agent。
+
+后台子任务使用持久化 mailbox 双向通信。父 Agent 可发送 instruction/response/cancel 并读取、确认 question/progress/response/artifact offer；子 Agent 通过契约绑定的 mailbox 工具读取与回传。artifact offer 的 SHA-256 由子端从受限快照自动计算，发布时父端再次校验 allowlist、大小、摘要和父工作区 snapshot baseline，避免覆盖并发修改。
 
 ```text
 /agents
@@ -282,10 +285,10 @@ Inspect relevant files and return an evidence-backed summary.
 
 ## 配置
 
-配置根必须包含 `config_version = 6`。config v3/v4/v5 会在原子备份后自动迁移；其他非当前格式拒绝加载。多模型使用 provider、credential reference、profile 和角色路由：
+配置根必须包含 `config_version = 9`。config v3-v8 会在原子备份后自动迁移；其他非当前格式拒绝加载。多模型使用 provider、credential reference、profile 和角色路由：
 
 ```toml
-config_version = 6
+config_version = 9
 
 [providers.primary]
 kind = "openai_compatible"
@@ -346,6 +349,7 @@ background_enabled = true
 output_bytes = 100000
 
 [context]
+tokenizer = "adaptive" # adaptive | heuristic | tiktoken:<encoding>
 auto_compact = true
 trigger_ratio = 0.80
 target_ratio = 0.60
@@ -361,6 +365,8 @@ max_concurrency = 2
 max_depth = 1
 max_child_tool_rounds = 16
 background_enabled = true
+mailbox_enabled = true
+message_ttl_seconds = 3600
 
 [lsp]
 enabled = true
@@ -397,6 +403,17 @@ web_max_redirects = 3
 [mcp]
 mcp_timeout_seconds = 30
 mcp_output_bytes = 100000
+remote_enabled = true
+
+[bridge]
+enabled = false
+max_selection_bytes = 65536
+max_diagnostics = 500
+
+[observability]
+enabled = true
+retention_days = 30
+max_spans = 100000
 
 [memory]
 capture_enabled = true
@@ -420,7 +437,7 @@ CapsLock 只接受 canonical 布局：
 - 计划镜像：`.capslock/state/plans/<session-id>/<plan-id>.md`
 - 用户记忆：`${CAPSLOCK_HOME:-~/.capslock}/state/memory.sqlite3`
 
-工作区库和记忆库使用不同的 SQLite `application_id`。当前 workspace schema 为 12，memory schema 为 4；workspace schema v6-v11 与 memory schema v3 在 WAL checkpoint 和 SQLite backup 后事务升级。portable archive 与 session export 当前为 version 5，portable archive 读取兼容 version 3/4。旧 application ID、其他非当前 schema 或未知已有表均拒绝启动。
+工作区库和记忆库使用不同的 SQLite `application_id`。当前 workspace schema 为 14，memory schema 为 4；workspace schema v6-v13 与 memory schema v3 在 WAL checkpoint 和 SQLite backup 后事务升级。schema 13 保存脱敏性能 span，schema 14 保存带 digest/TTL/交付状态的 Agent mailbox。portable archive 与 session export 当前为 version 6，portable archive 读取兼容 version 3/4/5。旧 application ID、其他非当前 schema 或未知已有表均拒绝启动。
 
 ## 架构
 

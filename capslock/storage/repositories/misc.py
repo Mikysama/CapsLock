@@ -352,6 +352,12 @@ class SnapshotRepository(Repository):
         "plan_implementations",
         "run_governance",
         "tool_call_attempts",
+        "agent_tasks",
+        "agent_capabilities",
+        "agent_messages",
+        "agent_mailbox",
+        "agent_outputs",
+        "performance_spans",
     )
 
     async def session(self, session_id: str) -> dict[str, Any]:
@@ -374,6 +380,12 @@ class SnapshotRepository(Repository):
             elif table == "plan_implementations":
                 query = """SELECT i.* FROM plan_implementations i JOIN session_plans p
                            ON p.id=i.plan_id WHERE p.session_id=? ORDER BY i.created_at"""
+            elif table == "agent_tasks":
+                query = """SELECT t.* FROM agent_tasks t JOIN runs r
+                           ON r.id=t.parent_run_id WHERE r.session_id=? ORDER BY t.created_at"""
+            elif table in {"agent_capabilities", "agent_messages", "agent_mailbox", "agent_outputs"}:
+                query = f"""SELECT x.* FROM {table} x JOIN agent_tasks t ON t.id=x.task_id
+                            JOIN runs r ON r.id=t.parent_run_id WHERE r.session_id=? ORDER BY x.rowid"""
             else:
                 query = f"SELECT * FROM {table} WHERE session_id=? ORDER BY rowid"
             rows = await self.all(query, (session_id,))

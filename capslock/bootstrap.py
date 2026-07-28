@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Any
@@ -37,6 +38,7 @@ from .skills import SkillRegistry, SkillService
 from .storage.memory_repositories import MemoryRepositories
 from .storage.repositories import WorkspaceRepositories
 from .storage.artifacts import ToolArtifactStore
+from .bridge import IdeBridgeServer
 
 
 class WorkspaceApplication:
@@ -54,6 +56,7 @@ class WorkspaceApplication:
         mcp_manager: McpManager | None = None,
         lsp_manager: LspManager | None = None,
         plugin_client: PluginProcessClient | None = None,
+        ide_bridge: IdeBridgeServer | None = None,
         close_client: bool = True,
     ) -> None:
         self.workspace = workspace
@@ -67,6 +70,7 @@ class WorkspaceApplication:
         self._mcp_manager = mcp_manager
         self._lsp_manager = lsp_manager
         self._plugin_client = plugin_client
+        self._ide_bridge = ide_bridge
         self.queries = WorkspaceQueries(
             repositories.sessions,
             repositories.runs,
@@ -119,6 +123,11 @@ class WorkspaceApplication:
             )
             resources.push_async_callback(repositories.close)
             resources.push_async_callback(memory_repositories.close)
+            if settings.observability.enabled:
+                await repositories.performance.prune(
+                    days=settings.observability.retention_days,
+                    maximum=settings.observability.max_spans,
+                )
             artifacts = ToolArtifactStore(layout.artifacts, repositories.database)
             if session_id is None:
                 session = await repositories.sessions.create(
@@ -146,6 +155,18 @@ class WorkspaceApplication:
             )
             skill_service = SkillService(skill_registry, events.emit)
             policy = path_policy or WorkspacePolicy(root)
+            ide_bridge = None
+            if not child_mode and (
+                settings.bridge.enabled or os.environ.get("CAPSLOCK_IDE") == "1"
+            ):
+                ide_bridge = IdeBridgeServer(
+                    root,
+                    layout.root / "state",
+                    max_selection_bytes=settings.bridge.max_selection_bytes,
+                    max_diagnostics=settings.bridge.max_diagnostics,
+                )
+                await ide_bridge.start()
+                resources.push_async_callback(ide_bridge.close)
             execution_scope = WorkspaceExecutionScope(root, policy)
             active_worktree = await repositories.database.fetch_one(
                 "SELECT path FROM session_worktrees WHERE session_id=? AND active=1",
@@ -321,6 +342,10 @@ class WorkspaceApplication:
                 ),
                 document_settings=settings.documents,
                 planning=planning,
+                performance=(
+                    repositories.performance if settings.observability.enabled else None
+                ),
+                ide_bridge=ide_bridge,
                 input_cost_per_million=settings.model_config.input_cost_per_million,
                 output_cost_per_million=settings.model_config.output_cost_per_million,
                 max_run_tokens=settings.budget.max_run_tokens,
@@ -371,6 +396,7 @@ class WorkspaceApplication:
                 mcp_manager=mcp_manager,
                 lsp_manager=lsp_manager,
                 plugin_client=plugin_client,
+                ide_bridge=ide_bridge,
                 close_client=close_client,
             )
             resources.pop_all()
@@ -390,6 +416,8 @@ class WorkspaceApplication:
                 await self._lsp_manager.close()
             if self._plugin_client is not None:
                 await self._plugin_client.close()
+            if self._ide_bridge is not None:
+                await self._ide_bridge.close()
             if self.close_client:
                 await _close_clients(self.client)
         finally:

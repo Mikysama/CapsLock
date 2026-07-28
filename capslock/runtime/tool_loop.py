@@ -119,6 +119,10 @@ class ModelStepExecutor:
         emit: Callable[[AgentEventKind, dict[str, Any]], Awaitable[None]],
         governor: RunGovernor | None,
         tool_schemas: list[dict[str, object]] | None = None,
+        usage_observer: Callable[
+            [list[dict[str, object]], list[dict[str, object]], int], Awaitable[None]
+        ]
+        | None = None,
     ):
         step = await self.journal.create_step(run_id, RunStepKind.MODEL)
         content: list[str] = []
@@ -126,11 +130,12 @@ class ModelStepExecutor:
         calls: dict[int, dict[str, str]] = {}
         usage = ModelUsage()
         try:
+            active_schemas = self.tools.schemas if tool_schemas is None else tool_schemas
             stream = stream_model_response(
                 chat_model,
                 model=self.model,
                 messages=messages,
-                tools=self.tools.schemas if tool_schemas is None else tool_schemas,
+                tools=active_schemas,
             )
             timeout = governor.remaining_seconds() if governor else None
             async with asyncio.timeout(timeout):
@@ -172,6 +177,8 @@ class ModelStepExecutor:
             ),
             "".join(reasoning) or None,
         )
+        if usage_observer is not None:
+            await usage_observer(messages, active_schemas, usage.input_tokens)
         return step, message, usage
 
 
@@ -824,6 +831,10 @@ class ToolLoop:
             [list[dict[str, object]]], Awaitable[list[dict[str, object]]]
         ]
         | None = None,
+        usage_observer: Callable[
+            [list[dict[str, object]], list[dict[str, object]], int], Awaitable[None]
+        ]
+        | None = None,
     ) -> ToolLoopResult:
         active_model = chat_model or self.chat_model
         evidence, source_ids, memories = {}, set(), {}
@@ -889,6 +900,7 @@ class ToolLoop:
                 emit=emit,
                 governor=governor,
                 tool_schemas=(self.tools.plan_schemas if planning_active else self.tools.schemas),
+                usage_observer=usage_observer,
             )
             input_tokens += usage.input_tokens
             output_tokens += usage.output_tokens

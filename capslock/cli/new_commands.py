@@ -346,10 +346,16 @@ async def context_info(context, parts: list[str], raw: str) -> CommandOutcome:
     active = await repositories.compactions.active(context.session.session_id)
     if active is not None and active.last_message_id is not None:
         entries = [item for item in entries if int(item["id"]) > active.last_message_id]
-    message_tokens = estimate_tokens(entries)
-    system_tokens = estimate_tokens(await context.session._instructions())
-    tool_tokens = estimate_tokens(context.session.tools.schemas)
-    compaction_tokens = estimate_tokens(active.summary) if active else 0
+    manager = context.session.context_budget
+    messages = [
+        {"role": "system", "content": await context.session._instructions()},
+        *({"role": item["role"], "content": item["content"]} for item in entries),
+    ]
+    breakdown = manager.breakdown(messages)
+    message_tokens = breakdown.history
+    system_tokens = breakdown.system
+    tool_tokens = breakdown.tools
+    compaction_tokens = manager.estimator.estimate(active.summary) if active else 0
     total = system_tokens + tool_tokens + message_tokens + compaction_tokens
     budget = context.session.context_budget.input_budget
     trigger = int(budget * context.session.context_budget.settings.trigger_ratio)
@@ -358,6 +364,9 @@ async def context_info(context, parts: list[str], raw: str) -> CommandOutcome:
         f"Total: {total}/{budget} tokens ({total / budget:.1%}){live}",
         f"Auto-compact threshold: {trigger} ({context.session.context_budget.settings.trigger_ratio:.0%})",
         f"System {system_tokens}; tools {tool_tokens}; messages {message_tokens}; memory 0; compaction summary {compaction_tokens}",
+        f"Estimator: {manager.estimator.strategy} ratio {manager.estimator.ratio:.3f}; "
+        f"samples {manager.estimator.samples}; safety margin "
+        f"{manager.estimator.safety_margin:.0%}",
     ]
     if active:
         lines.append(

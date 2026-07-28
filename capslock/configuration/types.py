@@ -85,6 +85,7 @@ class ContextSettings:
     inline_tool_result_bytes: int = 16_384
     summary_max_tokens: int = 2_048
     max_compaction_failures: int = 3
+    tokenizer: str = "adaptive"
 
 
 @dataclass(frozen=True)
@@ -95,6 +96,8 @@ class AgentSettings:
     max_depth: int = 1
     max_child_tool_rounds: int = 16
     background_enabled: bool = True
+    mailbox_enabled: bool = True
+    message_ttl_seconds: int = 3600
 
 
 @dataclass(frozen=True)
@@ -147,6 +150,21 @@ class WebSettings:
 class McpSettings:
     mcp_timeout_seconds: float
     mcp_output_bytes: int
+    remote_enabled: bool = True
+
+
+@dataclass(frozen=True)
+class BridgeSettings:
+    enabled: bool = False
+    max_selection_bytes: int = 65_536
+    max_diagnostics: int = 500
+
+
+@dataclass(frozen=True)
+class ObservabilitySettings:
+    enabled: bool = True
+    retention_days: int = 30
+    max_spans: int = 100_000
 
 
 @dataclass(frozen=True)

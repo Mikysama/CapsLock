@@ -30,10 +30,12 @@ class McpManager:
         registry: McpRegistry,
         *,
         timeout_seconds: float = 30,
+        remote_enabled: bool = True,
     ) -> None:
         self.policy = policy
         self.registry = registry
         self.timeout_seconds = timeout_seconds
+        self.remote_enabled = remote_enabled
         self._sessions: dict[str, _Connection] = {}
         self.errors: dict[str, str] = {}
 
@@ -116,6 +118,8 @@ class McpManager:
             except asyncio.CancelledError:
                 raise
             except Exception:
+                if connection.server.transport != "stdio":
+                    raise
                 connection = await self._reconnect(server_name)
                 async with connection.lock:
                     async with asyncio.timeout(self.timeout_seconds):
@@ -135,18 +139,37 @@ class McpManager:
         try:
             from mcp import ClientSession, StdioServerParameters
             from mcp.client.stdio import stdio_client
+            from mcp.client.streamable_http import streamable_http_client
+            from mcp.client.sse import sse_client
         except ImportError as exc:
             raise RuntimeError("MCP support requires the mcp package") from exc
         server = await asyncio.to_thread(self.registry.get, name)
-        params = StdioServerParameters(
-            command=server.command,
-            args=list(server.args),
-            env={"PATH": os.environ.get("PATH", ""), **server.env},
-            cwd=str(self.policy.command_directory(server.cwd)),
-        )
+        if server.transport != "stdio" and not self.remote_enabled:
+            raise PermissionError("remote MCP transport is disabled")
         stack = AsyncExitStack()
         try:
-            read, write = await stack.enter_async_context(stdio_client(params))
+            if server.transport == "stdio":
+                params = StdioServerParameters(
+                    command=server.command,
+                    args=list(server.args),
+                    env={"PATH": os.environ.get("PATH", ""), **server.env},
+                    cwd=str(self.policy.command_directory(server.cwd)),
+                )
+                read, write = await stack.enter_async_context(stdio_client(params))
+            elif server.transport == "streamable_http":
+                import httpx
+
+                client = await stack.enter_async_context(
+                    httpx.AsyncClient(headers=server.headers or {})
+                )
+                transport = await stack.enter_async_context(
+                    streamable_http_client(server.url or "", http_client=client)
+                )
+                read, write = transport[:2]
+            else:
+                read, write = await stack.enter_async_context(
+                    sse_client(server.url or "", headers=server.headers or {})
+                )
 
             async def message_handler(message: Any) -> None:
                 raw = getattr(message, "root", message)

@@ -1,6 +1,6 @@
 # 当前运行内核与安全边界
 
-本文描述 CapsLock 2.6.0 的开发边界。产品在本机运行，支持直接能力工具、类型化斜杠命令、可审批 Action、受沙箱保护的通用 Shell、session 隔离后台进程、受管理 MCP/LSP、受控仓库指令和单层子 Agent；不提供远程控制、后台 daemon 或第三方可执行 Hook。
+本文描述 CapsLock 2.7.0 的开发边界。产品在本机运行，支持直接能力工具、类型化斜杠命令、可审批 Action、AST 分析与沙箱保护的通用 Shell、session 隔离后台进程、受管理的本地/远程 MCP、LSP、IDE 上下文桥、受控仓库指令和单层子 Agent；不提供远程控制、后台 daemon 或第三方可执行 Hook。
 
 ## 模块边界
 
@@ -21,7 +21,7 @@
 
 Shell 在 Linux Bubblewrap 或 macOS sandbox-exec 中执行，工作区可写、系统只读、默认断网；沙箱不可用时 fail closed。确定性规则可 hard deny 危险命令，快速分类器只能在默认无网络沙箱和高置信度边界内自动 allow。后台任务由 session-scoped process manager 管理并支持有界输出和 TERM→KILL 取消。
 
-MCP 使用唯一的受管理长连接路径，负责 tools/resources discovery、list-changed、重连、取消和 workspace 切换；不存在单次 stdio fallback。LSP 使用已安装或显式配置的 server，在只读、禁网沙箱中运行，支持请求取消、didOpen/didChange、崩溃恢复和空闲回收。
+MCP 使用唯一的受管理长连接路径，负责 stdio/Streamable HTTP/SSE、tools/resources discovery、list-changed、重连、取消和 workspace 切换；远程只接受公开 HTTPS，凭据只从私有配置引用解析，mutating call 不自动重放。LSP 使用已安装或显式配置的 server，在只读、禁网沙箱中运行，支持请求取消、didOpen/didChange、崩溃恢复和空闲回收。
 
 ## 权限与插件
 
@@ -43,7 +43,7 @@ consolidation 只自动合并完全重复的 automatic memory、遗忘来源已�
 
 ## 当前数据协议
 
-当前格式为 config 6、workspace schema 12、memory schema 4、portable archive 5、session export 5、JSONL schema 3 和 plugin protocol 4。workspace 启动支持 backup-first、事务化的 v6-v11→v12 升级；memory schema v3 与 config v3-v5 自动备份并升级。迁移失败保留原库和备份，不继续部分升级。
+当前格式为 config 9、workspace schema 14、memory schema 4、portable archive 6、session export 6、JSONL schema 3、IDE Bridge protocol 1 和 plugin protocol 4。workspace 启动支持 backup-first、事务化的 v6-v13→v14 升级；memory schema v3 与 config v3-v8 自动备份并升级。迁移失败保留原库和备份，不继续部分升级。
 
 ## 发布门禁
 

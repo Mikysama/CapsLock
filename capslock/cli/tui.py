@@ -28,6 +28,7 @@ from ..domain import (
     BudgetSnapshot,
 )
 from ..permissions import PermissionMode
+from ..layout import UserLayout
 from ..status import AgentStatus, status_for_event, status_message
 from .context import CliContext
 from .dispatch import dispatch_slash_command
@@ -115,6 +116,12 @@ async def run_tui(
         ],
         toggle_details=toggle_details,
         prelude_provider=prelude,
+        workspace=agent.workspace,
+        keybinding_path=(
+            context.application.layout.user.keybindings
+            if context.application is not None
+            else UserLayout.from_environment().keybindings
+        ),
     )
     state["inputs"] = inputs
 

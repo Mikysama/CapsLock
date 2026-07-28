@@ -3,6 +3,8 @@
 from .models import (
     AgentMessage,
     AgentMessageKind,
+    MailboxMessageKind,
+    MailboxMessageStatus,
     AgentTaskContract,
     AgentTaskState,
     CapabilityGrant,
@@ -19,6 +21,8 @@ from .runner import ChildAgentRunner
 __all__ = [
     "AgentMessage",
     "AgentMessageKind",
+    "MailboxMessageKind",
+    "MailboxMessageStatus",
     "AgentOutputVerifier",
     "AgentTaskContract",
     "AgentTaskState",

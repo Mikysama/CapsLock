@@ -19,6 +19,9 @@ class McpServer:
     env: dict[str, str]
     enabled: bool
     scope: str
+    transport: str = "stdio"
+    url: str | None = None
+    headers: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)

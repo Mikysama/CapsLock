@@ -17,7 +17,7 @@ def read_config_document(path: Path) -> dict[str, object]:
 
 def load_config_document(path: Path) -> dict[str, object]:
     document = read_config_document(path)
-    if document.get("config_version") in {3, 4, 5}:
+    if document.get("config_version") in {3, 4, 5, 6, 7, 8}:
         _upgrade_config(path)
         document = read_config_document(path)
     errors = [
@@ -30,18 +30,18 @@ def load_config_document(path: Path) -> dict[str, object]:
 
 
 def _upgrade_config(path: Path) -> None:
-    """Backup and atomically upgrade a v3-v5 document without losing comments."""
+    """Backup and atomically upgrade a v3-v8 document without losing comments."""
     import tomlkit
 
     source = path.read_text(encoding="utf-8")
     document = tomlkit.parse(source)
     source_version = document.get("config_version")
-    if source_version not in {3, 4, 5}:
+    if source_version not in {3, 4, 5, 6, 7, 8}:
         return
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     backup = path.with_name(f"{path.name}.v{source_version}-{timestamp}.bak")
     backup.write_text(source, encoding="utf-8")
-    document["config_version"] = 6
+    document["config_version"] = 9
     memory = document.setdefault("memory", {})
     if isinstance(memory, dict):
         old_enabled = bool(memory.pop("enabled", True))
@@ -93,10 +93,26 @@ def _upgrade_config(path: Path) -> None:
     agents = document.setdefault("agents", {})
     if isinstance(agents, dict):
         agents.setdefault("background_enabled", True)
+        agents.setdefault("mailbox_enabled", True)
+        agents.setdefault("message_ttl_seconds", 3600)
+    context = document.setdefault("context", {})
+    if isinstance(context, dict):
+        context.setdefault("tokenizer", "adaptive")
+    mcp = document.setdefault("mcp", {})
+    if isinstance(mcp, dict):
+        mcp.setdefault("remote_enabled", True)
+    document.setdefault(
+        "bridge",
+        {"enabled": False, "max_selection_bytes": 65536, "max_diagnostics": 500},
+    )
+    document.setdefault(
+        "observability",
+        {"enabled": True, "retention_days": 30, "max_spans": 100000},
+    )
     temporary: str | None = None
     try:
         with tempfile.NamedTemporaryFile(
-            "w", encoding="utf-8", dir=path.parent, prefix=".config-v6-", delete=False
+            "w", encoding="utf-8", dir=path.parent, prefix=".config-v9-", delete=False
         ) as handle:
             temporary = handle.name
             handle.write(tomlkit.dumps(document))

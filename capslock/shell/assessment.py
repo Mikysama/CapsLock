@@ -5,7 +5,8 @@ from __future__ import annotations
 import re
 import shlex
 from dataclasses import dataclass
-from pathlib import Path
+
+from .parser import parse_shell
 
 
 @dataclass(frozen=True)
@@ -13,6 +14,8 @@ class ShellAssessment:
     behavior: str
     reason: str
     parsed: tuple[str, ...] = ()
+    commands: tuple[str, ...] = ()
+    parser_available: bool = True
 
 
 _HARD_DENY_WORDS = {
@@ -84,15 +87,21 @@ def assess_shell(command: str) -> ShellAssessment:
         return ShellAssessment(
             "deny", "downloading and directly executing code is forbidden"
         )
+    syntax = parse_shell(command)
     try:
         words = tuple(shlex.split(command, posix=True))
     except ValueError:
         return ShellAssessment("ask", "command could not be parsed reliably")
     if not words:
         return ShellAssessment("ask", "command is empty")
-    if any(item in _HARD_DENY_WORDS for item in words):
+    command_names = syntax.commands
+    if any(item in _HARD_DENY_WORDS for item in (*words, *command_names)):
         return ShellAssessment(
-            "deny", "privilege escalation or sandbox escape command is forbidden", words
+            "deny",
+            "privilege escalation or sandbox escape command is forbidden",
+            words,
+            command_names,
+            syntax.parser_available,
         )
     if any(
         marker in token for token in words for marker in ("/dev/", "/proc/", "/sys/")
@@ -104,25 +113,35 @@ def assess_shell(command: str) -> ShellAssessment:
         return ShellAssessment(
             "deny", "recursive ownership or mode changes at root are forbidden", words
         )
-    if any(marker in command for marker in ("$(", "`", "${", "<<")):
-        return ShellAssessment("ask", "command contains dynamic shell expansion", words)
-    commands: list[str] = []
-    for segment in re.split(r"\s*(?:&&|\|\||;|\|)\s*", command):
-        try:
-            parsed = shlex.split(segment)
-        except ValueError:
-            return ShellAssessment("ask", "compound command could not be parsed", words)
-        while parsed and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", parsed[0]):
-            parsed.pop(0)
-        if parsed:
-            commands.append(Path(parsed[0]).name)
-    if commands and all(item in _SAFE_COMMANDS for item in commands):
+    if not syntax.parser_available:
+        return ShellAssessment(
+            "ask", "Bash parser is unavailable", words, (), False
+        )
+    if syntax.has_error:
+        return ShellAssessment(
+            "ask", "command could not be parsed reliably", words, command_names
+        )
+    if syntax.dynamic:
+        return ShellAssessment(
+            "ask",
+            "command contains dynamic shell syntax: " + ", ".join(syntax.dynamic),
+            words,
+            command_names,
+        )
+    if syntax.redirects:
+        return ShellAssessment(
+            "ask", "command contains shell redirection", words, command_names
+        )
+    if command_names and all(item in _SAFE_COMMANDS for item in command_names):
         return ShellAssessment(
             "allow",
             "all command segments are in the deterministic sandbox allowlist",
             words,
+            command_names,
         )
-    return ShellAssessment("ask", "command requires explicit review", words)
+    return ShellAssessment(
+        "ask", "command requires explicit review", words, command_names
+    )
 
 
 __all__ = ["ShellAssessment", "assess_shell"]

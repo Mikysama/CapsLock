@@ -46,6 +46,22 @@ class AgentMessageKind(StrEnum):
     APPROVAL_DECIDED = "approval_decided"
 
 
+class MailboxMessageKind(StrEnum):
+    INSTRUCTION = "instruction"
+    QUESTION = "question"
+    RESPONSE = "response"
+    PROGRESS = "progress"
+    ARTIFACT_OFFER = "artifact_offer"
+    CANCEL = "cancel"
+
+
+class MailboxMessageStatus(StrEnum):
+    QUEUED = "queued"
+    DELIVERED = "delivered"
+    ACKNOWLEDGED = "acknowledged"
+    EXPIRED = "expired"
+
+
 @dataclass(frozen=True)
 class CapabilityGrant:
     """Explicit child capability; omission means denial."""
@@ -179,6 +195,37 @@ class AgentTaskContract:
             verification_requirements=verification_requirements
             or VerificationRequirement(),
             memory_namespace=memory_namespace,
+        )
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "AgentTaskContract":
+        verification = value.get("verification_requirements", {})
+        return cls(
+            task_id=str(value["task_id"]),
+            parent_run_id=str(value["parent_run_id"]),
+            objective=str(value["objective"]),
+            input_context=dict(value.get("input_context", {})),
+            allowed_paths=tuple(value.get("allowed_paths", ())),
+            capabilities=tuple(
+                CapabilityGrant(
+                    CapabilityKind(str(item["kind"])),
+                    scope=item.get("scope"),
+                    plugin=item.get("plugin"),
+                )
+                for item in value.get("capabilities", ())
+            ),
+            model_profile=value.get("model_profile"),
+            limits=dict(value.get("limits", {})),
+            verification_requirements=VerificationRequirement(
+                output_schema=dict(verification.get("output_schema", {})),
+                required_paths=tuple(verification.get("required_paths", ())),
+                max_artifacts=int(verification.get("max_artifacts", 20)),
+                max_artifact_bytes=int(
+                    verification.get("max_artifact_bytes", 512_000)
+                ),
+                required_checks=tuple(verification.get("required_checks", ())),
+            ),
+            memory_namespace=value.get("memory_namespace"),
         )
 
     def as_dict(self) -> dict[str, Any]:

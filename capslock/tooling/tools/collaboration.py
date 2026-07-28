@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import replace
 from typing import Any
 
@@ -10,6 +11,7 @@ from ...collaboration.models import (
     CapabilityGrant,
     CapabilityKind,
     VerificationRequirement,
+    MailboxMessageKind,
 )
 from ..contracts import (
     ExecutionContext,
@@ -113,6 +115,108 @@ def delegation_tool() -> ToolDefinition:
             interrupt_behavior=InterruptBehavior.COMPLETE,
         ),
     )
+
+
+CHILD_MAILBOX_TOOL_NAMES = frozenset(
+    {"read_parent_messages", "send_parent_message", "ack_parent_message"}
+)
+
+
+def child_mailbox_tools(
+    collaboration: Any, contract: AgentTaskContract
+) -> list[ToolDefinition]:
+    """Bind a child-only mailbox view to one immutable task contract."""
+    if collaboration is None or not collaboration.mailbox_enabled:
+        return []
+
+    async def read_parent_messages(
+        _context: ExecutionContext, _arguments: dict[str, Any]
+    ) -> ToolOutcome:
+        values = await collaboration.read_child_messages(
+            contract.task_id, parent_run_id=contract.parent_run_id
+        )
+        return ToolOutcome.success({"messages": values})
+
+    async def send_parent_message(
+        context: ExecutionContext, arguments: dict[str, Any]
+    ) -> ToolOutcome:
+        kind = MailboxMessageKind(str(arguments["kind"]))
+        payload = dict(arguments["payload"])
+        if kind is MailboxMessageKind.ARTIFACT_OFFER:
+            requested = str(payload.get("path", ""))
+            path = context.policy.resolve(requested)
+            if not path.is_file():
+                raise ValueError("offered child artifact is not a regular file")
+            size = path.stat().st_size
+            if size > contract.verification_requirements.max_artifact_bytes:
+                raise ValueError("offered child artifact exceeds the contract size limit")
+            payload = {
+                "path": str(path.relative_to(context.policy.root)),
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                "size_bytes": size,
+                **(
+                    {"summary": str(payload["summary"])[:1000]}
+                    if payload.get("summary")
+                    else {}
+                ),
+            }
+        value = await collaboration.send_child_message(
+            contract.task_id,
+            parent_run_id=contract.parent_run_id,
+            kind=kind,
+            payload=payload,
+        )
+        return ToolOutcome.success(value)
+
+    async def acknowledge_parent_message(
+        _context: ExecutionContext, arguments: dict[str, Any]
+    ) -> ToolOutcome:
+        await collaboration.acknowledge_child_message(
+            str(arguments["message_id"]),
+            task_id=contract.task_id,
+            parent_run_id=contract.parent_run_id,
+        )
+        return ToolOutcome.success({"acknowledged": True})
+
+    return [
+        define_tool(
+            "read_parent_messages",
+            "Read new instructions, responses, or cancellation notices from the parent Agent.",
+            {"type": "object", "properties": {}, "additionalProperties": False},
+            read_parent_messages,
+            policy=ResolvedToolPolicy.safe_read(),
+        ),
+        define_tool(
+            "send_parent_message",
+            "Send a bounded question, progress update, response, or artifact offer to the parent Agent.",
+            {
+                "type": "object",
+                "properties": {
+                    "kind": {
+                        "type": "string",
+                        "enum": ["question", "progress", "response", "artifact_offer"],
+                    },
+                    "payload": {"type": "object"},
+                },
+                "required": ["kind", "payload"],
+                "additionalProperties": False,
+            },
+            send_parent_message,
+            policy=ResolvedToolPolicy(context_mutation=True),
+        ),
+        define_tool(
+            "ack_parent_message",
+            "Acknowledge one delivered parent mailbox message.",
+            {
+                "type": "object",
+                "properties": {"message_id": {"type": "string"}},
+                "required": ["message_id"],
+                "additionalProperties": False,
+            },
+            acknowledge_parent_message,
+            policy=ResolvedToolPolicy(context_mutation=True),
+        ),
+    ]
 
 
 async def _delegate(
@@ -234,7 +338,130 @@ def agent_control_tools() -> list[ToolDefinition]:
             deferred=True,
             search_hint="cancel stop background child Agent",
         ),
+        define_tool(
+            "send_agent_message",
+            "Send a bounded instruction, response, or cancellation to one owned child Agent task.",
+            {
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string"},
+                    "kind": {
+                        "type": "string",
+                        "enum": ["instruction", "response", "cancel"],
+                    },
+                    "payload": {"type": "object"},
+                },
+                "required": ["task_id", "kind", "payload"],
+                "additionalProperties": False,
+            },
+            _send_agent_message,
+            policy=ResolvedToolPolicy(
+                context_mutation=True,
+                interrupt_behavior=InterruptBehavior.COMPLETE,
+            ),
+            deferred=True,
+            search_hint="message instruct answer child Agent",
+        ),
+        define_tool(
+            "read_agent_messages",
+            "Read queued questions, progress, responses, and artifact offers from one owned child task.",
+            {
+                "type": "object",
+                "properties": {"task_id": {"type": "string"}},
+                "required": ["task_id"],
+                "additionalProperties": False,
+            },
+            _read_agent_messages,
+            policy=safe_read,
+            deferred=True,
+            search_hint="mailbox question progress child Agent",
+        ),
+        define_tool(
+            "ack_agent_message",
+            "Acknowledge one delivered child Agent mailbox message.",
+            {
+                "type": "object",
+                "properties": {"message_id": {"type": "string"}},
+                "required": ["message_id"],
+                "additionalProperties": False,
+            },
+            _ack_agent_message,
+            policy=ResolvedToolPolicy(context_mutation=True),
+            deferred=True,
+            search_hint="acknowledge child Agent message",
+        ),
+        define_tool(
+            "publish_agent_artifact",
+            "Publish one verified child artifact through allowlist, digest, and parent-baseline checks.",
+            {
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string"},
+                    "path": {"type": "string"},
+                    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                },
+                "required": ["task_id", "path", "sha256"],
+                "additionalProperties": False,
+            },
+            _publish_agent_artifact,
+            policy=ResolvedToolPolicy(
+                context_mutation=True,
+                external_side_effects=True,
+                interrupt_behavior=InterruptBehavior.COMPLETE,
+            ),
+            deferred=True,
+            search_hint="publish promote child Agent artifact",
+        ),
     ]
+
+
+async def _send_agent_message(
+    context: ExecutionContext, arguments: dict[str, Any]
+) -> ToolOutcome:
+    if context.collaboration is None:
+        return ToolOutcome.failure("multi-Agent collaboration is not configured")
+    value = await context.collaboration.send_message(
+        str(arguments["task_id"]),
+        parent_run_id=context.run_id,
+        kind=MailboxMessageKind(str(arguments["kind"])),
+        payload=dict(arguments["payload"]),
+    )
+    return ToolOutcome.success(value)
+
+
+async def _read_agent_messages(
+    context: ExecutionContext, arguments: dict[str, Any]
+) -> ToolOutcome:
+    if context.collaboration is None:
+        return ToolOutcome.failure("multi-Agent collaboration is not configured")
+    values = await context.collaboration.read_messages(
+        str(arguments["task_id"]), parent_run_id=context.run_id
+    )
+    return ToolOutcome.success({"messages": values})
+
+
+async def _ack_agent_message(
+    context: ExecutionContext, arguments: dict[str, Any]
+) -> ToolOutcome:
+    if context.collaboration is None:
+        return ToolOutcome.failure("multi-Agent collaboration is not configured")
+    await context.collaboration.acknowledge_message(
+        str(arguments["message_id"]), parent_run_id=context.run_id
+    )
+    return ToolOutcome.success({"acknowledged": True})
+
+
+async def _publish_agent_artifact(
+    context: ExecutionContext, arguments: dict[str, Any]
+) -> ToolOutcome:
+    if context.collaboration is None:
+        return ToolOutcome.failure("multi-Agent collaboration is not configured")
+    await context.collaboration.publish_artifact(
+        str(arguments["task_id"]),
+        {"path": str(arguments["path"]), "sha256": str(arguments["sha256"])},
+        parent_run_id=context.run_id,
+    )
+    return ToolOutcome.success({"published": True, "path": arguments["path"]})
 
 
 async def _get_agent_task(

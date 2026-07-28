@@ -4,7 +4,7 @@
 
 ## 稳定契约
 
-CapsLock 2.6.0 支持 Linux/macOS 与 Python 3.12。当前开发协议为 `permissions_version = 2`、`config_version = 6`、workspace schema 12、memory schema 4、portable archive 5、session export 5、JSONL schema 3 和插件 manifest/protocol/grant 4。config v3-v5、workspace schema v6-v11 与 memory schema v3 使用 backup-first 自动迁移。
+CapsLock 2.7.0 支持 Linux/macOS 与 Python 3.12。当前开发协议为 `permissions_version = 2`、`config_version = 9`、workspace schema 14、memory schema 4、portable archive 6、session export 6、JSONL schema 3、IDE Bridge protocol 1 和插件 manifest/protocol/grant 4。config v3-v8、workspace schema v6-v13 与 memory schema v3 使用 backup-first 自动迁移。
 
 公开运行入口为 `AgentSession.run_stream(RunRequest)`。CLI 通过应用查询面读取状态，不应依赖 repository 聚合对象。
 
@@ -47,7 +47,7 @@ Markdown 镜像位于 `.capslock/state/plans/<session-id>/<plan-id>.md`。数据
 | `search_files` | 使用 ripgrep 搜索文本并返回 Evidence。 | 只读；有稳定排序和结果上限。 |
 | `edit_file` / `create_file` / `write_file` | 通过 Action 修改文件。 | 审批、hash revalidate、diff 和 undo。 |
 | `git_status` / `git_diff` | 查询 Git 状态或差异。 | 只读；不接受任意 Git 参数。 |
-| `shell` | 在 OS 沙箱运行命令。 | 工作区可写、默认断网；危险命令 hard deny。 |
+| `shell` | 在 OS 沙箱运行命令。 | Tree-sitter Bash AST、工作区可写、默认断网；动态语法/重定向 fail closed，危险命令 hard deny。 |
 | `process_output` / `process_stop` | 管理 session 隔离的后台进程。 | 有界输出和 TERM→KILL 取消。 |
 | `ask_user` | 创建可持久化结构化问题。 | 暂停同一 invocation，可跨进程回答。 |
 | `enter_plan_mode` / `get_plan` / `update_plan` / `submit_plan` | 进入、读取、更新和提交当前 session 的计划。 | 主 Agent 专用；状态、归属、大小与 revision SHA-256 强校验。 |
@@ -60,6 +60,8 @@ Markdown 镜像位于 `.capslock/state/plans/<session-id>/<plan-id>.md`。数据
 | `web_search` / `web_fetch` | 搜索或抓取公开 Web 内容。 | SSRF、重定向、类型、大小和来源审计。 |
 | Memory / Skill 工具 | 查询记忆或加载 Skill 快照。 | 作用域隔离，只读，不可信上下文。 |
 | Worktree / Agent 工具 | 切换 session worktree 或控制子 Agent。 | context mutation 独占执行，跨 session 拒绝。 |
+| `send_agent_message` / `read_agent_messages` / `ack_agent_message` | 与后台子 Agent 双向通信。 | run/task 归属、32 KiB、TTL、digest 与交付状态强校验。 |
+| `publish_agent_artifact` | 发布子 Agent 提议的单个产物。 | allowlist、大小、SHA-256 与父 snapshot baseline 再校验。 |
 
 模型直接调用业务能力工具；需要副作用的工具由运行时创建 Action，统一 `ActionCoordinator` 决定是否等待批准或自动执行。TUI 为 Coordinator 安装阻塞式审批器：越过权限边界时显示动作类型、风险、目标，以及最多 40 行、4 KiB 的本机脱敏命令或 diff 预览，用户只能拒绝或执行且默认选择拒绝；原始参数、完整输出、文件正文和凭据不会进入展示事件。最终动作状态返回同一个模型工具调用，run 随后继续。非交互 `exec` 不安装审批器，仍保留 pending action、`waiting_approval` 终止事件和退出码 `3`。动作记录只使用 `request_json` 与 `result_json`，新增动作类型不需要 subtype 表。
 
@@ -71,7 +73,15 @@ Markdown 镜像位于 `.capslock/state/plans/<session-id>/<plan-id>.md`。数据
 
 ## 上下文预算
 
-输入预算由模型 `context_window - max_output_tokens` 计算，并计入 system prompt、memory、Skill catalog、工具 schema 与 checkpoint。达到触发比例后先外置大型工具结果，再保留最近六轮并由 fast 角色生成结构化摘要。摘要作为不可变 compaction artifact 保存来源边界、token、profile 与 digest；恢复时复用最近的有效记录。摘要失败使用确定性兜底，连续失败达到上限后返回 `context_budget_exceeded`，不会继续调用模型。
+输入预算由模型 `context_window - max_output_tokens` 计算，并计入 system prompt、memory、显式 attachment、Skill catalog、工具 schema 与 checkpoint。`context.tokenizer` 支持 `adaptive`、`heuristic` 与 `tiktoken:<encoding>`；adaptive 按模型 profile 保存 API usage 校准比率并始终保留安全余量。达到触发比例后先微压缩旧大型工具结果，再保留最近六轮并由 fast 角色生成结构化摘要。`/context` 展示 system/tools/history/attachment/memory 分类、估算器策略、样本和安全余量。摘要作为不可变 compaction artifact 保存来源边界、token、profile 与 digest；连续失败达到上限后返回 `context_budget_exceeded`。
+
+Composer 的 `@path[:line[-line]]` 仅在用户显式引用时读取工作区文本，最多四项、合计 64 KiB，并标记为不可信数据。启用 IDE Bridge 后，编辑器使用权限 `0600` 的 Unix socket descriptor 与随机 token 调用 JSON-RPC protocol 1；只有提示中的 `@selection` / `@diagnostics` 会展开最近上下文，路径仍受工作区私有文件边界限制。`CAPSLOCK_IDE=1` 可临时启用，持久配置使用 `[bridge]`。
+
+## 远程 MCP 与本地追踪
+
+MCP server 的 `transport` 可为 `stdio`、`streamable_http` 或 `sse`。远程 transport 必须使用解析到公开地址的 HTTPS URL，并受 `mcp.remote_enabled` 总开关控制；项目 `.capslock/mcp.json` 不允许 `env`/`headers`，私有 `.capslock/local/mcp.json` 中的 Authorization/Proxy-Authorization 只能写 `env:NAME` 或 `keyring:NAME` 引用。远程 tool call 发生不确定失败时不自动重放，避免重复副作用。
+
+本地 observability 只记录 category、name、status、duration 和经过脱敏的标量属性，不记录 prompt、工具参数或结果正文。`capslock trace list` 查看近期 span，`trace show <trace-id>` 查看单次 run，`trace summary` 聚合均值/最大值，`trace prune --days N` 清理；启动时还按 `[observability]` 的天数和总量上限裁剪。
 
 ## 插件隔离
 
@@ -186,6 +196,10 @@ capslock plugin|plugins install|upgrade <PATH> [--yes]
 capslock plugin|plugins list|show|verify <NAME>
 capslock plugin|plugins enable|disable|uninstall <NAME> [--yes]
 capslock doctor [--json] [--strict] [--network] [--fix] [--yes]
+capslock trace list [--limit N]
+capslock trace show <TRACE-ID>
+capslock trace summary
+capslock trace prune [--days N]
 ```
 
 裸入口只允许 TTY。`exec` 可从 stdin 读取 prompt，不进行交互审批或问答；产生待审批动作时保存 session/run/action 并返回退出码 3，预算或循环停止返回 4，等待用户输入返回 5。`capslock input answer|cancel` 结算请求后恢复原 run。
@@ -238,9 +252,9 @@ ToolLoop 每个模型或工具阶段写 `run_steps`。只有 completed 且带 ch
 
 `AgentTaskContract` 固定记录父 run、目标、输入数据、允许路径、能力、模型 profile、限制和验证要求。能力缺省为空，子运行仍仅装配工作区只读工具；写入、命令、Web 与 MCP 工具按显式 grant 加入，插件和二次委派不自动加入。
 
-调度器按契约顺序返回结果，兄弟任务失败不会互相取消，父运行取消会传播到全部未完成子任务。子快照排除 `.git`、`.capslock`、环境文件和符号链接，并使用自己的 workspace/memory 数据库。`AgentOutputVerifier` 校验输出对象、allowlist 路径、必需检查、文件大小和 SHA-256；未通过的输出只返回失败诊断。
+调度器按契约顺序返回结果，兄弟任务失败不会互相取消，父运行取消会传播到全部未完成子任务。子快照排除 `.git`、`.capslock`、环境文件和符号链接，并使用自己的 workspace/memory 数据库。后台任务通过独立 `agent_mailbox` 表交换 instruction/question/response/progress/artifact offer/cancel；消息先脱敏并限制为 32 KiB，读取时复验 SHA-256，状态为 queued/delivered/acknowledged/expired。`AgentOutputVerifier` 校验输出对象、allowlist 路径、必需检查、文件大小和 SHA-256；未通过的输出只返回失败诊断。
 
-workspace schema 12 使用 Agent、Tool invocation、input request、task dependency、session lineage、active compaction、context snapshot、session worktree 与 Plan Mode 表保存可恢复状态、审计与验证结果。portable archive 默认不包含 artifact 正文。
+workspace schema 14 使用 Agent、mailbox、performance span、Tool invocation、input request、task dependency、session lineage、active compaction、context snapshot、session worktree 与 Plan Mode 表保存可恢复状态、审计与验证结果。portable archive 默认不包含 artifact 正文。
 
 ## 记忆契约
 
@@ -262,9 +276,9 @@ workspace schema 12 使用 Agent、Tool invocation、input request、task depend
 
 ## 数据库与布局
 
-工作区数据库使用 application ID `0x434C4B32`、schema 12，记忆数据库使用 `0x434C4D32`。两者开启 foreign keys、WAL 和 5 秒 busy timeout；记忆库额外开启 secure delete 并设置文件权限 `0600`。schema 10→11 增加通用 permission request、一次性 grant、规则 matcher version 和完整决定审计，schema 11→12 增加计划、不可变 revision、计划审批和实施绑定；均不提升主 config version。
+工作区数据库使用 application ID `0x434C4B32`、schema 14，记忆数据库使用 `0x434C4D32`。两者开启 foreign keys、WAL 和 5 秒 busy timeout；记忆库额外开启 secure delete 并设置文件权限 `0600`。schema 12→13 增加脱敏本地 performance span，schema 13→14 增加 Agent mailbox；迁移均先 checkpoint 和备份。
 
-应用先读取 application ID 和 schema version，确认是当前格式或可迁移格式后才切换 WAL。workspace schema 为 12，memory schema 为 4；其他 application ID 或 schema 只报错，不修改原数据库。portable archive 和 session export 当前为 version 5，portable archive 读取兼容 version 3/4；导入后按数据库 revision 重建计划镜像。
+应用先读取 application ID 和 schema version，确认是当前格式或可迁移格式后才切换 WAL。workspace schema 为 14，memory schema 为 4；其他 application ID 或 schema 只报错，不修改原数据库。portable archive 和 session export 当前为 version 6，portable archive 读取兼容 version 3/4/5；导入后按数据库 revision 重建计划镜像。
 
 portable import 使用 archive ID 幂等记录。相同 ID 与内容跳过，同 ID 不同内容确定性重映射并重写引用。running run 转为 interrupted，approved/running action 转为 pending；导入的历史副作用不能在目标工作区执行 undo。
 

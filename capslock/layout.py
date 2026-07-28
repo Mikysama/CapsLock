@@ -51,6 +51,10 @@ class UserLayout:
         return self.home / "permissions.toml"
 
     @property
+    def keybindings(self) -> Path:
+        return self.home / "keybindings.json"
+
+    @property
     def canonical_memory(self) -> Path:
         return self.home / "state" / "memory.sqlite3"
 

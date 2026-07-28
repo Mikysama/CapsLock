@@ -19,7 +19,7 @@ async def upgrade_workspace_schema(
     if source_version is None:
         row = await (await connection.execute("PRAGMA user_version")).fetchone()
         source_version = int(row[0])
-    if source_version not in {6, 7, 8, 9, 10, 11}:
+    if source_version not in {6, 7, 8, 9, 10, 11, 12, 13}:
         raise ValueError(f"unsupported workspace upgrade source: {source_version}")
     checkpoint = await connection.execute("PRAGMA wal_checkpoint(FULL)")
     await checkpoint.close()
@@ -45,7 +45,11 @@ async def upgrade_workspace_schema(
             await connection.executescript(_UPGRADE_WORKSPACE_TEN)
         if source_version in {6, 7, 8, 9, 10}:
             await connection.executescript(_UPGRADE_WORKSPACE_ELEVEN)
-        await connection.executescript(_UPGRADE_WORKSPACE_TWELVE)
+        if source_version in {6, 7, 8, 9, 10, 11}:
+            await connection.executescript(_UPGRADE_WORKSPACE_TWELVE)
+        if source_version in {6, 7, 8, 9, 10, 11, 12}:
+            await connection.executescript(_UPGRADE_WORKSPACE_THIRTEEN)
+        await connection.executescript(_UPGRADE_WORKSPACE_FOURTEEN)
     except BaseException:
         await connection.rollback()
         raise
@@ -609,6 +613,51 @@ CREATE TABLE IF NOT EXISTS plan_implementations (
   updated_at TEXT NOT NULL
 ) STRICT;
 PRAGMA user_version=12;
+COMMIT;
+"""
+
+
+_UPGRADE_WORKSPACE_THIRTEEN = """
+BEGIN IMMEDIATE;
+CREATE TABLE IF NOT EXISTS performance_spans (
+  id TEXT PRIMARY KEY,
+  trace_id TEXT NOT NULL,
+  session_id TEXT REFERENCES sessions(id) ON DELETE CASCADE,
+  run_id TEXT REFERENCES runs(id) ON DELETE CASCADE,
+  parent_span_id TEXT REFERENCES performance_spans(id) ON DELETE SET NULL,
+  category TEXT NOT NULL,
+  name TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('ok','error','cancelled')),
+  duration_ms REAL NOT NULL CHECK(duration_ms>=0),
+  attributes_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(attributes_json)),
+  created_at TEXT NOT NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS idx_performance_spans_trace ON performance_spans(trace_id,created_at);
+CREATE INDEX IF NOT EXISTS idx_performance_spans_name ON performance_spans(category,name,created_at);
+PRAGMA user_version=13;
+COMMIT;
+"""
+
+
+_UPGRADE_WORKSPACE_FOURTEEN = """
+BEGIN IMMEDIATE;
+CREATE TABLE IF NOT EXISTS agent_mailbox (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
+  parent_run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  sender TEXT NOT NULL CHECK(sender IN ('parent','child','system')),
+  recipient TEXT NOT NULL CHECK(recipient IN ('parent','child')),
+  message_kind TEXT NOT NULL CHECK(message_kind IN ('instruction','question','response','progress','artifact_offer','cancel')),
+  payload_json TEXT NOT NULL CHECK(json_valid(payload_json)),
+  payload_sha256 TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued','delivered','acknowledged','expired')),
+  created_at TEXT NOT NULL,
+  expires_at TEXT,
+  delivered_at TEXT,
+  acknowledged_at TEXT
+) STRICT;
+CREATE INDEX IF NOT EXISTS idx_agent_mailbox_delivery ON agent_mailbox(task_id,recipient,status,created_at);
+PRAGMA user_version=14;
 COMMIT;
 """
 

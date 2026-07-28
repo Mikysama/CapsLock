@@ -426,6 +426,10 @@ def test_local_permission_updates_are_atomic_preserve_unknown_toml_and_reject_sy
 
 def test_shell_deterministic_hard_denies_and_model_threshold() -> None:
     assert assess_shell("git status").behavior == "allow"
+    assert assess_shell("printf 'a|b'").behavior == "ask"
+    assert assess_shell("git status && rg TODO | head -10").behavior == "allow"
+    assert assess_shell("git status > status.txt").behavior == "ask"
+    assert assess_shell("cat <<'EOF'\nhello\nEOF").behavior == "ask"
     assert assess_shell("sudo rm -rf /").behavior == "deny"
     assert assess_shell("rm -rf $TARGET").behavior == "deny"
     assert assess_shell("echo $(whoami)").behavior == "ask"
@@ -467,7 +471,7 @@ reasoning = ["main"]
         encoding="utf-8",
     )
     document = load_config_document(path)
-    assert document["config_version"] == 6
+    assert document["config_version"] == 9
     assert document["tools"]["schema_budget_tokens"] == 8000
     assert document["shell"]["classifier_threshold"] == 0.95
     backups = list(tmp_path.glob("config.toml.*.bak"))

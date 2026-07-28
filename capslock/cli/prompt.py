@@ -5,6 +5,7 @@ from __future__ import annotations
 import shutil
 from collections.abc import Callable
 from datetime import UTC, datetime
+from pathlib import Path
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer, Completion
@@ -12,6 +13,7 @@ from prompt_toolkit.document import Document
 from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.key_binding.key_bindings import merge_key_bindings
+from prompt_toolkit.enums import EditingMode
 from prompt_toolkit.layout.containers import HSplit, VSplit, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.menus import CompletionsMenu, MultiColumnCompletionsMenu
@@ -26,26 +28,38 @@ from ..permissions import PermissionMode
 from ..status import SPINNER_FRAMES
 from ..theme import build_prompt_style
 from .commands import command_descriptions, command_menu_completions
+from .keybindings import load_keybindings
+from .suggestions import (
+    StaticSuggestionProvider,
+    UnifiedSuggestionProvider,
+    WorkspaceFileSuggestionProvider,
+)
 
 
 class SlashCommandCompleter(Completer):
     def __init__(
-        self, skill_provider: Callable[[], list[tuple[str, str]]] | None = None
+        self,
+        skill_provider: Callable[[], list[tuple[str, str]]] | None = None,
+        *,
+        workspace: Path | None = None,
     ) -> None:
         self.skill_provider = skill_provider or (lambda: [])
+        providers = [StaticSuggestionProvider("$", "skill", self.skill_provider)]
+        if workspace is not None:
+            providers.append(WorkspaceFileSuggestionProvider(workspace))
+        self.provider = UnifiedSuggestionProvider(providers)
 
     def get_completions(self, document: Document, complete_event: object):
         prefix = document.text_before_cursor
-        if prefix.startswith("$"):
-            for name, description in self.skill_provider():
-                command = f"${name}"
-                if command.casefold().startswith(prefix.casefold()):
-                    yield Completion(
-                        command,
-                        start_position=-len(prefix),
-                        display=FormattedText([("class:command-name", command)]),
-                        display_meta=description,
-                    )
+        token = prefix.rsplit(maxsplit=1)[-1] if prefix else ""
+        if token.startswith(("$", "@")):
+            for item in self.provider.suggestions(token):
+                yield Completion(
+                    item.value,
+                    start_position=-len(token),
+                    display=FormattedText([("class:command-name", item.value)]),
+                    display_meta=item.description,
+                )
             return
         if not prefix.startswith("/"):
             return
@@ -470,7 +484,8 @@ def _updated_at(value: str) -> str:
 def refresh_slash_completion(buffer: object) -> None:
     prefix = buffer.document.text_before_cursor
     buffer.cancel_completion()
-    if prefix.startswith(("/", "$")):
+    token = prefix.rsplit(maxsplit=1)[-1] if prefix else ""
+    if prefix.startswith("/") or token.startswith(("$", "@")):
         buffer.start_completion(select_first=False)
 
 
@@ -524,30 +539,37 @@ def prompt_session(
     *,
     toggle_details: Callable[[], None] | None = None,
     prelude_provider: Callable[[], FormattedText] | None = None,
+    workspace: Path | None = None,
+    keybinding_path: Path | None = None,
 ) -> PromptSession[str]:
+    keymap = load_keybindings(keybinding_path)
     inline_bindings = KeyBindings()
 
-    @inline_bindings.add("c-j")
-    def _insert_newline(event: object) -> None:
-        event.current_buffer.insert_text("\n")
+    for key in keymap.bindings["insert_newline"]:
+        inline_bindings.add(key)(
+            lambda event: event.current_buffer.insert_text("\n")
+        )
 
-    @inline_bindings.add("c-m")
-    def _submit(event: object) -> None:
-        event.current_buffer.validate_and_handle()
+    for key in keymap.bindings["submit"]:
+        inline_bindings.add(key)(lambda event: event.current_buffer.validate_and_handle())
 
-    @inline_bindings.add("c-c", eager=True)
-    def _cancel_or_exit(event: object) -> None:
+    def cancel(event: object) -> None:
         event.app.exit(exception=KeyboardInterrupt())
+
+    for key in keymap.bindings["cancel"]:
+        inline_bindings.add(key, eager=True)(cancel)
 
     if toggle_details is not None:
 
-        @inline_bindings.add("c-o")
         def _toggle_details(event: object) -> None:
             toggle_details()
             event.app.invalidate()
 
+        for key in keymap.bindings["toggle_details"]:
+            inline_bindings.add(key)(_toggle_details)
+
     session = PromptSession(
-        completer=SlashCommandCompleter(skill_provider),
+        completer=SlashCommandCompleter(skill_provider, workspace=workspace),
         lexer=SlashCommandLexer(),
         key_bindings=merge_key_bindings([SLASH_KEY_BINDINGS, inline_bindings]),
         style=PROMPT_STYLE,
@@ -558,6 +580,7 @@ def prompt_session(
         erase_when_done=True,
         include_default_pygments_style=False,
         show_frame=True,
+        editing_mode=EditingMode.VI if keymap.vim_mode else EditingMode.EMACS,
     )
     bind_slash_completion_refresh(session.default_buffer)
     root = session.app.layout.container

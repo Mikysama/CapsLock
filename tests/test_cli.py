@@ -30,6 +30,9 @@ from capslock.cli.prompt import (
     select_permission_mode,
     select_session,
 )
+from capslock.cli.suggestions import WorkspaceFileSuggestionProvider
+from capslock.runtime.attachments import LocalAttachmentResolver
+from capslock.policy import WorkspacePolicy
 from capslock.cli.tui import (
     _RunRenderer,
     _TerminalWriter,
@@ -117,6 +120,7 @@ def test_parser_exposes_only_current_top_level_commands() -> None:
         "plugin",
         "plugins",
         "input",
+        "trace",
     }
     delete = parser.parse_args(["session", "delete"])
     assert delete.command == "session"
@@ -736,6 +740,18 @@ def test_inline_composer_ctrl_j_inserts_newline_and_enter_submits() -> None:
             pipe.send_text("first\x0asecond\r")
             result = asyncio.run(inputs.prompt_async())
     assert result == "first\nsecond"
+
+
+def test_file_suggestions_and_explicit_attachment_are_workspace_bounded(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("one\ntwo\nthree\n", encoding="utf-8")
+    values = list(WorkspaceFileSuggestionProvider(tmp_path).suggestions("@app"))
+    assert values[0].value == "@src/app.py"
+    expanded = LocalAttachmentResolver(WorkspacePolicy(tmp_path)).expand(
+        "Review @src/app.py:2-3"
+    )
+    assert 'path="src/app.py" lines="2-3"' in expanded
+    assert "two\nthree" in expanded
 
 
 def test_inline_composer_ctrl_c_exits_even_with_a_draft() -> None:

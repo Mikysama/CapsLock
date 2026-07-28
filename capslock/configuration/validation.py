@@ -14,7 +14,7 @@ from .rules import (
 from .types import ConfigIssue
 
 
-CONFIG_VERSION = 6
+CONFIG_VERSION = 9
 _GROUP_FIELDS = {
     "runtime": {"max_tool_rounds", "permission_mode"},
     "tools": {"schema_budget_tokens", "max_read_concurrency", "aggregate_result_bytes"},
@@ -35,6 +35,7 @@ _GROUP_FIELDS = {
         "inline_tool_result_bytes",
         "summary_max_tokens",
         "max_compaction_failures",
+        "tokenizer",
     },
     "agents": {
         "enabled",
@@ -43,6 +44,8 @@ _GROUP_FIELDS = {
         "max_depth",
         "max_child_tool_rounds",
         "background_enabled",
+        "mailbox_enabled",
+        "message_ttl_seconds",
     },
     "lsp": {
         "enabled",
@@ -67,7 +70,9 @@ _GROUP_FIELDS = {
         "web_max_bytes",
         "web_max_redirects",
     },
-    "mcp": {"mcp_timeout_seconds", "mcp_output_bytes"},
+    "mcp": {"mcp_timeout_seconds", "mcp_output_bytes", "remote_enabled"},
+    "bridge": {"enabled", "max_selection_bytes", "max_diagnostics"},
+    "observability": {"enabled", "retention_days", "max_spans"},
     "memory": {
         "capture_enabled",
         "recall_enabled",
@@ -317,6 +322,23 @@ def validate_semantics(document: dict[str, object]) -> None:
         ):
             if int(context.get(field, default)) <= 0:
                 raise ValueError(f"context.{field} must be positive")
+        tokenizer = str(context.get("tokenizer", "adaptive"))
+        if tokenizer != "adaptive" and not tokenizer.startswith("tiktoken:") and tokenizer != "heuristic":
+            raise ValueError("context.tokenizer must be adaptive, heuristic, or tiktoken:<encoding>")
+    bridge = document.get("bridge", {})
+    if isinstance(bridge, dict):
+        boolean(bridge.get("enabled", False))
+        if int(bridge.get("max_selection_bytes", 65_536)) < 1024:
+            raise ValueError("bridge.max_selection_bytes must be at least 1024")
+        if not 1 <= int(bridge.get("max_diagnostics", 500)) <= 5000:
+            raise ValueError("bridge.max_diagnostics must be between 1 and 5000")
+    observability = document.get("observability", {})
+    if isinstance(observability, dict):
+        boolean(observability.get("enabled", True))
+        if int(observability.get("retention_days", 30)) < 1:
+            raise ValueError("observability.retention_days must be positive")
+        if int(observability.get("max_spans", 100_000)) < 100:
+            raise ValueError("observability.max_spans must be at least 100")
     loop_detection = document.get("loop_detection", {})
     if isinstance(loop_detection, dict):
         loop_detection_settings(loop_detection)

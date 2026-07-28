@@ -52,8 +52,11 @@ async def build_integrations(
     )
     mcp = McpManager(
         policy,
-        McpRegistry(policy, layout=layout),
+        McpRegistry(
+            policy, layout=layout, remote_enabled=settings.mcp.remote_enabled
+        ),
         timeout_seconds=settings.mcp.mcp_timeout_seconds,
+        remote_enabled=settings.mcp.remote_enabled,
     )
     if not child_mode:
         await mcp.initialize()

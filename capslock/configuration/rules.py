@@ -173,6 +173,8 @@ def agent_settings(raw: dict[str, object]) -> AgentSettings:
         max_depth=int(raw.get("max_depth", 1)),
         max_child_tool_rounds=int(raw.get("max_child_tool_rounds", 16)),
         background_enabled=boolean(raw.get("background_enabled", True)),
+        mailbox_enabled=boolean(raw.get("mailbox_enabled", True)),
+        message_ttl_seconds=int(raw.get("message_ttl_seconds", 3600)),
     )
     if values.max_children < 1 or values.max_children > 32:
         raise ValueError("agents.max_children must be between 1 and 32")
@@ -182,6 +184,8 @@ def agent_settings(raw: dict[str, object]) -> AgentSettings:
         raise ValueError("agents.max_depth must be 1")
     if values.max_child_tool_rounds < 1:
         raise ValueError("agents.max_child_tool_rounds must be positive")
+    if not 1 <= values.message_ttl_seconds <= 86_400:
+        raise ValueError("agents.message_ttl_seconds must be between 1 and 86400")
     return values
 
 

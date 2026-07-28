@@ -52,6 +52,8 @@ def build_collaboration(
         proposal_handler=(
             memory.promote_agent_proposals if memory is not None else None
         ),
+        mailbox_enabled=settings.agents.mailbox_enabled,
+        message_ttl_seconds=settings.agents.message_ttl_seconds,
     )
     runner.collaboration = service
     if memory is not None:

@@ -207,7 +207,7 @@ def test_current_state_reopens_without_mutation(tmp_path: Path) -> None:
         try:
             workspace_version = (await workspace.fetch_one("PRAGMA user_version"))[0]
             memory_version = (await memory.fetch_one("PRAGMA user_version"))[0]
-            assert workspace_version == WORKSPACE_SCHEMA_VERSION == 12
+            assert workspace_version == WORKSPACE_SCHEMA_VERSION == 14
             assert memory_version == MEMORY_SCHEMA_VERSION == 4
         finally:
             await workspace.close()
@@ -275,7 +275,7 @@ PRAGMA user_version=10;
     async def upgrade() -> None:
         database = await WorkspaceDatabase.open(path)
         try:
-            assert (await database.fetch_one("PRAGMA user_version"))[0] == 12
+            assert (await database.fetch_one("PRAGMA user_version"))[0] == 14
             tables = {
                 row[0]
                 for row in await database.fetch_all(
@@ -341,7 +341,7 @@ PRAGMA user_version=11;
     async def upgrade() -> None:
         database = await WorkspaceDatabase.open(path)
         try:
-            assert (await database.fetch_one("PRAGMA user_version"))[0] == 12
+            assert (await database.fetch_one("PRAGMA user_version"))[0] == 14
             tables = {
                 row[0]
                 for row in await database.fetch_all(
@@ -375,7 +375,7 @@ def test_session_export_includes_all_snapshot_tables(tmp_path: Path) -> None:
             target = await manager.export(session.id, "exports/session")
             document = json.loads((target / "session.json").read_text(encoding="utf-8"))
             assert document["format"] == "capslock-session-export"
-            assert document["version"] == 5
+            assert document["version"] == 6
             assert document["sessions"][0]["id"] == session.id
             assert document["messages"][0]["content"] == "Export this"
             assert document["runs"][0]["work_item_id"] == prepared.work_item.id

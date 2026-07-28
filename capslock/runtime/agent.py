@@ -59,6 +59,7 @@ from ..tooling.contracts import ExecutionContext
 from ..tooling.contracts import ToolOutcome, ToolOutcomeStatus, ToolPause
 from ..tooling.executor import ToolRuntime
 from .context import CitationResolver, ContextBudgetManager, citation_data
+from .attachments import LocalAttachmentResolver
 from .engine import MemoryRunMode, RunEngine, RunRequest
 from ..instructions import InstructionLoader
 from .model import ChatModel
@@ -140,6 +141,8 @@ class AgentSession:
         shell_classifier_factory: Callable[[Any], Any] | None = None,
         document_settings: Any = None,
         planning: Any = None,
+        performance: Any = None,
+        ide_bridge: Any = None,
     ) -> None:
         self.workspace = workspace.resolve()
         self.model = model_name
@@ -174,6 +177,7 @@ class AgentSession:
         self.shell_classifier_factory = shell_classifier_factory
         self.document_settings = document_settings
         self.planning = planning
+        self.performance = performance
         self._active_model_session = None
         self._active_memory_mode = MemoryRunMode.DEFAULT
         self.max_tool_rounds = max_tool_rounds
@@ -196,6 +200,8 @@ class AgentSession:
             model_name=model_name,
             tool_schemas=self.tools.schemas,
             memory=memory,
+            attachment_resolver=LocalAttachmentResolver(policy, bridge=ide_bridge),
+            settings_store=settings_store,
         )
         self._active_runs = 0
         self.citations = CitationResolver(sources)
@@ -593,14 +599,31 @@ class AgentSession:
             if checkpoint:
                 messages = list(checkpoint.get("messages", []))
             else:
-                context_result = await self.context_budget.build(
-                    self.session_id,
-                    prompt,
-                    run_id=run_id,
-                    instructions=await self._instructions(),
-                    summarizer=model_session.for_role(ModelRole.FAST),
-                    memory_enabled=memory_mode is MemoryRunMode.DEFAULT,
-                )
+                context_started = time.perf_counter()
+                context_status = "ok"
+                try:
+                    context_result = await self.context_budget.build(
+                        self.session_id,
+                        prompt,
+                        run_id=run_id,
+                        instructions=await self._instructions(),
+                        summarizer=model_session.for_role(ModelRole.FAST),
+                        memory_enabled=memory_mode is MemoryRunMode.DEFAULT,
+                    )
+                except asyncio.CancelledError:
+                    context_status = "cancelled"
+                    raise
+                except Exception:
+                    context_status = "error"
+                    raise
+                finally:
+                    await self._record_span(
+                        run_id,
+                        "context",
+                        "build",
+                        context_started,
+                        status=context_status,
+                    )
                 messages = context_result.messages
             if not prepared.resumed:
                 user_message_id = await self.sessions.append_message(
@@ -618,15 +641,33 @@ class AgentSession:
                     summarizer=model_session.for_role(ModelRole.FAST),
                 )
 
-            result = await self.tool_loop.run(
-                messages,
-                run_id,
-                emit=emit,
-                governor=governor,
-                authorize_limit=authorize_limit,
-                chat_model=model_session,
-                compact_context=compact_context,
-            )
+            loop_started = time.perf_counter()
+            loop_status = "ok"
+            try:
+                result = await self.tool_loop.run(
+                    messages,
+                    run_id,
+                    emit=emit,
+                    governor=governor,
+                    authorize_limit=authorize_limit,
+                    chat_model=model_session,
+                    compact_context=compact_context,
+                    usage_observer=self.context_budget.observe_usage,
+                )
+            except asyncio.CancelledError:
+                loop_status = "cancelled"
+                raise
+            except Exception:
+                loop_status = "error"
+                raise
+            finally:
+                await self._record_span(
+                    run_id,
+                    "runtime",
+                    "tool_loop",
+                    loop_started,
+                    status=loop_status,
+                )
             input_tokens, output_tokens = result.input_tokens, result.output_tokens
             for hit in context_result.recalls if context_result is not None else ():
                 result.memories[hit.memory.id] = hit.memory
@@ -938,6 +979,32 @@ class AgentSession:
                 + "\n</available-skills>"
             )
         return INSTRUCTIONS + ("\n\n" + "\n\n".join(additions) if additions else "")
+
+    async def _record_span(
+        self,
+        run_id: str,
+        category: str,
+        name: str,
+        started: float,
+        *,
+        status: str = "ok",
+        attributes: dict[str, Any] | None = None,
+    ) -> None:
+        if self.performance is None:
+            return
+        try:
+            await self.performance.record(
+                trace_id=run_id,
+                session_id=self.session_id,
+                run_id=run_id,
+                category=category,
+                name=name,
+                status=status,
+                duration_ms=(time.perf_counter() - started) * 1000,
+                attributes=attributes,
+            )
+        except Exception:
+            return
 
     def _run_context(
         self,

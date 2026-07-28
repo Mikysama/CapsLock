@@ -257,7 +257,28 @@ def _initial_config(**values: object) -> str:
         },
     )
     document.add("worktree", {"enabled": True, "max_per_session": 4})
-    document.add("agents", {"background_enabled": True})
+    document.add("context", {"tokenizer": "adaptive"})
+    document.add(
+        "agents",
+        {
+            "background_enabled": True,
+            "mailbox_enabled": True,
+            "message_ttl_seconds": 3600,
+        },
+    )
+    document.add("mcp", {"remote_enabled": True})
+    document.add(
+        "bridge",
+        {
+            "enabled": False,
+            "max_selection_bytes": 65536,
+            "max_diagnostics": 500,
+        },
+    )
+    document.add(
+        "observability",
+        {"enabled": True, "retention_days": 30, "max_spans": 100000},
+    )
     if values.get("tavily_credential"):
         parse_reference(str(values["tavily_credential"]))
         document.add("web", {"tavily_credential": values["tavily_credential"]})

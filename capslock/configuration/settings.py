@@ -10,6 +10,7 @@ from ..domain import LoopDetectionSettings
 from .types import (
     AgentSettings,
     BudgetSettings,
+    BridgeSettings,
     CommandSettings,
     ContextSettings,
     DocumentSettings,
@@ -18,6 +19,7 @@ from .types import (
     MemorySettings,
     ModelProfileSettings,
     ModelSettings,
+    ObservabilitySettings,
     ProviderSettings,
     RoutingSettings,
     RuntimeSettings,
@@ -52,6 +54,8 @@ class Settings:
     routing: RoutingSettings | None = None
     budget: BudgetSettings = BudgetSettings()
     loop_detection: LoopDetectionSettings = LoopDetectionSettings()
+    bridge: BridgeSettings = BridgeSettings()
+    observability: ObservabilitySettings = ObservabilitySettings()
 
     @classmethod
     def load(

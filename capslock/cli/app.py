@@ -157,6 +157,15 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_parser.add_argument("--network", action="store_true")
     doctor_parser.add_argument("--fix", action="store_true")
     doctor_parser.add_argument("--yes", action="store_true")
+    trace = subparsers.add_parser("trace", help="Inspect local performance spans")
+    trace_commands = trace.add_subparsers(dest="trace_command")
+    trace_list = trace_commands.add_parser("list")
+    trace_list.add_argument("--limit", type=_positive_int, default=50)
+    trace_show = trace_commands.add_parser("show")
+    trace_show.add_argument("trace_id")
+    trace_commands.add_parser("summary")
+    trace_prune = trace_commands.add_parser("prune")
+    trace_prune.add_argument("--days", type=_positive_int, default=30)
     return parser
 
 
@@ -233,6 +242,8 @@ async def async_main(
             from .diagnostics import doctor
 
             return await doctor(output, workspace, layout=layout, args=args)
+        if args.command == "trace":
+            return await _trace(output, workspace, layout, args)
         if args.command == "backup":
             from .lifecycle import backup_command
 
@@ -414,6 +425,32 @@ async def async_main(
             return 2
         errors.print(f"[error]Model or transport error:[/] {exc}")
         return 1
+
+
+async def _trace(output: Console, workspace: Path, layout: ProjectLayout, args) -> int:
+    import json
+
+    from ..storage.repositories import WorkspaceRepositories
+
+    repositories = await WorkspaceRepositories.open(layout.database, workspace=workspace)
+    try:
+        command = args.trace_command or "list"
+        if command == "list":
+            rows = await repositories.performance.list(limit=getattr(args, "limit", 50))
+        elif command == "show":
+            rows = await repositories.performance.trace(args.trace_id)
+        elif command == "summary":
+            rows = await repositories.performance.summary()
+        elif command == "prune":
+            removed = await repositories.performance.prune(days=args.days)
+            output.print(f"[success]Pruned {removed} performance spans.[/]")
+            return 0
+        else:
+            raise ValueError("unknown trace command")
+        output.print_json(json.dumps(rows, ensure_ascii=False, default=str))
+        return 0
+    finally:
+        await repositories.close()
 
 
 async def _sessions(
