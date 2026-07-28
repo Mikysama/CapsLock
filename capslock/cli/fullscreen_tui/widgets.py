@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Iterable
+from math import ceil
 
+from rich.cells import cell_len
 from rich.markdown import Markdown as RichMarkdown
 from rich.text import Text
 from textual import events
@@ -13,6 +16,7 @@ from textual.message import Message
 from textual.widgets import Static, TextArea
 
 from ...status import SPINNER_FRAMES
+from ...theme import terminal_style
 from .models import MessageKind, MessageViewModel, QueueViewModel, TuiState
 from .rendering import TransparentBackground
 
@@ -34,6 +38,12 @@ class Composer(TextArea):
         def __init__(self, direction: int) -> None:
             super().__init__()
             self.direction = direction
+
+    class RecallRequested(Message):
+        pass
+
+    class HelpRequested(Message):
+        pass
 
     completion_count = 0
 
@@ -62,6 +72,23 @@ class Composer(TextArea):
             event.prevent_default()
             event.stop()
             self.post_message(self.HistoryRequested(1))
+        elif event.key == "escape" and not self.text:
+            event.prevent_default()
+            event.stop()
+            self.post_message(self.RecallRequested())
+        elif event.character == "?" and not self.text:
+            event.prevent_default()
+            event.stop()
+            self.post_message(self.HelpRequested())
+
+    def fit_height(self, *, width: int, terminal_height: int) -> None:
+        content_width = max(1, width - 4)
+        visual_lines = sum(
+            max(1, ceil(cell_len(line) / content_width))
+            for line in (self.text.splitlines() or [""])
+        )
+        maximum = 5 if terminal_height < 24 else 8
+        self.styles.height = max(3, min(maximum, visual_lines + 2))
 
 
 class MessageWidget(Static):
@@ -80,7 +107,12 @@ class MessageWidget(Static):
             self.update(TransparentBackground(RichMarkdown(message.text or " ")))
             return
         if message.kind is MessageKind.USER:
-            self.update(Text.assemble(("❯ ", "bold #8CB9DC"), message.text))
+            self.update(
+                Text.assemble(
+                    ("❯ ", terminal_style("userPromptAccent", "bold")),
+                    message.text,
+                )
+            )
             return
         if message.kind is MessageKind.REASONING:
             text = message.text.strip()
@@ -88,14 +120,15 @@ class MessageWidget(Static):
                 first = " ".join(text.split())[:120]
                 self.update(
                     Text.assemble(
-                        ("◇ Reasoning ", "italic #718397"),
+                        ("◇ Reasoning ", terminal_style("reasoning", "italic")),
                         (first + ("…" if len(text) > 120 else ""), "dim"),
                     )
                 )
             else:
                 self.update(
                     Text.assemble(
-                        ("◇ Reasoning\n", "italic #9A8FC7"), (text, "italic dim")
+                        ("◇ Reasoning\n", terminal_style("thinking", "italic")),
+                        (text, "italic dim"),
                     )
                 )
             return
@@ -103,11 +136,11 @@ class MessageWidget(Static):
             self.update(_tool_text(message))
             return
         style = {
-            "failed": "#C77F86",
-            "cancelled": "#C4A96B",
-            "stopped": "#C4A96B",
-            "waiting_approval": "#C4A96B",
-        }.get(message.status or "", "#A9B8C8")
+            "failed": terminal_style("error"),
+            "cancelled": terminal_style("warning"),
+            "stopped": terminal_style("warning"),
+            "waiting_approval": terminal_style("waiting"),
+        }.get(message.status or "", terminal_style("textSecondary"))
         self.update(Text(message.text, style=style))
 
 
@@ -116,25 +149,37 @@ def _tool_text(message: MessageViewModel) -> Text:
     if message.collapsed:
         running = sum(tool.status == "running" for tool in message.tools)
         failed = sum(tool.status == "failed" for tool in message.tools)
+        counts = Counter(tool.category for tool in message.tools)
+        kinds = " · ".join(f"{name} {count}" for name, count in counts.items())
         marker = "●" if not running else "◌"
-        style = "#C77F86" if failed else "#72A7CC" if running else "#7FAF9A"
-        output.append(f"{marker} Read/search · {len(message.tools)} tools", style=style)
+        style = (
+            terminal_style("error")
+            if failed
+            else terminal_style("running")
+            if running
+            else terminal_style("success")
+        )
+        output.append(f"{marker} Explored {len(message.tools)} · {kinds}", style=style)
+        if running:
+            output.append(f" · {running} running", style=terminal_style("running"))
         if failed:
-            output.append(f" · {failed} failed", style="#C77F86")
+            output.append(f" · {failed} failed", style=terminal_style("error"))
         output.append("  Ctrl+O to expand", style="dim")
         return output
     for index, tool in enumerate(message.tools):
         if index:
             output.append("\n")
         marker, style = {
-            "running": ("◌", "#72A7CC"),
-            "success": ("●", "#7FAF9A"),
-            "failed": ("●", "#C77F86"),
-            "cancelled": ("●", "#C4A96B"),
-        }.get(tool.status, ("○", "#A9B8C8"))
+            "queued": ("○", terminal_style("waiting")),
+            "running": ("◌", terminal_style("running")),
+            "waiting_approval": ("◌", terminal_style("waiting")),
+            "success": ("●", terminal_style("success")),
+            "failed": ("●", terminal_style("error")),
+            "cancelled": ("●", terminal_style("warning")),
+        }.get(tool.status, ("○", terminal_style("textSecondary")))
         output.append(f"{marker} {tool.title}", style=style)
         if tool.target:
-            output.append(f"  {tool.target}", style="#89AFC8")
+            output.append(f"  {tool.target}", style=terminal_style("path"))
         if tool.detail:
             output.append(f"  {tool.detail}", style="dim")
         if tool.duration_ms is not None:
@@ -206,28 +251,13 @@ class SessionHeader(Static):
         permission: str,
         width: int,
     ) -> None:
-        if width < 72:
-            self.update(
-                Text.assemble(
-                    ("⇪ CapsLock", "bold #8CB9DC"), (f" · {title}", "#DCE6F2")
-                )
+        del workspace, model, permission, width
+        self.update(
+            Text.assemble(
+                ("⇪ CapsLock", terminal_style("borderFocus", "bold")),
+                (f" · {title}", "bold"),
             )
-        elif width < 100:
-            self.update(
-                Text.assemble(
-                    ("⇪ CapsLock  ", "bold #8CB9DC"),
-                    (title, "bold"),
-                    (f"\n{model} · {permission}", "dim"),
-                )
-            )
-        else:
-            self.update(
-                Text.assemble(
-                    ("⇪ CapsLock  ", "bold #8CB9DC"),
-                    (title, "bold"),
-                    (f"\n{workspace}  ·  {model}  ·  {permission}", "dim"),
-                )
-            )
+        )
 
 
 class QueueBar(Static):
@@ -237,11 +267,11 @@ class QueueBar(Static):
             self.update("")
             return
         self.display = True
-        output = Text("Queue  ", style="bold #C4A96B")
-        for index, item in enumerate(items):
-            if index:
-                output.append("  ·  ", style="dim")
-            output.append(f"{item.id[:8]} {item.status}: {item.text[:40]}")
+        latest = items[-1]
+        preview = " ".join(latest.text.split())[:60]
+        output = Text("Queued ", style=terminal_style("waiting", "bold"))
+        output.append(f"{len(items)} · {preview}")
+        output.append(" · ↑ edit", style="dim")
         self.update(output)
 
 
@@ -267,10 +297,21 @@ class CompletionBar(VerticalScroll):
             if index:
                 output.append("\n")
             marker = "❯ " if index == selected else "  "
-            output.append(marker, style="bold #8CB9DC" if index == selected else "dim")
+            output.append(
+                marker,
+                style=(
+                    terminal_style("borderFocus", "bold")
+                    if index == selected
+                    else "dim"
+                ),
+            )
             output.append(
                 name.ljust(name_width),
-                style="bold #DCE6F2" if index == selected else "bold #A8C6DD",
+                style=(
+                    terminal_style("textPrimary", "bold")
+                    if index == selected
+                    else terminal_style("command", "bold")
+                ),
             )
             output.append(f"  {description}", style="dim")
         self.query_one(".completion-content", Static).update(output)
@@ -297,7 +338,12 @@ class ActivityBar(Static):
         if active:
             glyph = SPINNER_FRAMES[self.frame % len(SPINNER_FRAMES)]
             self.frame += 1
-            self.update(Text(f"{glyph} {state.activity}…", style="bold #72A7CC"))
+            self.update(
+                Text(
+                    f"{glyph} {state.activity}…",
+                    style=terminal_style("running", "bold"),
+                )
+            )
             self._clear = False
         elif not self._clear:
             self.update(" ")
@@ -306,6 +352,10 @@ class ActivityBar(Static):
 
 
 class StatusBar(Static):
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)
+        self.frame = 0
+
     def update_status(
         self,
         state: TuiState,
@@ -315,38 +365,58 @@ class StatusBar(Static):
         workspace: str,
         width: int,
         context_limit: int,
-    ) -> None:
+    ) -> bool:
         usage = state.usage
-        context_messages = sum(
-            message.kind in {MessageKind.USER, MessageKind.ASSISTANT}
-            for message in state.messages
+        context = _context_label(
+            state.context.used_tokens, state.context.limit_tokens or context_limit
         )
+        activity = state.activity
+        if activity:
+            glyph = SPINNER_FRAMES[self.frame % len(SPINNER_FRAMES)]
+            self.frame += 1
+            activity = f"{glyph} {activity}…"
         if width < 72:
-            value = f"{permission} · {usage.input_tokens + usage.output_tokens} tok"
+            value = activity or f"{permission} · {context}"
         elif width < 100:
-            value = (
-                f"{model} · {permission} · ctx {context_messages} msg/{context_limit} tok · "
-                f"{usage.input_tokens}/{usage.output_tokens} tok · ${usage.cost_usd:.4f}"
+            status = (
+                f"{model} · {permission} · {context} · "
+                f"turn {usage.input_tokens + usage.output_tokens} tok"
             )
+            value = f"{activity} · {status}" if activity else status
         else:
-            value = (
-                f"{workspace}  ·  {model}  ·  {permission}  ·  "
-                f"ctx {context_messages} msg/{context_limit} tok  ·  "
-                f"{usage.input_tokens}/{usage.output_tokens} tok  ·  "
+            status = (
+                f"{workspace} · {model} · {permission} · {context} · "
+                f"turn {usage.input_tokens}/{usage.output_tokens} tok · "
                 f"${usage.cost_usd:.4f}"
             )
-        self.update(Text(value, style="#718397"))
+            value = f"{activity} · {status}" if activity else status
+        self.update(Text(value, style=terminal_style("textMuted")))
+        return bool(activity)
+
+
+def _context_label(used: int | None, limit: int) -> str:
+    limit_label = _compact_tokens(limit)
+    if used is None:
+        return f"ctx —/{limit_label}"
+    percent = used * 100 / max(1, limit)
+    return f"ctx {_compact_tokens(used)}/{limit_label} ({percent:.1f}%)"
+
+
+def _compact_tokens(value: int) -> str:
+    if value >= 1_000_000:
+        return f"{value / 1_000_000:.1f}m"
+    if value >= 1_000:
+        return f"{value / 1_000:.1f}k"
+    return str(value)
 
 
 class BottomArea(Vertical):
     def compose(self) -> ComposeResult:
         yield QueueBar(id="queue-bar")
-        yield CompletionBar(id="completions")
         yield Composer(
             id="composer",
             soft_wrap=True,
             show_line_numbers=False,
             placeholder="Ask CapsLock…  / for commands · $ for Skills",
         )
-        yield ActivityBar(id="activity")
         yield StatusBar(id="status")

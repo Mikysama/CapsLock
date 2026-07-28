@@ -11,15 +11,16 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Button, Input, OptionList, Static
+from textual.widgets import Button, Input, OptionList, SelectionList, Static
 from textual.widgets.option_list import Option
 
 from ...domain import ActionRecord, ApprovalChoice, ApprovalDecision, SessionInfo
 from ...models import SELECTABLE_MODELS
 from ...permissions import PermissionMode
-from ..presentation import ToolPresentation
+from ...theme import terminal_style
+from ..choices import ChoiceViewModel, questions_view_model
 from ..command_ui import PlanApprovalResult
-from .presentation import present_action
+from ..presentation import ToolPresentation, present_action, present_permission_request
 from .rendering import TransparentBackground
 from ..views.conversation import tool_group
 
@@ -81,7 +82,10 @@ class SideQuestionScreen(ModalScreen[None]):
     def compose(self) -> ComposeResult:
         with Vertical(id="dialog", classes="content-dialog"):
             yield Static(
-                Text.assemble(("/btw ", "bold #C4A96B"), (self.question, "dim")),
+                Text.assemble(
+                    ("/btw ", terminal_style("warning", "bold")),
+                    (self.question, "dim"),
+                ),
                 classes="dialog-title",
             )
             with VerticalScroll(classes="dialog-scroll"):
@@ -158,7 +162,9 @@ class EnterPlanModeScreen(ModalScreen[bool]):
                 "CapsLock wants to enter Plan Mode to explore and design an "
                 "implementation approach."
             )
-            yield Static(Text.assemble(("Objective  ", "dim"), (self.objective, "bold")))
+            yield Static(
+                Text.assemble(("Objective  ", "dim"), (self.objective, "bold"))
+            )
             yield Static(
                 "In Plan Mode, CapsLock will:\n"
                 "  - Explore the codebase\n"
@@ -311,74 +317,252 @@ class InputRequestScreen(ModalScreen[dict[str, object] | None]):
 
     def __init__(self, questions: list[dict[str, object]]) -> None:
         super().__init__()
-        self.questions = questions
+        self.questions = questions_view_model(questions)
+        self.step = 0
+        self.answers: dict[str, object] = {}
 
     def compose(self) -> ComposeResult:
         with Vertical(id="dialog", classes="content-dialog"):
             yield Static("CapsLock needs your input", classes="dialog-title")
             with VerticalScroll(classes="dialog-scroll"):
                 for index, question in enumerate(self.questions):
-                    options = question.get("options", [])
-                    labels = [
-                        str(item.get("label"))
-                        for item in options
-                        if isinstance(item, dict)
-                    ]
-                    yield Static(
-                        f"{question.get('question', 'Question')}\n"
-                        + " · ".join(
-                            f"{number}. {label}"
-                            for number, label in enumerate(labels, 1)
-                        ),
-                        markup=False,
-                    )
-                    yield Input(
-                        placeholder=(
-                            "Comma-separated choices or free text"
-                            if question.get("multiple")
-                            else "Choice number or free text"
-                        ),
-                        id=f"input-answer-{index}",
-                    )
+                    with Vertical(id=f"question-step-{index}", classes="question-step"):
+                        yield Static(
+                            f"Question {index + 1}/{len(self.questions)}\n{question.question}",
+                            classes="question-title",
+                            markup=False,
+                        )
+                        if question.multiple:
+                            values = [
+                                (item.label, item.value, False)
+                                for item in question.options
+                            ]
+                            if question.allow_free_text:
+                                values.append(("Other…", "__other__", False))
+                            yield SelectionList(*values, id=f"answer-options-{index}")
+                        else:
+                            options = [
+                                Option(
+                                    Text.assemble(
+                                        (item.label, ""),
+                                        (f"\n{item.detail}", "dim")
+                                        if item.detail
+                                        else ("", ""),
+                                    ),
+                                    id=item.value,
+                                )
+                                for item in question.options
+                            ]
+                            if question.allow_free_text:
+                                options.append(Option("Other…", id="__other__"))
+                            yield OptionList(*options, id=f"answer-options-{index}")
+                        if question.allow_free_text:
+                            yield Input(
+                                placeholder="Other answer",
+                                id=f"answer-other-{index}",
+                            )
+                        yield Static(
+                            "Choose an answer before continuing",
+                            id=f"answer-error-{index}",
+                            classes="question-error",
+                        )
+                with Vertical(id="answer-summary"):
+                    yield Static("Review answers", classes="question-title")
+                    yield Static("", id="answer-summary-content", markup=False)
             with Horizontal(classes="dialog-actions"):
                 yield Button("Cancel", id="cancel", variant="default")
+                yield Button("Back", id="back")
+                yield Button("Next", id="next", variant="primary")
                 yield Button("Submit", id="submit", variant="primary")
             yield Static(
-                "All questions require an answer · Esc cancel", classes="input-guide"
+                "↑/↓ choose · Space toggle · Enter next · Esc cancel",
+                classes="input-guide",
             )
 
     def on_mount(self) -> None:
-        self.query_one("#input-answer-0", Input).focus()
+        if not self.questions:
+            self.dismiss(None)
+            return
+        self._show_step(0)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "cancel":
             self.dismiss(None)
             return
-        answers: dict[str, object] = {}
-        for index, question in enumerate(self.questions):
-            entered = self.query_one(f"#input-answer-{index}", Input).value.strip()
-            if not entered:
+        if event.button.id == "back":
+            if self.step >= len(self.questions):
+                self._show_step(len(self.questions) - 1)
+            elif self.step > 0:
+                self._show_step(self.step - 1)
+            return
+        if event.button.id == "next":
+            if not self._save_step(self.step):
                 return
-            options = question.get("options", [])
-            values = [
-                str(item.get("value", item.get("label")))
-                for item in options
-                if isinstance(item, dict)
-            ]
+            if self.step + 1 < len(self.questions):
+                self._show_step(self.step + 1)
+            else:
+                self._show_summary()
+            return
+        if event.button.id == "submit":
+            self.dismiss(dict(self.answers))
 
-            def resolve(token: str) -> str:
-                return (
-                    values[int(token) - 1]
-                    if token.isdigit() and 1 <= int(token) <= len(values)
-                    else token
-                )
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        if event.option_list.id == f"answer-options-{self.step}":
+            self.answers[self.questions[self.step].identifier] = str(event.option.id)
 
-            answers[str(question.get("id"))] = (
-                [resolve(item.strip()) for item in entered.split(",")]
-                if question.get("multiple")
-                else resolve(entered)
+    def _save_step(self, index: int) -> bool:
+        question = self.questions[index]
+        other = (
+            self.query_one(f"#answer-other-{index}", Input).value.strip()
+            if question.allow_free_text
+            else ""
+        )
+        if question.multiple:
+            selected = list(
+                self.query_one(f"#answer-options-{index}", SelectionList).selected
             )
-        self.dismiss(answers)
+            if "__other__" in selected:
+                selected.remove("__other__")
+                if other:
+                    selected.append(other)
+                else:
+                    return self._invalid(index)
+            if not selected and other:
+                selected.append(other)
+            if not selected:
+                return self._invalid(index)
+            self.answers[question.identifier] = [str(value) for value in selected]
+        else:
+            value = self.answers.get(question.identifier)
+            if value == "__other__":
+                value = other
+            elif value is None and other:
+                value = other
+            if not value:
+                return self._invalid(index)
+            self.answers[question.identifier] = str(value)
+        self.query_one(f"#answer-error-{index}").display = False
+        return True
+
+    def _invalid(self, index: int) -> bool:
+        error = self.query_one(f"#answer-error-{index}")
+        error.display = True
+        error.add_class("invalid")
+        return False
+
+    def _show_step(self, index: int) -> None:
+        self.step = index
+        for item_index in range(len(self.questions)):
+            self.query_one(f"#question-step-{item_index}").display = item_index == index
+            self.query_one(f"#answer-error-{item_index}").display = False
+        self.query_one("#answer-summary").display = False
+        self.query_one("#back", Button).display = index > 0
+        self.query_one("#next", Button).display = True
+        self.query_one("#submit", Button).display = False
+        self.query_one(f"#answer-options-{index}").focus()
+
+    def _show_summary(self) -> None:
+        self.step = len(self.questions)
+        for index in range(len(self.questions)):
+            self.query_one(f"#question-step-{index}").display = False
+        rows = []
+        for question in self.questions:
+            answer = self.answers[question.identifier]
+            value = ", ".join(answer) if isinstance(answer, list) else str(answer)
+            rows.append(f"{question.question}\n  {value}")
+        self.query_one("#answer-summary-content", Static).update("\n\n".join(rows))
+        self.query_one("#answer-summary").display = True
+        self.query_one("#back", Button).display = True
+        self.query_one("#next", Button).display = False
+        self.query_one("#submit", Button).display = True
+        self.query_one("#submit", Button).focus()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class ChoiceScreen(ModalScreen[str | None]):
+    """Reusable, optionally filterable selector for slash-command workflows."""
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    def __init__(self, model: ChoiceViewModel) -> None:
+        super().__init__()
+        self.model = model
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="dialog", classes="select-dialog"):
+            yield Static(self.model.title, classes="dialog-title")
+            if self.model.filterable:
+                yield Input(placeholder="Filter options", id="choice-filter")
+            yield OptionList(id="choice-options")
+            yield Static(
+                "Type to filter · ↑/↓ choose · Enter apply · Esc cancel",
+                classes="input-guide",
+            )
+
+    def on_mount(self) -> None:
+        self._replace_options(self.model.options)
+        target = (
+            self.query_one("#choice-filter", Input)
+            if self.model.filterable
+            else self.query_one(OptionList)
+        )
+        target.focus()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "choice-filter":
+            self._replace_options(self.model.filtered(event.value))
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id != "choice-filter":
+            return
+        options = self.model.filtered(event.value)
+        if len(options) == 1:
+            self.dismiss(options[0].value)
+        else:
+            self.query_one(OptionList).focus()
+
+    def on_key(self, event) -> None:
+        if (
+            event.key in {"up", "down"}
+            and self.model.filterable
+            and self.query_one("#choice-filter", Input).has_focus
+        ):
+            event.prevent_default()
+            event.stop()
+            options = self.query_one(OptionList)
+            options.focus()
+            options.action_cursor_up() if event.key == "up" else options.action_cursor_down()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        if event.option.id is not None:
+            self.dismiss(str(event.option.id))
+
+    def _replace_options(self, values) -> None:
+        options = self.query_one("#choice-options", OptionList)
+        options.clear_options()
+        options.add_options(
+            [
+                Option(
+                    Text.assemble(
+                        (item.label, ""),
+                        (f"\n{item.detail}", "dim") if item.detail else ("", ""),
+                    ),
+                    id=item.value,
+                )
+                for item in values
+            ]
+        )
+        current = next(
+            (
+                index
+                for index, item in enumerate(values)
+                if item.value == self.model.current
+            ),
+            0,
+        )
+        options.highlighted = current if values else None
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -408,8 +592,21 @@ class ApprovalScreen(ModalScreen[ApprovalChoice | ApprovalDecision]):
             )
             if view.target:
                 yield Static(
-                    Text.assemble(("Target  ", "dim"), (view.target, "#89AFC8"))
+                    Text.assemble(
+                        ("Target  ", "dim"), (view.target, terminal_style("path"))
+                    )
                 )
+            for label, detail in view.metadata:
+                yield Static(Text.assemble((f"{label}  ", "dim"), (detail, "")))
+            if view.risk_reason:
+                yield Static(
+                    Text.assemble(
+                        ("Risk  ", "dim"),
+                        (view.risk_reason, terminal_style("warning")),
+                    )
+                )
+            if view.rollback:
+                yield Static(Text.assemble(("Rollback  ", "dim"), (view.rollback, "")))
             if view.preview:
                 lexer = (
                     "diff"
@@ -434,9 +631,15 @@ class ApprovalScreen(ModalScreen[ApprovalChoice | ApprovalDecision]):
                 yield Button("Yes, once", id="approve", variant="warning")
                 destinations = self._suggestion_destinations()
                 if "session" in destinations:
-                    yield Button("For session", id="approve_session")
+                    yield Button(
+                        f"Session: {self._suggestion_rule('session')}",
+                        id="approve_session",
+                    )
                 if "local" in destinations:
-                    yield Button("Always here", id="approve_local")
+                    yield Button(
+                        f"Local: {self._suggestion_rule('local')}",
+                        id="approve_local",
+                    )
             yield Static(
                 "Default: reject · Enter confirm · Esc reject", classes="input-guide"
             )
@@ -476,12 +679,24 @@ class ApprovalScreen(ModalScreen[ApprovalChoice | ApprovalDecision]):
 
     def _suggestion_destinations(self) -> set[str]:
         permission = self.action_record.request.get("_permission")
-        suggestions = permission.get("suggestions") if isinstance(permission, dict) else []
+        suggestions = (
+            permission.get("suggestions") if isinstance(permission, dict) else []
+        )
         return {
             str(item.get("destination"))
             for item in suggestions
             if isinstance(item, dict)
         }
+
+    def _suggestion_rule(self, destination: str) -> str:
+        return next(
+            (
+                rule
+                for target, rule in self.presentation.permission_rules
+                if target == destination
+            ),
+            "allow matching action",
+        )
 
 
 class PermissionApprovalScreen(ModalScreen[ApprovalChoice]):
@@ -496,13 +711,11 @@ class PermissionApprovalScreen(ModalScreen[ApprovalChoice]):
     def __init__(self, request: dict[str, object]) -> None:
         super().__init__()
         self.request = request
+        self.presentation = present_permission_request(request)
 
     def compose(self) -> ComposeResult:
-        destinations = {
-            str(item.get("destination"))
-            for item in self.request.get("suggestions", [])
-            if isinstance(item, dict)
-        }
+        destinations = {item[0] for item in self.presentation.permission_rules}
+        view = self.presentation
         with Vertical(id="dialog", classes="approval-dialog"):
             yield Static(
                 "Allow CapsLock to invoke this tool?",
@@ -510,20 +723,24 @@ class PermissionApprovalScreen(ModalScreen[ApprovalChoice]):
             )
             yield Static(
                 Text.assemble(
-                    (str(self.request.get("tool", "tool")), "bold"),
-                    (f"\n{self.request.get('reason', 'Approval required')}", "dim"),
+                    (view.title, "bold"),
+                    (f"\n{view.risk_reason or 'Approval required'}", "dim"),
                 )
             )
-            if self.request.get("preview"):
+            for label, detail in view.metadata:
+                yield Static(Text.assemble((f"{label}  ", "dim"), (detail, "")))
+            if view.preview:
                 with VerticalScroll(classes="approval-preview"):
-                    yield Static(str(self.request["preview"]), markup=False)
+                    yield Static(view.preview, markup=False)
             with Horizontal(classes="dialog-actions"):
                 yield Button("No, reject", id="reject", variant="default")
                 yield Button("Yes, once", id="approve_once", variant="warning")
                 if "session" in destinations:
-                    yield Button("For session", id="approve_session")
+                    yield Button(
+                        f"Session: {self._rule('session')}", id="approve_session"
+                    )
                 if "local" in destinations:
-                    yield Button("Always here", id="approve_local")
+                    yield Button(f"Local: {self._rule('local')}", id="approve_local")
             yield Static(
                 "Default: reject · Enter confirm · Esc reject", classes="input-guide"
             )
@@ -545,6 +762,16 @@ class PermissionApprovalScreen(ModalScreen[ApprovalChoice]):
 
     def action_approve(self) -> None:
         self.dismiss(ApprovalChoice.APPROVE_ONCE)
+
+    def _rule(self, destination: str) -> str:
+        return next(
+            (
+                rule
+                for target, rule in self.presentation.permission_rules
+                if target == destination
+            ),
+            "allow matching tool",
+        )
 
 
 class PermissionScreen(ModalScreen[PermissionMode | None]):

@@ -478,6 +478,20 @@ class AgentSession:
                         status=context_status,
                     )
                 messages = context_result.messages
+            await emit(
+                AgentEventKind.CONTEXT_UPDATED,
+                {
+                    "status": "running",
+                    "context": self._context_event_data(
+                        (
+                            context_result.estimated_tokens
+                            if context_result is not None
+                            else self.context_budget.estimate(messages)
+                        ),
+                        source="estimate",
+                    ),
+                },
+            )
             if not prepared.resumed:
                 user_message_id = await self.sessions.append_message(
                     self.session_id, run_id, "user", prepared.work_item.question
@@ -496,6 +510,33 @@ class AgentSession:
 
             loop_started = time.perf_counter()
             loop_status = "ok"
+
+            async def observe_context_usage(
+                active_messages: list[dict[str, object]],
+                active_schemas: list[dict[str, object]],
+                actual_input_tokens: int,
+            ) -> None:
+                await self.context_budget.observe_usage(
+                    active_messages, active_schemas, actual_input_tokens
+                )
+                used_tokens = (
+                    actual_input_tokens
+                    if actual_input_tokens > 0
+                    else self.context_budget.estimate(active_messages)
+                )
+                await emit(
+                    AgentEventKind.CONTEXT_UPDATED,
+                    {
+                        "status": "running",
+                        "context": self._context_event_data(
+                            used_tokens,
+                            source=(
+                                "provider" if actual_input_tokens > 0 else "estimate"
+                            ),
+                        ),
+                    },
+                )
+
             try:
                 result = await self.tool_loop.run(
                     messages,
@@ -505,7 +546,7 @@ class AgentSession:
                     authorize_limit=authorize_limit,
                     chat_model=model_session,
                     compact_context=compact_context,
-                    usage_observer=self.context_budget.observe_usage,
+                    usage_observer=observe_context_usage,
                 )
             except asyncio.CancelledError:
                 loop_status = "cancelled"
@@ -896,6 +937,19 @@ class AgentSession:
         )
         context.runtime_state["document_settings"] = self.document_settings
         return context
+
+    def _context_event_data(
+        self, used_tokens: int, *, source: str
+    ) -> dict[str, object]:
+        limit_tokens = self.context_budget.input_budget
+        used_tokens = max(0, int(used_tokens))
+        return {
+            "used_tokens": used_tokens,
+            "limit_tokens": limit_tokens,
+            "remaining_tokens": max(0, limit_tokens - used_tokens),
+            "used_percent": round(used_tokens * 100 / max(1, limit_tokens), 1),
+            "source": source,
+        }
 
     @staticmethod
     def _explicit_skill(question: str) -> tuple[str, str] | None:

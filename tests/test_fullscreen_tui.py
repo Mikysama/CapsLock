@@ -20,6 +20,7 @@ from capslock.cli.fullscreen_tui.app import (
     run_fullscreen_tui,
 )
 from capslock.cli.command_ui import PlanApprovalResult
+from capslock.cli.choices import ChoiceOption, ChoiceViewModel
 from capslock.cli.fullscreen_tui.models import (
     MessageKind,
     MessageViewModel,
@@ -31,7 +32,9 @@ from capslock.cli.fullscreen_tui.presentation import present_action
 from capslock.cli.fullscreen_tui.rendering import TransparentBackground
 from capslock.cli.fullscreen_tui.screens import (
     ApprovalScreen,
+    ChoiceScreen,
     EnterPlanModeScreen,
+    InputRequestScreen,
     MarkdownContentScreen,
     ModelScreen,
     PlanApprovalScreen,
@@ -102,6 +105,100 @@ def test_action_preview_is_redacted_and_bounded() -> None:
     assert "<redacted>" in (view.preview or "")
     assert len((view.preview or "").splitlines()) <= 41
     assert (view.preview or "").endswith("preview truncated")
+    assert view.category == "file"
+    assert ("File", "config.py") in view.metadata
+    assert any(label == "Changes" for label, _value in view.metadata)
+
+
+def test_shell_approval_presents_complete_command_timeout_and_rules() -> None:
+    action = ActionRecord(
+        "shell",
+        "session",
+        "run",
+        ActionType.COMMAND,
+        ActionStatus.PENDING,
+        "Run tests",
+        {
+            "command": "pytest tests/test_cli.py -q",
+            "cwd": ".",
+            "timeout_seconds": 120,
+            "_permission": {
+                "suggestions": [
+                    {
+                        "destination": "session",
+                        "behavior": "allow",
+                        "tool": "shell",
+                        "constraints": {"cwd": ".", "command_prefix": "pytest"},
+                    }
+                ]
+            },
+        },
+        None,
+        None,
+        "now",
+        risk_level="high",
+        risk_reason="Runs project code",
+        rollback="Inspect the diff",
+    )
+    view = present_action(action)
+    assert view.category == "shell"
+    assert view.preview == "pytest tests/test_cli.py -q"
+    assert ("Timeout", "120s") in view.metadata
+    assert view.risk_reason == "Runs project code"
+    assert view.permission_rules[0][0] == "session"
+    assert '"command_prefix": "pytest"' in view.permission_rules[0][1]
+
+
+@pytest.mark.parametrize(
+    "action_type,request_data,category,expected",
+    [
+        (
+            ActionType.WEB_FETCH,
+            {"url": "https://example.test/report"},
+            "web",
+            ("Host", "example.test"),
+        ),
+        (
+            ActionType.MCP_CALL,
+            {"server": "local", "tool": "lookup", "arguments": {"q": "safe"}},
+            "mcp",
+            ("Tool", "lookup"),
+        ),
+        (
+            ActionType.CREDENTIAL_ACCESS,
+            {"credential": "DEPLOY_TOKEN", "target": "release-plugin"},
+            "generic",
+            None,
+        ),
+    ],
+)
+def test_specialized_and_fallback_approval_presentations(
+    action_type: ActionType,
+    request_data: dict[str, object],
+    category: str,
+    expected: tuple[str, str] | None,
+) -> None:
+    action = ActionRecord(
+        "action",
+        "session",
+        "run",
+        action_type,
+        ActionStatus.PENDING,
+        "Review action",
+        request_data,
+        None,
+        None,
+        "now",
+        risk_level="high",
+    )
+    view = present_action(action)
+    assert view.category == category
+    if expected:
+        assert expected in view.metadata
+    if category == "generic":
+        assert view.preview is not None
+        assert "release-plugin" in view.preview
+        assert "DEPLOY_TOKEN" not in view.preview
 
 
 def test_reducer_groups_read_tools_and_collapses_completed_reasoning() -> None:
@@ -276,7 +373,7 @@ class _Agent:
             yield item
 
 
-@pytest.mark.parametrize("size", [(120, 32), (80, 24), (60, 20)])
+@pytest.mark.parametrize("size", [(120, 32), (80, 24), (60, 20), (48, 14)])
 def test_fullscreen_layout_at_supported_sizes(size: tuple[int, int]) -> None:
     async def scenario() -> None:
         app = CapsLockApp(CliContext(make_console(), _Agent()))
@@ -336,7 +433,7 @@ def test_fullscreen_message_widget_skips_unchanged_updates() -> None:
     asyncio.run(scenario())
 
 
-def test_fullscreen_user_prompt_background_fills_transcript_width() -> None:
+def test_fullscreen_user_prompt_is_gray_and_fills_transcript_width(monkeypatch) -> None:
     async def scenario() -> None:
         agent = _Agent()
         agent.queries.sessions = _Sessions([{"role": "user", "content": "hello"}])
@@ -348,7 +445,24 @@ def test_fullscreen_user_prompt_background_fills_transcript_width() -> None:
 
             assert message.outer_size.width == transcript.content_region.width
             assert message.styles.background.hex == "#E0E0E0"
+            assert message.styles.color.hex == "#202A33"
 
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    asyncio.run(scenario())
+
+
+def test_fullscreen_user_prompt_is_transparent_with_no_color(monkeypatch) -> None:
+    async def scenario() -> None:
+        agent = _Agent()
+        agent.queries.sessions = _Sessions([{"role": "user", "content": "hello"}])
+        app = CapsLockApp(CliContext(make_console(), agent))
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            message = app.query_one(MessageWidget)
+            assert message.styles.background.a == 0
+            assert message.styles.color.ansi == -1
+
+    monkeypatch.setenv("NO_COLOR", "1")
     asyncio.run(scenario())
 
 
@@ -446,6 +560,7 @@ def test_fullscreen_command_menu_is_vertical_complete_and_scrolls_selection() ->
         app = CapsLockApp(CliContext(make_console(), _Agent()))
         async with app.run_test(size=(80, 24)) as pilot:
             composer = app.query_one(Composer)
+            transcript_height = app.query_one(TranscriptView).region.height
             composer.load_text("/")
             await pilot.pause()
 
@@ -457,11 +572,28 @@ def test_fullscreen_command_menu_is_vertical_complete_and_scrolls_selection() ->
             ]
             assert "/quit" in rendered
             assert menu.max_scroll_y > 0
+            assert app.query_one(TranscriptView).region.height == transcript_height
 
             await pilot.press("up")
             await pilot.pause()
             assert app._completion_index == len(COMMANDS) - 1
             assert menu.scroll_y > 0
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("size,maximum", [((60, 20), 5), ((80, 24), 8)])
+def test_fullscreen_composer_grows_without_exceeding_responsive_cap(
+    size: tuple[int, int], maximum: int
+) -> None:
+    async def scenario() -> None:
+        app = CapsLockApp(CliContext(make_console(), _Agent()))
+        async with app.run_test(size=size) as pilot:
+            composer = app.query_one(Composer)
+            assert composer.region.height == 3
+            composer.load_text("\n".join(f"line {index}" for index in range(12)))
+            await pilot.pause()
+            assert composer.region.height == maximum
 
     asyncio.run(scenario())
 
@@ -483,6 +615,73 @@ def test_fullscreen_command_ui_uses_markdown_content_screen() -> None:
             assert "Result" in rendered
             assert "important" in rendered
             assert "**important**" not in rendered
+
+    asyncio.run(scenario())
+
+
+def test_fullscreen_choice_filter_preserves_valid_selection() -> None:
+    async def scenario() -> None:
+        app = CapsLockApp(CliContext(make_console(), _Agent()))
+        model = ChoiceViewModel(
+            "选择模型",
+            tuple(
+                ChoiceOption(str(index), f"选项 {index}", f"detail {index}")
+                for index in range(10)
+            ),
+            "6",
+        )
+        async with app.run_test(size=(80, 24)) as pilot:
+            pending = asyncio.create_task(app._modal_wait(ChoiceScreen(model)))
+            await pilot.pause()
+            app.screen.query_one("#choice-filter").value = "选项 6"
+            await pilot.pause()
+            await pilot.press("enter")
+            assert await pending == "6"
+
+    asyncio.run(scenario())
+
+
+def test_fullscreen_input_request_steps_multiselect_and_summary() -> None:
+    async def scenario() -> None:
+        app = CapsLockApp(CliContext(make_console(), _Agent()))
+        questions = [
+            {
+                "id": "mode",
+                "question": "选择模式",
+                "options": [
+                    {"label": "快速", "value": "fast"},
+                    {"label": "完整", "value": "full"},
+                ],
+                "multiple": False,
+                "allow_free_text": True,
+            },
+            {
+                "id": "checks",
+                "question": "选择检查",
+                "options": [
+                    {"label": "测试", "value": "tests"},
+                    {"label": "Lint", "value": "lint"},
+                ],
+                "multiple": True,
+                "allow_free_text": True,
+            },
+        ]
+        async with app.run_test(size=(80, 24)) as pilot:
+            pending = asyncio.create_task(
+                app._modal_wait(InputRequestScreen(questions))
+            )
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.click("#next")
+            await pilot.pause()
+            await pilot.press("space")
+            await pilot.click("#next")
+            await pilot.pause()
+            summary = app.screen.query_one("#answer-summary-content", Static)
+            assert "选择模式" in summary.render().plain
+            assert "选择检查" in summary.render().plain
+            await pilot.click("#submit")
+            assert await pending == {"mode": "fast", "checks": ["tests"]}
 
     asyncio.run(scenario())
 
@@ -541,9 +740,7 @@ def test_fullscreen_plan_approval_embeds_markdown_and_feedback() -> None:
             await pilot.pause()
             await pilot.press(*"Add rollback coverage", "enter")
             result = await pending
-            assert result == PlanApprovalResult(
-                "feedback", "Add rollback coverage"
-            )
+            assert result == PlanApprovalResult("feedback", "Add rollback coverage")
 
     asyncio.run(scenario())
 
@@ -738,12 +935,12 @@ def test_fullscreen_tui_only_paints_the_user_prompt_background() -> None:
             (
                 "background: transparent;",
                 "background: ansi_default;",
-                "background: #E0E0E0;",
+                "background: $userPromptBackground;",
             )
         )
         for line in background_rules
     )
-    assert background_rules.count("background: #E0E0E0;") == 1
+    assert background_rules.count("background: $userPromptBackground;") == 1
 
 
 def test_fullscreen_tui_root_uses_terminal_default_background() -> None:

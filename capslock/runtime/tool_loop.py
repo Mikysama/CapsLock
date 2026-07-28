@@ -621,24 +621,27 @@ class ToolLoop:
     async def _refresh_plan_attachment(
         self, messages: list[dict[str, object]], run_id: str
     ) -> bool:
-        prefix = "<capslock-plan-mode>"
+        prefixes = ("<capslock-plan-mode>", "<capslock-plan-context>")
         messages[:] = [
             item
             for item in messages
             if not (
                 item.get("role") == "system"
-                and str(item.get("content", "")).startswith(prefix)
+                and str(item.get("content", "")).startswith(prefixes)
             )
         ]
         context = self.context_factory(run_id)
         if context.planning is None:
             return False
-        attachment = await context.planning.attachment(context.session_id)
+        active_attachment = await context.planning.attachment(context.session_id)
+        attachment = active_attachment
+        if attachment is None:
+            attachment = await context.planning.context_attachment(context.session_id)
         if attachment is None:
             return False
         insertion = 1 if messages and messages[0].get("role") == "system" else 0
         messages.insert(insertion, {"role": "system", "content": attachment})
-        return True
+        return active_attachment is not None
 
     async def _cancel_after_barrier(
         self,

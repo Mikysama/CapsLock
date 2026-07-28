@@ -16,6 +16,8 @@ from rich.console import Console
 
 from capslock.cli.app import async_main, build_parser
 from capslock.cli.commands import COMMANDS, command_completions, resolve_command
+from capslock.cli.choices import ChoiceViewModel
+from capslock.cli.command_ui import Choice
 from capslock.cli.context import CliContext
 from capslock.cli.diagnostics import delete_session
 from capslock.cli.diagnostics import select_session as select_saved_session
@@ -41,6 +43,10 @@ from capslock.cli.tui import (
 )
 from capslock.cli.views.common import CAPSLOCK_ART, startup
 from capslock.cli.views.workflow import StatusView, render_status, result_status
+from capslock.application.foreground import (
+    ControllerEventKind,
+    ForegroundRunController,
+)
 from capslock.domain import (
     AgentEvent,
     AgentEventKind,
@@ -248,8 +254,21 @@ def test_jsonl_stream_sequences_nonterminal_and_terminal_events() -> None:
     async def scenario() -> None:
         console, output = console_buffer()
         events = [
-            event(AgentEventKind.THINKING, {}, 1),
-            event(AgentEventKind.TEXT_DELTA, {"text": "ok"}, 2),
+            event(
+                AgentEventKind.CONTEXT_UPDATED,
+                {
+                    "context": {
+                        "used_tokens": 100,
+                        "limit_tokens": 1000,
+                        "remaining_tokens": 900,
+                        "used_percent": 10.0,
+                        "source": "estimate",
+                    }
+                },
+                1,
+            ),
+            event(AgentEventKind.THINKING, {}, 2),
+            event(AgentEventKind.TEXT_DELTA, {"text": "ok"}, 3),
             event(
                 AgentEventKind.COMPLETED,
                 {
@@ -260,7 +279,7 @@ def test_jsonl_stream_sequences_nonterminal_and_terminal_events() -> None:
                     "usage": {},
                     "duration_ms": 1,
                 },
-                3,
+                4,
             ),
         ]
         assert (
@@ -270,13 +289,93 @@ def test_jsonl_stream_sequences_nonterminal_and_terminal_events() -> None:
             == 0
         )
         records = [json.loads(line) for line in output.getvalue().splitlines()]
-        assert [item["sequence"] for item in records] == [1, 2, 3]
-        assert [item["terminal"] for item in records] == [False, False, True]
+        assert [item["sequence"] for item in records] == [1, 2, 3, 4]
+        assert [item["event"] for item in records][0] == "context_updated"
+        assert [item["terminal"] for item in records] == [False, False, False, True]
         assert [item["status"] for item in records] == [
+            "running",
             "running",
             "running",
             "completed",
         ]
+
+    asyncio.run(scenario())
+
+
+def test_choice_view_model_filters_detail_and_preserves_preselection() -> None:
+    choices = [
+        Choice(str(index), f"选项 {index}", f"detail group-{index % 2}", index == 6)
+        for index in range(10)
+    ]
+    model = ChoiceViewModel.from_choices("选择", choices)
+    assert model.filterable
+    assert model.current == "6"
+    assert [item.value for item in model.filtered("选项 group-1")] == [
+        "1",
+        "3",
+        "5",
+        "7",
+        "9",
+    ]
+
+
+def test_foreground_queue_recall_cancels_and_restores_position() -> None:
+    async def scenario() -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        class Session:
+            memory = None
+
+            def __init__(self) -> None:
+                self.count = 0
+                self.cancelled: list[str] = []
+                self.reordered: list[tuple[str, int]] = []
+
+            async def enqueue(self, question: str, **_kwargs):
+                self.count += 1
+                return SimpleNamespace(
+                    id=f"item-{self.count}", question=question, position=self.count
+                )
+
+            async def cancel_queued_work_item(self, identifier: str):
+                self.cancelled.append(identifier)
+                return SimpleNamespace(position=3)
+
+            async def reorder_queued_work_item(self, identifier: str, position: int):
+                self.reordered.append((identifier, position))
+
+            async def run_stream(self, request):
+                if request.work_item_id == "item-1":
+                    started.set()
+                    await release.wait()
+                if False:
+                    yield None
+
+            async def delete_if_empty(self):
+                return False
+
+        session = Session()
+        events = []
+
+        async def consume(item):
+            events.append(item)
+
+        controller = ForegroundRunController(session, consumer=consume)
+        await controller.submit("active")
+        await started.wait()
+        await controller.submit("second")
+        await controller.submit("latest")
+        recalled = await controller.recall_latest()
+        assert recalled is not None and recalled.question == "latest"
+        assert session.cancelled == ["item-3"]
+        replacement = await controller.submit_recalled(recalled, "latest edited")
+        assert replacement.id == "item-4"
+        assert session.reordered == [("item-4", 3)]
+        assert [item.item_id for item in controller.queue] == ["item-2", "item-4"]
+        assert any(item.kind is ControllerEventKind.DEQUEUED for item in events)
+        release.set()
+        await controller.shutdown()
 
     asyncio.run(scenario())
 
@@ -729,7 +828,8 @@ def test_activity_footer_animates_thinking_and_running() -> None:
     assert "\n⠙ Thinking" in thinking_1
     assert "Thinking..." in thinking_0
     assert "Running read_file..." in running
-    assert "Thinking...\n- · - · 0/0 tok · details off" in thinking_0
+    assert "Thinking... · - · - · ctx —/0 · turn 0 tok" in thinking_0
+    assert thinking_0.count("\n") == 1
     assert "? /help" not in thinking_0
 
 
@@ -742,7 +842,9 @@ def test_inline_composer_ctrl_j_inserts_newline_and_enter_submits() -> None:
     assert result == "first\nsecond"
 
 
-def test_file_suggestions_and_explicit_attachment_are_workspace_bounded(tmp_path: Path) -> None:
+def test_file_suggestions_and_explicit_attachment_are_workspace_bounded(
+    tmp_path: Path,
+) -> None:
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "app.py").write_text("one\ntwo\nthree\n", encoding="utf-8")
     values = list(WorkspaceFileSuggestionProvider(tmp_path).suggestions("@app"))
@@ -794,7 +896,8 @@ def test_inline_command_menu_refreshes_for_fast_typing_exact_match_and_delete() 
 
 def test_tui_status_row_is_reserved_and_can_be_disabled() -> None:
     idle = "".join(item[1] for item in prompt_footer())
-    assert "\n \n- · - · 0/0 tok · details off" in idle
+    assert idle.count("\n") == 1
+    assert "- · ctx —/0" in idle
     assert "? /help" not in idle
     state: dict[str, object] = {
         "activity": None,
@@ -810,7 +913,7 @@ def test_tui_status_row_is_reserved_and_can_be_disabled() -> None:
     [
         (120, "/workspace · model · approve_for_me", None),
         (80, "model · approve_for_me", "/workspace"),
-        (60, "approve_for_me · 30 tok", "model"),
+        (60, "approve_for_me · ctx —/0", "model"),
     ],
 )
 def test_inline_footer_uses_fullscreen_responsive_breakpoints(
@@ -833,7 +936,7 @@ def test_inline_footer_uses_fullscreen_responsive_breakpoints(
             queued_items=(("queued-item", "inspect the repository"),),
         )
     )
-    assert "Queue queued-i inspect the repository" in header
+    assert "Queued 1 · inspect the repository · ↑ edit" in header
     assert expected in rendered
     if hidden:
         assert hidden not in rendered

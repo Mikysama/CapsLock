@@ -1,6 +1,6 @@
 # 当前运行内核与安全边界
 
-本文描述 CapsLock 2.7.1 的开发边界。产品在本机运行，支持直接能力工具、类型化斜杠命令、可审批 Action、AST 分析与沙箱保护的通用 Shell、session 隔离后台进程、受管理的本地/远程 MCP、LSP、IDE 上下文桥、受控仓库指令和单层子 Agent；不提供远程控制、后台 daemon 或第三方可执行 Hook。
+本文描述 CapsLock 2.7.2 的开发边界。产品在本机运行，支持直接能力工具、类型化斜杠命令、可审批 Action、AST 分析与沙箱保护的通用 Shell、session 隔离后台进程、受管理的本地/远程 MCP、LSP、IDE 上下文桥、受控仓库指令和单层子 Agent；不提供远程控制、后台 daemon 或第三方可执行 Hook。
 
 ## 模块边界
 
@@ -33,7 +33,13 @@ MCP 使用唯一的受管理长连接路径，负责 stdio/Streamable HTTP/SSE�
 
 Plan Mode 不扩展 `PermissionMode` 或 `RunMode`。Planning boundary 位于权限中间件之前，激活时仅允许显式标记的本地只读工具、用户提问和计划控制工具；Shell、Web、MCP、插件、Action、worktree、memory/task mutation 与子 Agent 均 fail closed。ToolLoop 每轮从数据库刷新 plan attachment 和工具 schema，恢复、compaction 与旧 invocation 不能依赖过期内存标志绕过边界。
 
-计划正文保存在不可变 revision 中并绑定 SHA-256，`.capslock/state/plans/` 只保存可重建镜像。提交批准幂等创建新的 implementation work item；新 run 恢复普通目录但仍使用原权限内核，批准计划不授予实施权限。
+计划正文保存在不可变 revision 中并绑定 SHA-256，`.capslock/state/plans/` 只保存可重建镜像。ToolLoop 将 active revision 的完整 JSON 快照注入每次模型调用；overlay 结束后，最近 plan 仍作为带状态的历史上下文保留，包括 `rejected`。历史快照必须标记为非指令、非批准、非权限，并对 XML 边界字符转义；工具目录只由 active attachment 决定。提交批准幂等创建新的 implementation work item；新 run 恢复普通目录但仍使用原权限内核，批准计划不授予实施权限。
+
+## CLI 状态与恢复
+
+inline 与 fullscreen 共用语义 theme token、选择/问题 view model、审批 presentation 和前台队列控制器。用户 prompt 使用浅灰背景、深色前景与焦点边线，CapsLock Markdown 回答保持透明；`NO_COLOR` 移除语义色和 prompt 背景。fullscreen 的 header 固定单行，footer 按 `<72`、`72-99`、`>=100` 列裁剪字段，Composer 在 3-8 行内增长，低终端上限为 5 行，补全浮层不参与 transcript 布局。
+
+`context_updated` 是不写入 run journal 的非终止状态事件，先发送 context build estimate，再在 provider usage 可用时发送实际 input tokens；JSONL schema 仍为 3。`ForegroundRunController` 使用 `deque + asyncio.Condition`，只允许召回最新未开始项，持久取消旧 work item 后用新 ID 恢复原队列位置。resume transcript 以 run 插入顺序为主序，每个 agent run 内 user 必须先于 assistant；时间戳只描述发生时间，不能承担跨表全序。
 
 ## 记忆与指令
 

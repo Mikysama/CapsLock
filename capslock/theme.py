@@ -17,6 +17,8 @@ THEME_TOKENS: Mapping[str, str] = {
     "surface": "transparent",
     "overlay": "transparent",
     "userPromptBackground": "#E0E0E0",
+    "userPromptForeground": "#202A33",
+    "userPromptAccent": "#315F84",
     "textPrimary": "#DCE6F2",
     "textSecondary": "#A9B8C8",
     "textMuted": "#718397",
@@ -70,6 +72,7 @@ RICH_STYLE_DEFINITIONS: Mapping[str, str] = {
     "error": THEME_TOKENS["error"],
     "info": THEME_TOKENS["info"],
     "user": THEME_TOKENS["user"],
+    "user.prompt": THEME_TOKENS["userPromptForeground"],
     "agent": THEME_TOKENS["agent"],
     "tool": THEME_TOKENS["tool"],
     "command": THEME_TOKENS["command"],
@@ -84,6 +87,7 @@ RICH_BOLD_STYLE_DEFINITIONS: Mapping[str, str] = {
     "primary.bold": THEME_TOKENS["primary"],
     "primary.soft.bold": THEME_TOKENS["primarySoft"],
     "user.label": THEME_TOKENS["accent"],
+    "user.prompt.label": THEME_TOKENS["userPromptAccent"],
     "agent.bold": THEME_TOKENS["agent"],
     "command.bold": THEME_TOKENS["command"],
     "error.bold": THEME_TOKENS["error"],
@@ -133,6 +137,15 @@ RICH_THEME = _make_rich_theme()
 def no_color_enabled(environ: Mapping[str, str] | None = None) -> bool:
     """Follow the NO_COLOR convention: presence of the variable disables color."""
     return "NO_COLOR" in (os.environ if environ is None else environ)
+
+
+def terminal_style(token: str, *attributes: str) -> str:
+    """Return a semantic Rich/Textual style that honors NO_COLOR."""
+
+    values = list(attributes)
+    if not no_color_enabled():
+        values.append(THEME_TOKENS[token])
+    return " ".join(values)
 
 
 def make_console(**kwargs: object) -> Console:

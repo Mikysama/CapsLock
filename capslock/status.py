@@ -70,7 +70,7 @@ def status_for_event(
     payload = data or {}
     if kind in {AgentEventKind.QUEUED, AgentEventKind.THINKING}:
         return AgentStatus.THINKING, None
-    if kind is AgentEventKind.TOOL_RUNNING:
+    if kind in {AgentEventKind.TOOL_QUEUED, AgentEventKind.TOOL_RUNNING}:
         name = str(payload.get("name", "unknown"))
         status = (
             AgentStatus.READING if name in _READING_TOOLS else AgentStatus.TOOL_CALLING
@@ -78,6 +78,22 @@ def status_for_event(
         return status, name
     if kind is AgentEventKind.TOOL_COMPLETED:
         return AgentStatus.ANALYZING, None
+    if kind is AgentEventKind.TOOL_PROGRESS:
+        detail = next(
+            (
+                str(payload[key])
+                for key in ("message", "phase", "event")
+                if payload.get(key)
+            ),
+            None,
+        )
+        return AgentStatus.TOOL_CALLING, detail
+    if kind is AgentEventKind.TOOL_PERMISSION:
+        return AgentStatus.WAITING, str(payload.get("name", "tool"))
+    if kind is AgentEventKind.TOOL_CANCELLED:
+        return AgentStatus.ANALYZING, None
+    if kind is AgentEventKind.CONTEXT_UPDATED:
+        return AgentStatus.THINKING, None
     if kind is AgentEventKind.TEXT_DELTA:
         return AgentStatus.GENERATING, None
     if kind in {

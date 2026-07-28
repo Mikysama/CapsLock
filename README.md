@@ -2,7 +2,7 @@
 
 CapsLock 是一个本机工作区 Agent，用于读取和修改代码、检索证据、运行受沙箱保护的 Shell、查询代码语义，以及按审批策略访问 Web、MCP 和本地插件。Tool Runtime v2 将工具契约、参数级策略、可恢复暂停、调度、富结果与审计统一到异步执行链。
 
-当前源码版本为 `2.7.1`。本版本收紧只读 Shell 自动批准，强化 Agent 产物原子发布、Web 与文件搜索硬上限，并完成 CLI、权限、运行日志、运行时、协作、记忆及工具模块的职责拆分和正式路径全量迁移。当前协议仍为 workspace schema 14、memory schema 4、portable archive 6、session export 6 和 config 9。完整边界见 [2.7.1 发布说明](docs/releases/v2.7.1.md)。
+当前源码版本为 `2.7.2`。本版本同步升级 inline/fullscreen 的信息密度、context 状态、结构化选择与审批体验，并修复 resume 对话顺序和 Plan 上下文恢复。当前协议仍为 workspace schema 14、memory schema 4、portable archive 6、session export 6 和 config 9。完整边界见 [2.7.2 发布说明](docs/releases/v2.7.2.md)。
 
 正式支持矩阵：Linux/macOS，Python 3.12。发布 CI 会在两个操作系统组合中执行测试、构建、依赖审计和安装冒烟。
 
@@ -98,18 +98,22 @@ Markdown 渲染，reasoning 与连续只读/搜索工具在完成后折叠；`Ct
 `Ctrl-R` 搜索输入历史，`Tab` 补全 `/` 命令或 `$` Skill，`Ctrl-J` 插入换行。
 输入 `/` 后，命令候选按纵向逐行显示，完整命令集可滚动浏览，并自动跟随
 `↑/↓` 当前选中项。
+Composer 空闲为 3 行并随换行增长，补全列表浮在输入区上方；底部状态按终端宽度
+显示 permission、真实 context 占用、模型、本轮 token 和费用。空输入按 `?` 查看
+快捷键，空输入按 `↑` 可召回最近一条尚未开始的队列请求进行编辑。
 `/model` 等需要模态选择的命令在独立 Textual worker 中等待结果，不会阻塞
 界面消息泵。
 活跃 run 中按 `Ctrl-C` 取消，空闲时按 `Ctrl-C` 退出。审批面板展示经过脱敏和
 截断的动作摘要、命令或 diff，并始终默认拒绝。终端小于 48×14 时只显示尺寸
 提示，不允许进行审批。
 
-inline 与 fullscreen 的根层仍使用终端原生默认背景，仅上下文中的用户 prompt 行
-使用浅灰背景并与左侧蓝色标记对齐；其余容器、消息、输入区和模态框保持透明。
+inline 与 fullscreen 的根层使用终端原生默认背景；用户 prompt 使用浅灰背景、
+深色文字和左侧焦点色边线，与保持透明的 CapsLock 回答明确区分。其余容器、消息、
+输入区和模态框保持透明。
 Markdown、代码高亮和输入光标行只移除字符背景，不改变前景色、粗细、斜体、
 下划线或链接样式。
 
-`capslock resume` 使用方向键选择历史 session 并重放完整可见对话；也可显式传入完整 session ID 或唯一前缀。已完成消息以及中断/失败 run 的用户问题和已产生文本都会进入恢复视图与后续模型上下文。
+`capslock resume` 使用方向键选择历史 session 并重放完整可见对话；也可显式传入完整 session ID 或唯一前缀。恢复视图按 run 的持久化插入顺序分组，每轮固定先显示用户提示、再显示 CapsLock 回答，不以可能冲突或倒退的时间戳跨轮混排。已完成消息以及中断/失败 run 的用户问题和已产生文本都会进入恢复视图与后续模型上下文。
 
 ## JSONL
 
@@ -133,6 +137,14 @@ Markdown、代码高亮和输入光标行只移除字符背景，不改变前景
 ```
 
 每个 run 只产生一个终止事件。终止类型为 `completed`、`waiting_approval`、`waiting_input`、`failed`、`cancelled` 或 `stopped`。完成事件携带 answer、citations、memory recalls、usage 和 duration；等待审批事件携带 action IDs；等待输入事件携带 input request ID；失败、取消与停止事件携带稳定的 error code 和 message。
+
+context build 后会输出非终止 `context_updated` 事件；首次快照的 `source` 为
+`estimate`，provider 返回 input usage 后更新为 `provider`。该事件用于实时界面和
+JSONL 消费，不写入 run journal，因此不要求数据库迁移：
+
+```json
+{"context":{"used_tokens":12400,"limit_tokens":128000,"remaining_tokens":115600,"used_percent":9.7,"source":"estimate"}}
+```
 
 `thinking.data.text` 只承载模型提供方返回的 reasoning；`text_delta.data.text` 与 `completed.data.answer` 承载面向用户的最终回答。两类文本不会互相拼接。
 
@@ -194,9 +206,9 @@ path = "**/.env*"
 
 规划期间只开放 CapsLock 自有的本地只读探索、`ask_user` 和 `get_plan`、`update_plan`、`submit_plan`。每个 revision 都绑定 SHA-256；提交后可选择批准并实施、提供反馈继续规划或拒绝退出。批准会结束规划 run，并用批准 revision 的精确 Markdown 启动新的 implementation run；它只是任务上下文，不授予文件、Shell、Web 或插件权限，实施仍完整经过原权限内核。
 
-交互方式与 Claude Code 的 Plan Mode 对齐：模型提议进入时会先展示只读能力说明和目标；规划期间提示栏显示 `⏸ plan mode on`；提交时使用 `Ready to code?` 审阅页内嵌完整 Markdown 计划、revision、摘要和当前底层权限。选择“keep planning”可直接输入修改意见，Esc 同样保持规划且不执行；批准后才移除只读 overlay。Fullscreen TUI 在同一对话框内完成反馈，Inline TUI 使用等价的编号选择和反馈提示。
+交互方式与 Claude Code 的 Plan Mode 对齐：模型提议进入时会先展示只读能力说明和目标；规划期间提示栏显示 `⏸ plan mode on`；提交时使用 `Ready to code?` 审阅页内嵌完整 Markdown 计划、revision、摘要和当前底层权限。选择“keep planning”可直接输入修改意见，Esc 同样保持规划且不执行；批准后才移除只读 overlay。Fullscreen 与 Inline 都使用方向键、Enter 和 Esc 驱动的结构化选择与反馈流程。
 
-数据库是计划状态的权威来源，Markdown 镜像位于 `.capslock/state/plans/<session-id>/<plan-id>.md`，供 `/plan open` 使用。草稿、进入/提交审批和批准后的实施工作项可跨进程恢复；非交互 `exec` 遇到计划审批时返回 `waiting_approval` 和退出码 `3`。
+数据库是计划状态的权威来源，Markdown 镜像位于 `.capslock/state/plans/<session-id>/<plan-id>.md`，供 `/plan open` 使用。草稿、进入/提交审批和批准后的实施工作项可跨进程恢复；当前 revision 正文会随 Plan Mode 注入模型上下文，退出或拒绝后最新 plan 仍以明确状态的历史参考保留，但不构成实施授权，也不会重新启用只读 overlay。非交互 `exec` 遇到计划审批时返回 `waiting_approval` 和退出码 `3`。
 
 ## 本地工具插件
 

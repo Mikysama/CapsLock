@@ -34,6 +34,7 @@ from .context import CliContext
 from .dispatch import dispatch_slash_command
 from .commands import CommandOutcome, CommandOutcomeKind
 from .prompt import (
+    answer_questions,
     prompt_session,
     prompt_prelude,
     prompt_tokens,
@@ -82,8 +83,34 @@ async def run_tui(
         "details_expanded": False,
         "queued_items": {},
         "usage": (0, 0, 0.0),
+        "context": (None, agent.context_budget.input_budget),
         "plan_status": initial_plan[0].status.value if initial_plan else None,
+        "recalled_item": None,
     }
+
+    controller_ref: dict[str, ForegroundRunController] = {}
+
+    async def recall_latest() -> str | None:
+        controller = controller_ref.get("controller")
+        if controller is None:
+            return None
+        recalled = await controller.recall_latest()
+        if recalled is None:
+            return None
+        state["recalled_item"] = recalled
+        queued_items = state.get("queued_items")
+        if isinstance(queued_items, dict):
+            queued_items.pop(recalled.id, None)
+        return recalled.question
+
+    async def show_help() -> None:
+        await run_in_terminal(
+            lambda: console.print(
+                "[command]Keyboard shortcuts[/]\n"
+                "Enter submit · Ctrl+J new line · Ctrl+C cancel/exit · "
+                "Ctrl+O details · Up edit queued/history · ? help"
+            )
+        )
 
     def toggle_details() -> None:
         state["details_expanded"] = not bool(state.get("details_expanded"))
@@ -106,6 +133,11 @@ async def run_tui(
             ),
             workspace=str(agent.workspace),
             usage=usage_value,
+            context=(
+                state.get("context")
+                if isinstance(state.get("context"), tuple)
+                else (None, agent.context_budget.input_budget)
+            ),
         )
 
     inputs = prompt_session(
@@ -122,6 +154,8 @@ async def run_tui(
             if context.application is not None
             else UserLayout.from_environment().keybindings
         ),
+        recall_latest=recall_latest,
+        show_help=show_help,
     )
     state["inputs"] = inputs
 
@@ -211,9 +245,7 @@ async def run_tui(
                         )
                     except (EOFError, KeyboardInterrupt):
                         decision = ApprovalChoice.REJECT
-                    await agent.decide_permission_request(
-                        str(request["id"]), decision
-                    )
+                    await agent.decide_permission_request(str(request["id"]), decision)
                     run = await agent.runs.require(
                         item.event.run_id, session_id=agent.session_id
                     )
@@ -240,6 +272,7 @@ async def run_tui(
         consumer=consume,
         authorize_limit=authorize_limit,
     )
+    controller_ref["controller"] = controller
     bindings = AuthorizerBindings(
         agent,
         action_authorizer=authorize_action,
@@ -266,8 +299,10 @@ async def run_tui(
             except EOFError:
                 return CommandOutcome(CommandOutcomeKind.EXIT)
             if not question:
+                state["recalled_item"] = None
                 continue
             if question.startswith("/"):
+                state["recalled_item"] = None
                 try:
                     if question.startswith("/queue retry "):
                         await _retry(context, controller, shlex.split(question)[2])
@@ -302,13 +337,20 @@ async def run_tui(
                     console.input, "Send this request? [y/N] "
                 )
                 if answer.strip().casefold() not in {"y", "yes"}:
+                    state["recalled_item"] = None
                     continue
             console.print(user_message(question))
-            item = await agent.enqueue(question)
+            recalled = state.pop("recalled_item", None)
+            item = (
+                await controller.submit_recalled(recalled, question)
+                if recalled is not None
+                else await agent.enqueue(question)
+            )
             queued_items = state.get("queued_items")
             if isinstance(queued_items, dict):
                 queued_items[item.id] = item.question
-            await controller.enqueue_item(item.id, item.question)
+            if recalled is None:
+                await controller.enqueue_item(item.id, item.question)
             console.print(result_status("Queued", "waiting", detail=item.id[:8]))
     finally:
         await bindings.__aexit__(None, None, None)
@@ -369,10 +411,37 @@ class _RunRenderer:
             await self._thinking(str(event.data.get("text", "")))
         elif event.kind is AgentEventKind.TEXT_DELTA:
             await self._answer(str(event.data.get("text", "")))
-        elif event.kind is AgentEventKind.TOOL_RUNNING:
+        elif event.kind in {AgentEventKind.TOOL_QUEUED, AgentEventKind.TOOL_RUNNING}:
             await self._tool_running(event)
-        elif event.kind is AgentEventKind.TOOL_COMPLETED:
+        elif event.kind is AgentEventKind.TOOL_PROGRESS:
+            detail = next(
+                (
+                    str(event.data[key])
+                    for key in ("message", "phase", "event")
+                    if event.data.get(key)
+                ),
+                "Running tool",
+            )
+            self._update_active_tool(event, detail=detail)
+            _set_activity(self.state, detail)
+        elif event.kind is AgentEventKind.TOOL_PERMISSION:
+            self._update_active_tool(event, detail="Waiting for permission")
+            _set_activity(self.state, "Waiting for tool permission")
+        elif event.kind in {
+            AgentEventKind.TOOL_COMPLETED,
+            AgentEventKind.TOOL_CANCELLED,
+        }:
             await self._tool_completed(event)
+        elif event.kind is AgentEventKind.CONTEXT_UPDATED:
+            context = event.data.get("context", {})
+            if isinstance(context, dict):
+                used = context.get("used_tokens")
+                limit = context.get("limit_tokens")
+                self.state["context"] = (
+                    int(used) if isinstance(used, (int, float)) else None,
+                    int(limit) if isinstance(limit, (int, float)) else 0,
+                )
+                _set_activity(self.state, self.state.get("activity"))
         elif event.kind in {
             AgentEventKind.BUDGET_UPDATED,
             AgentEventKind.BUDGET_EXTENDED,
@@ -486,6 +555,13 @@ class _RunRenderer:
             await self._flush_tool_group()
             await self.writer.print(tool_result(item))
         _set_activity(self.state, status_message(AgentStatus.ANALYZING))
+
+    def _update_active_tool(self, event: AgentEvent, *, detail: str) -> None:
+        identifier = str(event.data.get("tool_call_id", ""))
+        if identifier and identifier in self.active_tools:
+            self.active_tools[identifier] = replace(
+                self.active_tools[identifier], detail=detail
+            )
 
     async def _flush_tool_group(self) -> None:
         if not self.pending_tools:
@@ -721,51 +797,14 @@ async def _answer_input_request(
     questions = request.get("questions", []) if isinstance(request, dict) else []
     if not isinstance(questions, list):
         return False
-    answers: dict[str, object] = {}
-    for raw in questions:
-        if not isinstance(raw, dict):
-            continue
-        identifier = str(raw.get("id", ""))
-        prompt = str(raw.get("question", "Question"))
-        options = raw.get("options", [])
-        labels = [
-            str(option.get("label"))
-            for option in options
-            if isinstance(option, dict) and option.get("label")
-        ]
-        values = [
-            str(option.get("value", option.get("label")))
-            for option in options
-            if isinstance(option, dict) and option.get("label")
-        ]
-        menu = "\n".join(f"  {index}. {label}" for index, label in enumerate(labels, 1))
-        suffix = (
-            "comma-separated choices or free text"
-            if raw.get("multiple")
-            else "choice number or free text"
+    try:
+        answers = await terminal_runner(
+            lambda: answer_questions(questions), in_executor=True
         )
-        answer = await terminal_runner(
-            lambda: context.console.input(f"{prompt}\n{menu}\n{suffix}: ")
-        )
-        entered = str(answer).strip()
-        if not entered:
-            return False
-        if raw.get("multiple"):
-            selected = []
-            for part in entered.split(","):
-                token = part.strip()
-                selected.append(
-                    values[int(token) - 1]
-                    if token.isdigit() and 1 <= int(token) <= len(values)
-                    else token
-                )
-            answers[identifier] = selected
-        else:
-            answers[identifier] = (
-                values[int(entered) - 1]
-                if entered.isdigit() and 1 <= int(entered) <= len(values)
-                else entered
-            )
+    except (EOFError, KeyboardInterrupt):
+        return False
+    if answers is None:
+        return False
     await context.session.journal.answer_input_request(
         str(event.data["request_id"]), context.session.session_id, answers
     )

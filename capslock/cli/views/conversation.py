@@ -58,7 +58,7 @@ class InlineMessageCard:
 
 def user_message(text: str) -> InlineMessageCard:
     return message_card(
-        Text.assemble(("❯ ", "user.label"), (text, "user")),
+        Text.assemble(("❯ ", "user.prompt.label"), (text, "user.prompt")),
         border_style="border.focus",
         background_style="user.background",
     )
@@ -150,6 +150,26 @@ def approval_panel(action: ActionRecord) -> Panel:
     ]
     if value.target:
         parts.append(Text.assemble(("Target  ", "text.muted"), (value.target, "path")))
+    for label, detail in value.metadata:
+        parts.append(
+            Text.assemble((f"{label}  ", "text.muted"), (detail, "text.primary"))
+        )
+    if value.risk_reason:
+        parts.append(
+            Text.assemble(("Risk  ", "text.muted"), (value.risk_reason, "warning"))
+        )
+    if value.rollback:
+        parts.append(
+            Text.assemble(
+                ("Rollback  ", "text.muted"), (value.rollback, "text.secondary")
+            )
+        )
+    for destination, rule in value.permission_rules:
+        parts.append(
+            Text.assemble(
+                (f"{destination.title()} rule  ", "text.muted"), (rule, "code")
+            )
+        )
     if value.preview:
         lexer = (
             "diff"

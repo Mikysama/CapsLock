@@ -31,6 +31,7 @@ def test_theme_declares_transparent_layers_and_requested_tokens() -> None:
     assert THEME_TOKENS["surface"] == "transparent"
     assert THEME_TOKENS["overlay"] == "transparent"
     assert THEME_TOKENS["userPromptBackground"] == "#E0E0E0"
+    assert THEME_TOKENS["userPromptForeground"] == "#202A33"
     assert THEME_TOKENS["textPrimary"] == "#DCE6F2"
     assert THEME_TOKENS["borderFocus"] == "#8CB9DC"
     assert THEME_TOKENS["agent"] == "#8FB6D6"
@@ -103,7 +104,7 @@ def test_markdown_inline_code_and_code_blocks_never_set_a_black_background() -> 
     )
 
 
-def test_inline_user_prompt_background_fills_row_next_to_blue_marker() -> None:
+def test_inline_user_prompt_uses_gray_background_and_dark_foreground() -> None:
     stream = StringIO()
     terminal = make_console(
         file=stream,
@@ -115,13 +116,14 @@ def test_inline_user_prompt_background_fills_row_next_to_blue_marker() -> None:
     lines = terminal.render_lines(user_message("hello"), terminal.options, pad=False)
 
     assert len(lines) == 1
-    assert lines[0][0].text == "▌"
+    assert lines[0][0].text.startswith("▌")
     assert lines[0][0].style is not None
     assert lines[0][0].style.bgcolor is None
     row = "".join(segment.text for segment in lines[0])
     assert row.startswith("▌  ❯ hello")
-    assert len(row) == terminal.options.max_width
-    assert all(
-        segment.style is not None and segment.style.bgcolor is not None
-        for segment in lines[0][1:]
-    )
+    content = next(segment for segment in lines[0] if "hello" in segment.text)
+    assert content.style is not None
+    assert content.style.color is not None
+    assert content.style.color.triplet == (32, 42, 51)
+    assert content.style.bgcolor is not None
+    assert content.style.bgcolor.triplet == (224, 224, 224)

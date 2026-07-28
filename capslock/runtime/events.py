@@ -60,16 +60,22 @@ class RunEventBus:
                 self.run_id,
                 self._work_item_id,
                 kind,
-                redact(data),
+                _context_payload(data)
+                if kind is AgentEventKind.CONTEXT_UPDATED
+                else redact(data),
                 f"evt_{uuid.uuid4().hex}",
                 self._trace_id,
             )
-            self._pending.append(event)
-            self._pending_bytes += len(
-                json.dumps(event.data, ensure_ascii=False).encode("utf-8")
-            )
-            if self._timer is None:
-                self._timer = asyncio.create_task(self._flush_after_delay())
+            # Context snapshots are live presentation state. Keeping them out of the
+            # durable journal preserves compatibility with existing databases while
+            # still exposing them to interactive clients and `exec --json`.
+            if kind is not AgentEventKind.CONTEXT_UPDATED:
+                self._pending.append(event)
+                self._pending_bytes += len(
+                    json.dumps(event.data, ensure_ascii=False).encode("utf-8")
+                )
+                if self._timer is None:
+                    self._timer = asyncio.create_task(self._flush_after_delay())
             flush_now = self._pending_bytes >= self.flush_bytes
             self._diagnostic(event)
             await self.consumer(event)
@@ -181,3 +187,31 @@ class RunEventBus:
                 self._coalesced_text = ""
                 self._coalesced_event = None
                 self._diagnostic_queue.put_nowait(combined)
+
+
+def _context_payload(data: dict[str, object]) -> dict[str, object]:
+    """Allow only the documented numeric context snapshot through redaction."""
+
+    raw = data.get("context")
+    context = raw if isinstance(raw, dict) else {}
+
+    def integer(name: str) -> int:
+        value = context.get(name, 0)
+        return max(0, int(value)) if isinstance(value, (int, float)) else 0
+
+    percent = context.get("used_percent", 0.0)
+    source = str(context.get("source", "estimate"))
+    return {
+        "status": "running",
+        "context": {
+            "used_tokens": integer("used_tokens"),
+            "limit_tokens": integer("limit_tokens"),
+            "remaining_tokens": integer("remaining_tokens"),
+            "used_percent": (
+                max(0.0, min(100.0, float(percent)))
+                if isinstance(percent, (int, float))
+                else 0.0
+            ),
+            "source": source if source in {"estimate", "provider"} else "estimate",
+        },
+    }

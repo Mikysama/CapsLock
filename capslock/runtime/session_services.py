@@ -79,7 +79,7 @@ class PlanRequestService:
     async def current_plan(self):
         if self.planning is None:
             return None
-        return await self.planning.latest(self.session_id)
+        return await self.planning.current(self.session_id)
 
     async def plan_requests(self):
         if self.planning is None:

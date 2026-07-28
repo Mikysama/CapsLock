@@ -16,6 +16,7 @@ class Choice:
     value: str
     label: str
     detail: str = ""
+    selected: bool = False
 
 
 @dataclass(frozen=True)
@@ -61,19 +62,12 @@ class ConsoleCommandUI:
     async def select(self, title: str, choices: Sequence[Choice]) -> str | None:
         if not choices:
             return None
-        if title:
-            self.console.print(f"[command]{title}[/]")
-        for index, choice in enumerate(choices, 1):
-            self.console.print(f"  {index}. {choice.label} {choice.detail}")
-        answer = await asyncio.to_thread(
-            self.console.input, "Select [blank to cancel]: "
-        )
-        if not str(answer).strip():
-            return None
         try:
-            return choices[int(str(answer)) - 1].value
-        except (ValueError, IndexError):
-            raise ValueError("invalid selection") from None
+            from .prompt import select_choice
+
+            return await asyncio.to_thread(select_choice, title, choices)
+        except (EOFError, KeyboardInterrupt):
+            return None
 
     async def confirm(self, title: str, detail: str, *, default: bool = False) -> bool:
         self.console.print(f"[command]{title}[/]\n{detail}")
@@ -123,7 +117,9 @@ class ConsoleCommandUI:
         from rich.text import Text
 
         body = Group(
-            Text("CapsLock wants to enter Plan Mode to explore and design an implementation approach."),
+            Text(
+                "CapsLock wants to enter Plan Mode to explore and design an implementation approach."
+            ),
             Text(),
             Text(f"Objective  {objective}", style="bold"),
             Text(),

@@ -4,7 +4,7 @@
 
 ## 稳定契约
 
-CapsLock 2.7.1 支持 Linux/macOS 与 Python 3.12。当前开发协议为 `permissions_version = 2`、`config_version = 9`、workspace schema 14、memory schema 4、portable archive 6、session export 6、JSONL schema 3、IDE Bridge protocol 1 和插件 manifest/protocol/grant 4。config v3-v8、workspace schema v6-v13 与 memory schema v3 使用 backup-first 自动迁移。
+CapsLock 2.7.2 支持 Linux/macOS 与 Python 3.12。当前开发协议为 `permissions_version = 2`、`config_version = 9`、workspace schema 14、memory schema 4、portable archive 6、session export 6、JSONL schema 3、IDE Bridge protocol 1 和插件 manifest/protocol/grant 4。config v3-v8、workspace schema v6-v13 与 memory schema v3 使用 backup-first 自动迁移。
 
 公开运行入口为 `AgentSession.run_stream(RunRequest)`。CLI 通过应用查询面读取状态，不应依赖 repository 聚合对象。
 
@@ -34,7 +34,7 @@ Plan Mode 是独立的 session overlay，不是第四种 `PermissionMode`，也�
 
 交互层使用专用的进入和提交对话框，而不是普通权限确认框。进入页解释探索范围并展示目标；提交页以 `Ready to code?` 为标题，内嵌完整 Markdown、revision、SHA-256 与 implementation run 将沿用的权限模式。Fullscreen 的 “No, keep planning” 会聚焦同页反馈框；Esc 返回无反馈的继续规划。状态栏以 `⏸ plan mode on · <status> · <permission>` 同时呈现 overlay 与底层权限。
 
-Markdown 镜像位于 `.capslock/state/plans/<session-id>/<plan-id>.md`。数据库可在 show/open/resume 时重建镜像；`/plan open` 才会把编辑器内容显式导入为新 revision。branch/rewind 复制当前 revision 为子 session 的独立 draft。非交互 `exec` 遇到进入或提交审批时保留 `waiting_approval` 并返回退出码 `3`。
+Markdown 镜像位于 `.capslock/state/plans/<session-id>/<plan-id>.md`。数据库可在 show/open/resume 时重建镜像；`/plan open` 才会把编辑器内容显式导入为新 revision。ToolLoop 每轮将 active plan 的完整 revision 作为结构化快照注入上下文；Plan Mode 结束后，最新 plan（包括 `rejected`）继续以带状态的历史快照保留。历史快照明确是参考数据，不是指令、用户批准或实施权限，普通工具目录由真实 active 状态独立决定。branch/rewind 复制当前 revision 为子 session 的独立 draft。非交互 `exec` 遇到进入或提交审批时保留 `waiting_approval` 并返回退出码 `3`。
 
 ## 模型工具
 
@@ -154,8 +154,8 @@ session，恢复后继续生效；新 session 使用配置默认模型。运行�
 `CAPSLOCK_UI` 选择。inline UI 使用 prompt-toolkit/Rich 在普通终端主缓冲区
 输出，可靠保留原生 scrollback；fullscreen UI 是保留的第一版 Textual 全屏界面，
 运行在 alternate screen。
-两个界面的根层都使用终端默认背景；上下文中的用户 prompt 行使用浅灰背景，并与
-左侧蓝色标记对齐。fullscreen 的 App 根层输出原生 `ansi_default`，其余容器保持
+两个界面的根层使用终端默认背景；用户 prompt 使用浅灰背景、深色文字和左侧焦点色
+边线，CapsLock 回答保持透明。fullscreen 的 App 根层输出原生 `ansi_default`，其余容器保持
 透明；Markdown、Syntax 和 Composer 的字符级背景被清除，但前景色与粗体、斜体、
 下划线、删除线和链接样式保持不变。需要模态结果的 fullscreen 斜杠命令通过
 Textual worker 执行，避免阻塞界面消息泵。
@@ -164,11 +164,16 @@ fullscreen 的 `/` 命令和 `$` Skill 候选使用纵向滚动列表，不截�
 `↑/↓` 循环选择时列表自动滚动到当前项。窄终端保持单列布局，终端小于
 48×14 时只显示尺寸提示且审批直接拒绝。
 
+两套界面共用选择与结构化问题模型。超过 8 个选项时提供即时过滤；`ask_user`
+单选使用选项列表，多选用 Space 切换，并始终可选择 Other。问题逐步校验且提交前
+显示答案摘要。队列条压缩为最近预览，空 Composer 按 `↑` 召回最新未开始项；旧项
+立即持久化为 cancelled，重新提交创建新 ID 并恢复队列位置。
+
 启动 banner 保留 v1.7.1 的 `Welcome back`、CapsLock 字符画和 Tips 布局；窄终端使用纵向布局，宽终端使用双栏布局。原 full-screen UI 的语义左边框消息卡、QueueBar、Composer、ActivityBar、响应式 StatusBar 和审批 Dialog 均由 Rich/prompt-toolkit 在 inline 动态区实现。动态区不使用 `bottom_toolbar`，每次上下文输出后都会在新光标位置重画，因此 Composer 跟随上下文向下移动而不固定在窗口底部。模型提供方返回的 reasoning 默认折叠为一行 `◇ Reasoning` 摘要，开启 details 时以低对比度、暗化斜体显示；最终回答在 `◆ CapsLock` 下按 Markdown 渲染，不使用额外的 `Final answer` 标签。连续读取和搜索工具合并为一条 `Explored` 摘要，修改、命令与失败结果单独显示。
 
 模型请求和工具执行期间，底部活动行在 `Thinking` 或 `Running <tool>` 左侧循环显示 `◐ ◓ ◑ ◒`。产生待审批提案后，输入框暂停并逐条显示有界脱敏预览与选择框；选择批准即直接进入执行前复检，不再追加 `y/N`。阶段结束后动画消失，并在 scrollback 中留下静态结果：绿色圆点表示成功，红色圆点表示失败，黄色圆点表示等待审批，警告色圆点表示取消。
 
-裸 `capslock resume` 使用方向键和 Enter 选择 session；显式 ID/唯一前缀仍受支持。恢复时重放已完成消息以及中断/失败 run 的用户问题和已产生文本，后续模型请求使用同一份 session 上下文，同时排除当前 run 以避免重复当前问题。
+裸 `capslock resume` 使用方向键和 Enter 选择 session；显式 ID/唯一前缀仍受支持。恢复视图按 run 的持久化插入顺序分组，每轮固定先显示用户提示、再显示 CapsLock 回答，不以可能冲突或倒退的时间戳跨轮混排。恢复时重放已完成消息以及中断/失败 run 的用户问题和已产生文本，后续模型请求使用同一份 session 上下文，同时排除当前 run 以避免重复当前问题。
 
 ## CLI
 
@@ -223,7 +228,13 @@ capslock trace prune [--days N]
 | `terminal` | 是否为唯一终止事件。 |
 | `data` | 事件载荷。 |
 
-非终止事件：`queued`、`thinking`、`text_delta`、`tool_queued`、`tool_running`、`tool_progress`、`tool_permission`、`tool_completed`、`tool_cancelled`、`budget_updated`、`limit_reached`、`budget_extended`。
+非终止事件：`queued`、`context_updated`、`thinking`、`text_delta`、`tool_queued`、`tool_running`、`tool_progress`、`tool_permission`、`tool_completed`、`tool_cancelled`、`budget_updated`、`limit_reached`、`budget_extended`。
+
+`context_updated.data.context` 固定包含 `used_tokens`、`limit_tokens`、
+`remaining_tokens`、`used_percent` 和 `source`。context build 后先发
+`source=estimate`；每次 provider usage 返回后发 `source=provider`，usage 缺失时继续
+使用 estimate。该实时状态事件由 `exec --json` 输出，但不写入 run journal；终止
+事件仍保持唯一。
 
 `thinking.data.text` 是模型提供方显式返回的 reasoning；`text_delta.data.text` 是最终回答的流式正文。TUI 分区渲染二者，`completed.data.answer` 只包含最终回答。
 

@@ -134,7 +134,12 @@ class _ExecStreamRenderer:
             self.streamed = True
             self.line_open = not text.endswith("\n")
             return
-        if event.kind is AgentEventKind.TOOL_RUNNING:
+        if event.kind in {
+            AgentEventKind.TOOL_QUEUED,
+            AgentEventKind.TOOL_RUNNING,
+            AgentEventKind.TOOL_PROGRESS,
+            AgentEventKind.TOOL_PERMISSION,
+        }:
             self._finish_output_line()
             if self.status.running:
                 await self.status.update(state, detail)
@@ -145,6 +150,7 @@ class _ExecStreamRenderer:
             AgentEventKind.QUEUED,
             AgentEventKind.THINKING,
             AgentEventKind.TOOL_COMPLETED,
+            AgentEventKind.TOOL_CANCELLED,
             AgentEventKind.BUDGET_UPDATED,
             AgentEventKind.BUDGET_EXTENDED,
             AgentEventKind.LIMIT_REACHED,

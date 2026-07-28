@@ -443,8 +443,7 @@ class SessionRepository(Repository):
             session_plan_dir.rmdir()
 
     async def transcript(self, session_id: str) -> list[dict[str, Any]]:
-        entries: list[tuple[str, int, dict[str, Any]]] = []
-        message_roles: dict[str, set[str]] = {}
+        messages_by_run: dict[str, list[tuple[int, dict[str, Any]]]] = {}
         rows = await self.all(
             """SELECT m.id,m.role,m.content,m.run_id,m.created_at,r.status,r.error_message
                FROM messages m JOIN runs r ON r.id=m.run_id
@@ -453,11 +452,9 @@ class SessionRepository(Repository):
         )
         for row in rows:
             run_id, role = str(row["run_id"]), str(row["role"])
-            message_roles.setdefault(run_id, set()).add(role)
-            entries.append(
+            messages_by_run.setdefault(run_id, []).append(
                 (
-                    str(row["created_at"]),
-                    int(row["id"]) * 2,
+                    int(row["id"]),
                     {
                         "role": role,
                         "content": str(row["content"]),
@@ -469,29 +466,40 @@ class SessionRepository(Repository):
             )
 
         runs = await self.all(
-            """SELECT id,question,status,started_at,error_message
-               FROM runs WHERE session_id=? AND kind='agent' ORDER BY started_at""",
+            """SELECT rowid AS run_order,id,question,kind,status,started_at,error_message
+               FROM runs WHERE session_id=? AND kind IN ('agent','session_seed')
+               ORDER BY run_order""",
             (session_id,),
         )
-        for index, row in enumerate(runs):
+        transcript: list[dict[str, Any]] = []
+        for row in runs:
             run_id = str(row["id"])
-            roles = message_roles.get(run_id, set())
-            timestamp = str(row["started_at"])
+            persisted = messages_by_run.pop(run_id, [])
+            if str(row["kind"]) == "session_seed":
+                transcript.extend(entry for _, entry in persisted)
+                continue
+            by_role: dict[str, list[dict[str, Any]]] = {
+                "user": [],
+                "assistant": [],
+            }
+            for _, entry in persisted:
+                by_role.setdefault(str(entry["role"]), []).append(entry)
             status = str(row["status"])
-            if "user" not in roles:
-                entries.append(
-                    (
-                        timestamp,
-                        index * 2,
-                        {
-                            "role": "user",
-                            "content": str(row["question"]),
-                            "run_id": run_id,
-                            "status": status,
-                        },
-                    )
-                )
-            if "assistant" not in roles and status != "completed":
+            transcript.extend(
+                by_role["user"]
+                or [
+                    {
+                        "role": "user",
+                        "content": str(row["question"]),
+                        "run_id": run_id,
+                        "status": status,
+                    }
+                ]
+            )
+            if by_role["assistant"]:
+                transcript.extend(by_role["assistant"])
+                continue
+            if status != "completed":
                 event_rows = await self.all(
                     """SELECT payload_json FROM run_events
                        WHERE run_id=? AND event_kind='text_delta' ORDER BY sequence""",
@@ -502,21 +510,20 @@ class SessionRepository(Repository):
                     for event in event_rows
                 )
                 if text or row["error_message"]:
-                    entries.append(
-                        (
-                            timestamp,
-                            index * 2 + 1,
-                            {
-                                "role": "assistant",
-                                "content": text,
-                                "run_id": run_id,
-                                "status": status,
-                                "error": row["error_message"],
-                            },
-                        )
+                    transcript.append(
+                        {
+                            "role": "assistant",
+                            "content": text,
+                            "run_id": run_id,
+                            "status": status,
+                            "error": row["error_message"],
+                        }
                     )
-        entries.sort(key=lambda item: (item[0], item[1]))
-        return [entry for _, _, entry in entries]
+        # Foreign keys make this empty in normal operation. Keeping the fallback
+        # preserves readable history if an imported database contains orphaned rows.
+        for persisted in messages_by_run.values():
+            transcript.extend(entry for _, entry in persisted)
+        return transcript
 
     def _info(self, row) -> SessionInfo:
         return SessionInfo(

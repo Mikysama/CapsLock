@@ -149,6 +149,7 @@ class AgentEventKind(StrEnum):
     TOOL_PERMISSION = "tool_permission"
     TOOL_COMPLETED = "tool_completed"
     TOOL_CANCELLED = "tool_cancelled"
+    CONTEXT_UPDATED = "context_updated"
     BUDGET_UPDATED = "budget_updated"
     LIMIT_REACHED = "limit_reached"
     BUDGET_EXTENDED = "budget_extended"

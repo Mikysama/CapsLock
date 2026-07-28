@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass
@@ -15,6 +16,7 @@ from ..runtime import RunRequest
 
 class ControllerEventKind(StrEnum):
     QUEUED = "queued"
+    DEQUEUED = "dequeued"
     STARTED = "started"
     RUN_EVENT = "run_event"
     CANCELLED = "cancelled"
@@ -28,6 +30,21 @@ class ControllerEvent:
     work_item_id: str | None = None
     event: AgentEvent | None = None
     error: str | None = None
+
+
+@dataclass(frozen=True)
+class RecalledWorkItem:
+    id: str
+    question: str
+    queue_index: int
+    position: int | None = None
+
+
+@dataclass(frozen=True)
+class _PendingRequest:
+    item_id: str
+    question: str
+    resume_from: str | None = None
 
 
 ControllerConsumer = Callable[[ControllerEvent], Awaitable[None]]
@@ -76,7 +93,9 @@ class ForegroundRunController:
         self.session = session
         self.consumer = consumer
         self.authorize_limit = authorize_limit
-        self.queue: asyncio.Queue[tuple[str, str, str | None] | None] = asyncio.Queue()
+        self.queue: deque[_PendingRequest] = deque()
+        self._queue_changed = asyncio.Condition()
+        self._shutdown_requested = False
         self.worker_task: asyncio.Task[None] | None = None
         self.active_task: asyncio.Task[None] | None = None
 
@@ -96,10 +115,54 @@ class ForegroundRunController:
         item_id: str,
         question: str,
         resume_from: str | None = None,
+        *,
+        queue_index: int | None = None,
     ) -> None:
         await self.start()
-        await self.queue.put((item_id, question, resume_from))
+        request = _PendingRequest(item_id, question, resume_from)
+        async with self._queue_changed:
+            if queue_index is None or queue_index >= len(self.queue):
+                self.queue.append(request)
+            else:
+                self.queue.insert(max(0, queue_index), request)
+            self._queue_changed.notify()
         await self.consumer(ControllerEvent(ControllerEventKind.QUEUED, item_id))
+
+    async def recall_latest(self) -> RecalledWorkItem | None:
+        """Cancel and remove the newest work item that has not started."""
+
+        async with self._queue_changed:
+            if not self.queue:
+                return None
+            queue_index = len(self.queue) - 1
+            request = self.queue.pop()
+            try:
+                cancelled = await self.session.cancel_queued_work_item(request.item_id)
+            except BaseException:
+                self.queue.append(request)
+                self._queue_changed.notify()
+                raise
+        await self.consumer(
+            ControllerEvent(ControllerEventKind.DEQUEUED, request.item_id)
+        )
+        return RecalledWorkItem(
+            request.item_id,
+            request.question,
+            queue_index,
+            getattr(cancelled, "position", None),
+        )
+
+    async def submit_recalled(self, recalled: RecalledWorkItem, question: str):
+        item = await self.session.enqueue(question)
+        reorder = getattr(self.session, "reorder_queued_work_item", None)
+        if recalled.position is not None and callable(reorder):
+            await reorder(item.id, recalled.position)
+        await self.enqueue_item(
+            item.id,
+            item.question,
+            queue_index=recalled.queue_index,
+        )
+        return item
 
     async def retry(self, prefix: str):
         run = await self.session.retryable_run(prefix)
@@ -125,7 +188,9 @@ class ForegroundRunController:
         return True
 
     async def shutdown(self) -> None:
-        await self.queue.put(None)
+        async with self._queue_changed:
+            self._shutdown_requested = True
+            self._queue_changed.notify_all()
         if self.active_task is not None and not self.active_task.done():
             self.active_task.cancel()
         if self.worker_task is not None and not self.worker_task.done():
@@ -135,10 +200,16 @@ class ForegroundRunController:
 
     async def _worker(self) -> None:
         while True:
-            request = await self.queue.get()
-            if request is None:
-                return
-            item_id, question, resume_from = request
+            async with self._queue_changed:
+                await self._queue_changed.wait_for(
+                    lambda: bool(self.queue) or self._shutdown_requested
+                )
+                if not self.queue:
+                    return
+                request = self.queue.popleft()
+            item_id = request.item_id
+            question = request.question
+            resume_from = request.resume_from
             await self.consumer(ControllerEvent(ControllerEventKind.STARTED, item_id))
             self.active_task = asyncio.create_task(
                 self._run(item_id, question, resume_from)
@@ -189,9 +260,7 @@ class ForegroundRunController:
                 final_run_id
             )
             if implementation is not None:
-                await self.enqueue_item(
-                    implementation.id, implementation.question
-                )
+                await self.enqueue_item(implementation.id, implementation.question)
 
     async def _delete_empty_session(self) -> None:
         memory = self.session.memory

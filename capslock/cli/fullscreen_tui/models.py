@@ -56,6 +56,15 @@ class UsageViewModel:
 
 
 @dataclass(frozen=True)
+class ContextViewModel:
+    used_tokens: int | None = None
+    limit_tokens: int = 0
+    remaining_tokens: int | None = None
+    used_percent: float | None = None
+    source: str | None = None
+
+
+@dataclass(frozen=True)
 class TuiState:
     messages: tuple[MessageViewModel, ...] = ()
     queue: tuple[QueueViewModel, ...] = ()
@@ -64,6 +73,7 @@ class TuiState:
     details_expanded: bool = False
     terminal_runs: frozenset[str] = frozenset()
     usage: UsageViewModel = UsageViewModel()
+    context: ContextViewModel = ContextViewModel()
     notification: str | None = None
 
     @property
@@ -119,12 +129,14 @@ def set_queue_running(
     return replace(state, queue=queue, active_run_id=run_id, activity="Thinking")
 
 
-def remove_queue_item(state: TuiState, item_id: str) -> TuiState:
+def remove_queue_item(
+    state: TuiState, item_id: str, *, clear_active: bool = True
+) -> TuiState:
     return replace(
         state,
         queue=tuple(item for item in state.queue if item.id != item_id),
-        active_run_id=None,
-        activity=None,
+        active_run_id=None if clear_active else state.active_run_id,
+        activity=None if clear_active else state.activity,
     )
 
 
@@ -149,10 +161,24 @@ def reduce_event(state: TuiState, event: AgentEvent) -> TuiState:
     if event.kind is AgentEventKind.TEXT_DELTA:
         state = _collapse_reasoning(state, event.run_id)
         return _append_text(state, event, MessageKind.ASSISTANT, None)
-    if event.kind is AgentEventKind.TOOL_RUNNING:
-        return _tool_running(state, event)
+    if event.kind in {AgentEventKind.TOOL_QUEUED, AgentEventKind.TOOL_RUNNING}:
+        return _tool_running(
+            state,
+            event,
+            status=(
+                "queued" if event.kind is AgentEventKind.TOOL_QUEUED else "running"
+            ),
+        )
+    if event.kind is AgentEventKind.TOOL_PROGRESS:
+        return _tool_progress(state, event)
+    if event.kind is AgentEventKind.TOOL_PERMISSION:
+        return _tool_progress(state, event, status="waiting_approval")
     if event.kind is AgentEventKind.TOOL_COMPLETED:
         return _tool_completed(state, event)
+    if event.kind is AgentEventKind.TOOL_CANCELLED:
+        return _tool_completed(state, event, cancelled=True)
+    if event.kind is AgentEventKind.CONTEXT_UPDATED:
+        return _context_updated(state, event)
     if event.kind is AgentEventKind.LIMIT_REACHED:
         return replace(state, activity="Waiting for run-limit decision")
     if event.kind is AgentEventKind.BUDGET_EXTENDED:
@@ -204,7 +230,9 @@ def _presentation(data: dict[str, Any], name: str) -> dict[str, Any]:
     return value
 
 
-def _tool_running(state: TuiState, event: AgentEvent) -> TuiState:
+def _tool_running(
+    state: TuiState, event: AgentEvent, *, status: str = "running"
+) -> TuiState:
     name = str(event.data.get("name", "unknown"))
     presentation = _presentation(event.data, name)
     tool = ToolViewModel(
@@ -214,8 +242,25 @@ def _tool_running(state: TuiState, event: AgentEvent) -> TuiState:
         str(presentation.get("title", name)),
         str(presentation["detail"]) if presentation.get("detail") else None,
         str(presentation["target"]) if presentation.get("target") else None,
+        status=status,
     )
     messages = list(_collapse_reasoning(state, event.run_id).messages)
+    for index, message in enumerate(messages):
+        if message.kind is not MessageKind.TOOLS:
+            continue
+        if any(item.id == tool.id for item in message.tools):
+            messages[index] = replace(
+                message,
+                tools=tuple(
+                    tool if item.id == tool.id else item for item in message.tools
+                ),
+            )
+            return replace(
+                state,
+                messages=tuple(messages),
+                active_run_id=event.run_id,
+                activity=f"Running {tool.title}",
+            )
     groupable = tool.category in {"read", "search"}
     if (
         groupable
@@ -244,7 +289,51 @@ def _tool_running(state: TuiState, event: AgentEvent) -> TuiState:
     )
 
 
-def _tool_completed(state: TuiState, event: AgentEvent) -> TuiState:
+def _tool_progress(
+    state: TuiState, event: AgentEvent, *, status: str = "running"
+) -> TuiState:
+    identifier = str(event.data.get("tool_call_id", ""))
+    detail = next(
+        (
+            str(event.data[key])
+            for key in ("message", "phase", "reason", "event")
+            if event.data.get(key)
+        ),
+        None,
+    )
+    current, total = event.data.get("current"), event.data.get("total")
+    if isinstance(current, (int, float)) and isinstance(total, (int, float)):
+        detail = f"{detail + ' · ' if detail else ''}{current:g}/{total:g}"
+    messages = []
+    found = False
+    for message in state.messages:
+        if message.kind is not MessageKind.TOOLS:
+            messages.append(message)
+            continue
+        tools = tuple(
+            replace(tool, status=status, detail=detail or tool.detail)
+            if tool.id == identifier
+            else tool
+            for tool in message.tools
+        )
+        found = found or any(tool.id == identifier for tool in message.tools)
+        messages.append(replace(message, tools=tools))
+    if not found:
+        return _tool_running(state, event, status=status)
+    return replace(
+        state,
+        messages=tuple(messages),
+        activity=(
+            "Waiting for tool permission"
+            if status == "waiting_approval"
+            else detail or state.activity
+        ),
+    )
+
+
+def _tool_completed(
+    state: TuiState, event: AgentEvent, *, cancelled: bool = False
+) -> TuiState:
     identifier = str(event.data.get("tool_call_id", ""))
     ok = bool(event.data.get("ok"))
     duration = int(event.data.get("duration_ms", 0))
@@ -256,7 +345,7 @@ def _tool_completed(state: TuiState, event: AgentEvent) -> TuiState:
         tools = tuple(
             replace(
                 tool,
-                status="success" if ok else "failed",
+                status="cancelled" if cancelled else "success" if ok else "failed",
                 duration_ms=duration,
             )
             if tool.id == identifier
@@ -274,6 +363,25 @@ def _tool_completed(state: TuiState, event: AgentEvent) -> TuiState:
             )
         )
     return replace(state, messages=tuple(messages), activity="Thinking")
+
+
+def _context_updated(state: TuiState, event: AgentEvent) -> TuiState:
+    value = event.data.get("context", {})
+    if not isinstance(value, dict):
+        return state
+    used = value.get("used_tokens")
+    remaining = value.get("remaining_tokens")
+    percent = value.get("used_percent")
+    return replace(
+        state,
+        context=ContextViewModel(
+            int(used) if isinstance(used, (int, float)) else None,
+            int(value.get("limit_tokens", 0)),
+            int(remaining) if isinstance(remaining, (int, float)) else None,
+            float(percent) if isinstance(percent, (int, float)) else None,
+            str(value.get("source")) if value.get("source") else None,
+        ),
+    )
 
 
 def _collapse_reasoning(state: TuiState, run_id: str) -> TuiState:

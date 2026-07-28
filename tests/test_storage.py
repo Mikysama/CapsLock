@@ -79,6 +79,63 @@ def test_session_model_can_be_updated_and_restored(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
+def test_resumed_transcript_uses_run_order_and_keeps_turn_roles_together(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        repositories = await WorkspaceRepositories.open(
+            tmp_path / "transcript-order.sqlite3", workspace=tmp_path
+        )
+        try:
+            session = await repositories.sessions.create("test-model")
+            for question, answer_text in (
+                ("first question", "first answer"),
+                ("second question", "second answer"),
+            ):
+                item = await repositories.work_items.enqueue(session.id, question)
+                run = await repositories.workflow.start_run(
+                    session.id, item.id, item.question
+                )
+                await repositories.sessions.append_message(
+                    session.id, run.id, "user", question
+                )
+                await repositories.sessions.append_message(
+                    session.id, run.id, "assistant", answer_text
+                )
+                await repositories.workflow.finalize(
+                    run.id,
+                    status=WorkItemStatus.COMPLETED,
+                    event_kind=AgentEventKind.COMPLETED,
+                    payload={"status": "completed"},
+                    duration_ms=1,
+                )
+
+            # Imported and replayed sessions may contain timestamps that collide or
+            # move backwards. They must not override durable run/message ordering.
+            await repositories.database.execute(
+                """UPDATE messages SET created_at=CASE
+                   WHEN content LIKE 'first %' THEN '2026-01-02T00:00:00+00:00'
+                   ELSE '2026-01-01T00:00:00+00:00' END"""
+            )
+            await repositories.database.execute(
+                """UPDATE runs SET started_at=CASE
+                   WHEN question='first question' THEN '2026-01-02T00:00:00+00:00'
+                   ELSE '2026-01-01T00:00:00+00:00' END"""
+            )
+
+            transcript = await repositories.sessions.transcript(session.id)
+            assert [(entry["role"], entry["content"]) for entry in transcript] == [
+                ("user", "first question"),
+                ("assistant", "first answer"),
+                ("user", "second question"),
+                ("assistant", "second answer"),
+            ]
+        finally:
+            await repositories.close()
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize(
     "statement,values",
     [

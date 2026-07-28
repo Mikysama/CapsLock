@@ -4,6 +4,29 @@
 
 ## [Unreleased]
 
+## [2.7.2] - 2026-07-28
+
+### Changed
+
+- inline/fullscreen 使用浅灰用户 prompt 与透明 CapsLock 回答、统一语义色、单行响应式 footer、动态 Composer 和浮层补全；`NO_COLOR` 仅保留符号与文本层级。
+- 新增真实 `context_updated` 流事件，区分估算与 provider usage；JSONL schema 版本和数据库 schema 保持不变。
+- 通用选择、`ask_user`、队列召回和四类审批改用共享安全 view model，审批默认拒绝并展示将持久化的具体规则。
+- Plan Mode 每轮注入当前 revision 正文；退出或拒绝后，最新 plan 继续以带状态、非授权的历史快照进入后续模型上下文。
+
+### Fixed
+
+- 工具 queued/progress/permission/cancelled 事件现在更新同一工具行；读取/搜索摘要显示分类、运行和失败数量，失败自动展开。
+- resume 按持久化 run 顺序重建 transcript，并在每轮内固定用户提示在 CapsLock 回答之前，不再使用可能冲突或倒退的时间戳混排。
+- resume 后恢复 plan 正文；rejected plan 保留为参考数据，但不会重新启用 Plan Mode 或收窄普通工具目录。
+
+### Documentation
+
+- 同步更新 CLI/TUI、JSONL context event、队列召回、审批展示、resume 顺序和 Plan 上下文的开发者契约。
+
+### Compatibility
+
+- workspace schema 14、memory schema 4、portable archive 6、session export 6、config 9、permissions 2、JSONL 3、IDE Bridge protocol 1 和 plugin protocol 4 均保持不变。
+
 ## [2.7.1] - 2026-07-28
 
 ### Security

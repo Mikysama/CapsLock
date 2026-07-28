@@ -186,6 +186,7 @@ def test_model_enter_plan_mode_resumes_with_attachment_and_blocks_hidden_tool(
                     )
                 ),
                 answer("The hidden tool was denied."),
+                answer("The rejected plan remains available as context."),
             )
             agent = make_agent(
                 tmp_path,
@@ -225,6 +226,35 @@ def test_model_enter_plan_mode_resumes_with_attachment_and_blocks_hidden_tool(
                 if item.get("role") == "tool"
             )
             assert "plan_mode_read_only" in str(tool_message["content"])
+
+            current = await planning.current(session.id)
+            assert current is not None
+            plan, revision = current
+            request = await repositories.plans.submit(
+                plan.id,
+                expected_sha256=revision.sha256,
+                run_id=None,
+                invocation_id=None,
+            )
+            await repositories.plans.decide(
+                request.id,
+                choice="reject",
+                feedback=None,
+                base_permission_mode="full_access",
+            )
+
+            after_rejection = await collect(agent, "Continue without Plan Mode")
+            assert after_rejection[-1].kind is AgentEventKind.COMPLETED
+            historical_plan = next(
+                str(message["content"])
+                for message in model.requests[4]["messages"]
+                if str(message.get("content", "")).startswith("<capslock-plan-context>")
+            )
+            assert "Plan status: rejected" in historical_plan
+            assert '"status":"rejected"' in historical_plan
+            assert {
+                item["function"]["name"] for item in model.requests[4]["tools"]
+            } == {"enter_plan_mode", "shell"}
         finally:
             await repositories.close()
 
@@ -846,6 +876,23 @@ def test_agent_stream_has_one_terminal_event_and_persists_usage(tmp_path: Path) 
                 FakeChatModel(answer("final answer", input_tokens=11, output_tokens=5)),
             )
             events = await collect(agent, "question")
+            context_events = [
+                event
+                for event in events
+                if event.kind is AgentEventKind.CONTEXT_UPDATED
+            ]
+            assert [event.data["context"]["source"] for event in context_events] == [
+                "estimate",
+                "provider",
+            ]
+            provider_context = context_events[-1].data["context"]
+            assert provider_context["used_tokens"] == 11
+            assert provider_context["remaining_tokens"] == (
+                provider_context["limit_tokens"] - 11
+            )
+            assert provider_context["used_percent"] == round(
+                11 * 100 / provider_context["limit_tokens"], 1
+            )
             terminal = [event for event in events if event.terminal]
             assert len(terminal) == 1
             assert terminal[0].kind is AgentEventKind.COMPLETED
@@ -856,6 +903,12 @@ def test_agent_stream_has_one_terminal_event_and_persists_usage(tmp_path: Path) 
                 {"role": "user", "content": "question"},
                 {"role": "assistant", "content": "final answer"},
             ]
+            persisted = await repositories.database.fetch_all(
+                "SELECT event_kind FROM run_events ORDER BY sequence"
+            )
+            assert "context_updated" not in {
+                str(row["event_kind"]) for row in persisted
+            }
         finally:
             await repositories.close()
 

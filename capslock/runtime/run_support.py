@@ -115,7 +115,10 @@ class RunEventPublisher:
         await self.bus.publish_persisted(event)
 
     async def emit(self, kind: AgentEventKind, data: dict[str, Any]) -> None:
-        await self.bus.emit(kind, redact(data))
+        await self.bus.emit(
+            kind,
+            data if kind is AgentEventKind.CONTEXT_UPDATED else redact(data),
+        )
 
     async def flush(self) -> None:
         await self.bus.flush()

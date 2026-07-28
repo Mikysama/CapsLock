@@ -30,12 +30,13 @@ from ...domain import (
     SessionInfo,
 )
 from ...permissions import PermissionMode
-from ...theme import make_console
+from ...theme import THEME_TOKENS, make_console, no_color_enabled
 from .. import actions
 from ..commands import COMMANDS, command_descriptions, command_menu_completions
 from ..commands import CommandOutcome, CommandOutcomeKind
 from ..context import CliContext
 from ..command_ui import ConsoleCommandUI
+from ..choices import ChoiceViewModel
 from ..dispatch import dispatch_slash_command
 from .models import (
     TuiState,
@@ -50,6 +51,7 @@ from .models import (
 from .presentation import present_action
 from .screens import (
     ApprovalScreen,
+    ChoiceScreen,
     ConfirmScreen,
     ContentScreen,
     EnterPlanModeScreen,
@@ -65,7 +67,6 @@ from .screens import (
     TextPromptScreen,
 )
 from .widgets import (
-    ActivityBar,
     BottomArea,
     CompletionBar,
     Composer,
@@ -90,20 +91,9 @@ class FullscreenCommandUI:
     async def select(self, title: str, choices) -> str | None:
         if not choices:
             return None
-        detail = "\n".join(
-            f"{i}. {item.label} {item.detail}" for i, item in enumerate(choices, 1)
+        return await self.app._modal_wait(
+            ChoiceScreen(ChoiceViewModel.from_choices(title, choices))
         )
-        value = await self.app._modal_wait(
-            TextPromptScreen(
-                title + "\n" + detail, placeholder="Number (blank cancels)"
-            )
-        )
-        if not value:
-            return None
-        try:
-            return choices[int(value) - 1].value
-        except (ValueError, IndexError):
-            raise ValueError("invalid selection") from None
 
     async def confirm(self, title: str, detail: str, *, default: bool = False) -> bool:
         return bool(await self.app._modal_wait(ConfirmScreen(title, detail)))
@@ -151,29 +141,47 @@ class FullscreenCommandUI:
         return await ConsoleCommandUI(self.app.context.console).copy(content)
 
 
-CSS = """
+_CSS_TOKENS = {
+    "textPrimary": "textPrimary",
+    "textSecondary": "textSecondary",
+    "textMuted": "textMuted",
+    "border": "border",
+    "borderMuted": "borderMuted",
+    "borderFocus": "borderFocus",
+    "primaryStrong": "primaryStrong",
+    "userPromptBackground": "userPromptBackground",
+    "userPromptForeground": "userPromptForeground",
+    "userPromptAccent": "userPromptAccent",
+    "waiting": "waiting",
+    "error": "error",
+    "planMode": "planMode",
+}
+CSS = (
+    "\n".join(f"${name}: {THEME_TOKENS[token]};" for name, token in _CSS_TOKENS.items())
+    + """
 App {
     background: ansi_default;
 }
 Screen {
     background: transparent;
-    color: #DCE6F2;
+    color: $textPrimary;
 }
 #main {
     width: 100%;
     height: 100%;
 }
 #session-header {
-    height: auto;
-    min-height: 2;
+    height: 2;
     padding: 0 2;
-    border-bottom: solid #3D4F61;
+    border-bottom: solid $borderMuted;
     background: transparent;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
 }
 #transcript {
     height: 1fr;
     padding: 1 2;
-    scrollbar-color: #52687C;
+    scrollbar-color: $border;
     scrollbar-background: transparent;
 }
 .message {
@@ -183,30 +191,31 @@ Screen {
     padding: 0 1;
 }
 .message.user {
-    border-left: thick #8CB9DC;
-    background: #E0E0E0;
+    border-left: thick $borderFocus;
+    background: $userPromptBackground;
+    color: $userPromptForeground;
     padding: 1;
 }
 .message.assistant {
-    border-left: thick #5F8FB8;
+    border-left: thick $primaryStrong;
     padding-left: 1;
 }
 .message.reasoning {
-    color: #718397;
+    color: $textMuted;
     padding-left: 2;
 }
 .message.tools {
-    color: #A9B8C8;
+    color: $textSecondary;
     padding-left: 2;
 }
 .message.system {
-    color: #A9B8C8;
-    border-left: thick #52687C;
+    color: $textSecondary;
+    border-left: thick $border;
     padding-left: 1;
 }
 #bottom-area {
     height: auto;
-    max-height: 20;
+    max-height: 11;
     background: transparent;
 }
 #queue-bar {
@@ -216,13 +225,17 @@ Screen {
     background: transparent;
 }
 #completions {
+    layer: overlay;
+    dock: bottom;
+    margin-bottom: 4;
+    width: 100%;
     height: auto;
-    max-height: 10;
+    max-height: 8;
     padding: 0 2;
     overflow-y: auto;
     overflow-x: hidden;
     scrollbar-size-vertical: 1;
-    scrollbar-color: #52687C;
+    scrollbar-color: $border;
     scrollbar-background: transparent;
     background: transparent;
 }
@@ -234,16 +247,16 @@ Screen {
     background: transparent;
 }
 #composer {
-    height: 5;
+    height: 3;
     min-height: 3;
     max-height: 8;
     margin: 0 1;
-    border: solid #52687C;
+    border: solid $border;
     background: transparent;
-    color: #DCE6F2;
+    color: $textPrimary;
 }
 #composer:focus {
-    border: solid #8CB9DC;
+    border: solid $borderFocus;
 }
 #composer .text-area--cursor-line,
 #composer .text-area--cursor-gutter,
@@ -252,17 +265,13 @@ Screen {
 }
 #composer .text-area--cursor {
     background: transparent;
-    color: #DCE6F2;
+    color: $textPrimary;
     text-style: underline;
-}
-#activity {
-    height: 1;
-    padding: 0 2;
 }
 #status {
     height: 1;
     padding: 0 2;
-    color: #718397;
+    color: $textMuted;
 }
 #too-small {
     display: none;
@@ -271,7 +280,7 @@ Screen {
     height: 100%;
     content-align: center middle;
     background: transparent;
-    color: #C4A96B;
+    color: $waiting;
 }
 ModalScreen {
     align: center middle;
@@ -283,7 +292,7 @@ ModalScreen {
     height: auto;
     max-height: 82%;
     padding: 1 2;
-    border: solid #52687C;
+    border: solid $border;
     background: transparent;
 }
 .confirm-dialog { width: 64; }
@@ -293,18 +302,18 @@ ModalScreen {
 .content-dialog { width: 86%; height: 76%; }
 .dialog-title {
     text-style: bold;
-    color: #DCE6F2;
+    color: $textPrimary;
     margin-bottom: 1;
 }
-.permission-title { color: #C4A96B; }
-.plan-title { color: #72AFA7; }
+.permission-title { color: $waiting; }
+.plan-title { color: $planMode; }
 .dialog-detail { margin-bottom: 1; }
 .dialog-scroll { height: 1fr; }
 .approval-preview {
     height: 1fr;
     min-height: 5;
     margin: 1 0;
-    border: solid #3D4F61;
+    border: solid $borderMuted;
     padding: 0 1;
 }
 .plan-entry-dialog { width: 72; min-height: 22; }
@@ -314,8 +323,8 @@ ModalScreen {
     height: 1fr;
     min-height: 8;
     margin: 1 0;
-    border-top: dashed #3D4F61;
-    border-bottom: dashed #3D4F61;
+    border-top: dashed $borderMuted;
+    border-bottom: dashed $borderMuted;
     padding: 0 1;
 }
 .plan-approval-dialog OptionList { height: 8; }
@@ -327,11 +336,35 @@ ModalScreen {
 }
 .dialog-actions Button { margin-left: 1; }
 .input-guide {
-    color: #718397;
+    color: $textMuted;
     text-style: italic;
     margin-top: 1;
 }
+.question-step, #answer-summary { height: auto; min-height: 10; }
+.question-step OptionList, .question-step SelectionList {
+    height: auto;
+    min-height: 5;
+    max-height: 12;
+}
+.question-title { text-style: bold; margin-bottom: 1; }
+.question-error { color: $error; text-style: bold; }
+.no-color, .no-color Static, .no-color TextArea, .no-color Input,
+.no-color OptionList, .no-color SelectionList, .no-color Button {
+    color: ansi_default;
+}
+.no-color .message { border-left: thick ansi_default; }
+.no-color .message.user {
+    background: transparent;
+    color: ansi_default;
+}
+.no-color #composer, .no-color #session-header, .no-color #dialog,
+.no-color .approval-preview { border: solid ansi_default; }
+.no-color .plan-preview {
+    border-top: dashed ansi_default;
+    border-bottom: dashed ansi_default;
+}
 """
+)
 
 
 class CapsLockApp(App[int]):
@@ -370,18 +403,23 @@ class CapsLockApp(App[int]):
         self._activity_timer: Any = None
         self._sync_lock = asyncio.Lock()
         self._side_question_task: asyncio.Task[Any] | None = None
+        self._recalled_item = None
 
     def compose(self) -> ComposeResult:
         with Vertical(id="main"):
             yield SessionHeader(id="session-header")
             yield TranscriptView()
             yield BottomArea(id="bottom-area")
+        yield CompletionBar(id="completions")
         yield Static(
             "Terminal too small\nCapsLock needs at least 48 columns × 14 rows",
             id="too-small",
         )
 
     async def on_mount(self) -> None:
+        if no_color_enabled():
+            self.add_class("no-color")
+            self.screen.add_class("no-color")
         queries = self.context.require_queries()
         self.session = await queries.session(self.agent_session.session_id)
         transcript = await queries.transcript(self.agent_session.session_id)
@@ -403,7 +441,10 @@ class CapsLockApp(App[int]):
             1 / _ACTIVITY_FPS, self._refresh_activity, pause=True
         )
         await self._sync()
-        self.query_one(Composer).focus()
+        composer = self.query_one(Composer)
+        composer.fit_height(width=self.size.width, terminal_height=self.size.height)
+        self.call_after_refresh(self._position_completions)
+        composer.focus()
 
     async def on_unmount(self) -> None:
         if self._activity_timer is not None:
@@ -415,14 +456,20 @@ class CapsLockApp(App[int]):
         self._too_small = event.size.width < 48 or event.size.height < 14
         self.query_one("#too-small", Static).display = self._too_small
         self.query_one("#main", Vertical).display = not self._too_small
+        self.query_one(Composer).fit_height(
+            width=event.size.width, terminal_height=event.size.height
+        )
+        self.call_after_refresh(self._position_completions)
         await self._sync_chrome()
 
     async def on_composer_submitted(self, event: Composer.Submitted) -> None:
         text = event.text.strip()
         if not text:
+            self._recalled_item = None
             return
         composer = self.query_one(Composer)
         composer.clear()
+        recalled, self._recalled_item = self._recalled_item, None
         self.query_one(CompletionBar).update_candidates(())
         self._completion_values = []
         self._completion_items = []
@@ -442,16 +489,24 @@ class CapsLockApp(App[int]):
             )
             if not allowed:
                 return
-        item = await self.agent_session.enqueue(text)
+        item = (
+            await self.controller.submit_recalled(recalled, text)
+            if recalled is not None
+            else await self.agent_session.enqueue(text)
+        )
         self._input_history.append(text)
         self._history_index = len(self._input_history)
         self.state = add_user_message(self.state, item.id, text)
-        await self.controller.enqueue_item(item.id, item.question)
+        if recalled is None:
+            await self.controller.enqueue_item(item.id, item.question)
         await self._sync()
 
     async def on_composer_history_requested(
         self, event: Composer.HistoryRequested
     ) -> None:
+        if event.direction < 0 and not self.query_one(Composer).text:
+            if await self._recall_latest():
+                return
         if not self._input_history:
             return
         self._history_index = max(
@@ -481,6 +536,26 @@ class CapsLockApp(App[int]):
         if event.text_area.id != "composer":
             return
         self._update_completions(event.text_area.text)
+        self.query_one(Composer).fit_height(
+            width=self.size.width, terminal_height=self.size.height
+        )
+        self.call_after_refresh(self._position_completions)
+
+    async def on_composer_recall_requested(
+        self, _event: Composer.RecallRequested
+    ) -> None:
+        await self._recall_latest()
+
+    def on_composer_help_requested(self, _event: Composer.HelpRequested) -> None:
+        self.push_screen(
+            ContentScreen(
+                "Keyboard shortcuts",
+                "Enter  submit\nCtrl+J / Shift+Enter  new line\n"
+                "Ctrl+C  cancel active run or exit\nCtrl+O  toggle details\n"
+                "Ctrl+R  search history\nTab  complete\n"
+                "Up  edit latest queued prompt or browse history",
+            )
+        )
 
     async def on_transcript_view_load_older(
         self, _event: TranscriptView.LoadOlder
@@ -520,7 +595,11 @@ class CapsLockApp(App[int]):
         self.query_one(Composer).load_text(value + " ")
 
     async def _controller_event(self, item: ControllerEvent) -> None:
-        if item.kind is ControllerEventKind.STARTED and item.work_item_id:
+        if item.kind is ControllerEventKind.DEQUEUED and item.work_item_id:
+            self.state = remove_queue_item(
+                self.state, item.work_item_id, clear_active=False
+            )
+        elif item.kind is ControllerEventKind.STARTED and item.work_item_id:
             self.state = set_queue_running(self.state, item.work_item_id)
         elif item.kind is ControllerEventKind.RUN_EVENT and item.event is not None:
             self.state = reduce_event(self.state, item.event)
@@ -583,9 +662,7 @@ class CapsLockApp(App[int]):
                 except ValueError:
                     request = None
                 if request is not None:
-                    decision = await self._modal_wait(
-                        PermissionApprovalScreen(request)
-                    )
+                    decision = await self._modal_wait(PermissionApprovalScreen(request))
                     await self.agent_session.decide_permission_request(
                         str(request["id"]), decision
                     )
@@ -844,9 +921,7 @@ class CapsLockApp(App[int]):
             request = await self.agent_session.resolve_permission_request(parts[2])
             decision = ApprovalChoice.REJECT
             if parts[1] == "approve":
-                decision = await self._modal_wait(
-                    PermissionApprovalScreen(request)
-                )
+                decision = await self._modal_wait(PermissionApprovalScreen(request))
             await self.agent_session.decide_permission_request(
                 str(request["id"]), decision
             )
@@ -854,9 +929,7 @@ class CapsLockApp(App[int]):
                 str(request["run_id"]),
                 session_id=self.agent_session.session_id,
             )
-            await self.controller.enqueue_item(
-                run.work_item_id, run.question, run.id
-            )
+            await self.controller.enqueue_item(run.work_item_id, run.question, run.id)
             return
         decision = ApprovalDecision.REJECT
         if parts[1] == "approve":
@@ -901,9 +974,7 @@ class CapsLockApp(App[int]):
                 self.state = add_user_message(
                     self.state, result.work_item_id, result.question
                 )
-                await self.controller.enqueue_item(
-                    result.work_item_id, result.question
-                )
+                await self.controller.enqueue_item(result.work_item_id, result.question)
             elif result.kind is not CommandOutcomeKind.HANDLED:
                 self.exit(result)
                 return
@@ -955,10 +1026,10 @@ class CapsLockApp(App[int]):
         self.query_one(Composer).completion_count = len(values)
         self.query_one(CompletionBar).update_candidates(candidates, selected=0)
 
-    def _refresh_activity(self) -> None:
-        bars = self.query(ActivityBar)
-        if bars:
-            bars.first().update_state(self.state, enabled=self.status_enabled)
+    async def _refresh_activity(self) -> None:
+        if not list(self.screen.query(SessionHeader)):
+            return
+        await self._sync_chrome()
 
     async def _sync(self) -> None:
         async with self._sync_lock:
@@ -966,12 +1037,13 @@ class CapsLockApp(App[int]):
             follow = not transcript.children or transcript.is_vertical_scroll_end
             await transcript.sync_messages(self.state.messages, follow=follow)
             self.query_one(QueueBar).update_queue(self.state.queue)
+            self.call_after_refresh(self._position_completions)
             await self._sync_chrome()
             if follow:
                 self.call_after_refresh(transcript.scroll_end, animate=False)
 
     async def _sync_chrome(self) -> None:
-        if self.session is None:
+        if self.session is None or not list(self.screen.query(SessionHeader)):
             return
         width = self.size.width
         current_plan_loader = getattr(self.agent_session, "current_plan", None)
@@ -991,7 +1063,7 @@ class CapsLockApp(App[int]):
             permission=permission_label,
             width=width,
         )
-        self.query_one(StatusBar).update_status(
+        activity = self.query_one(StatusBar).update_status(
             self.state,
             model=self.agent_session.model,
             permission=permission_label,
@@ -999,14 +1071,36 @@ class CapsLockApp(App[int]):
             width=width,
             context_limit=self.agent_session.context_budget.input_budget,
         )
-        activity = self.query_one(ActivityBar).update_state(
-            self.state, enabled=self.status_enabled
-        )
+        activity = bool(activity and self.status_enabled)
         if self._activity_timer is not None:
             if activity:
                 self._activity_timer.resume()
             else:
                 self._activity_timer.pause()
+
+    async def _recall_latest(self) -> bool:
+        recalled = await self.controller.recall_latest()
+        if recalled is None:
+            return False
+        self._recalled_item = recalled
+        composer = self.query_one(Composer)
+        composer.load_text(recalled.question)
+        lines = composer.text.splitlines() or [""]
+        composer.cursor_location = (len(lines) - 1, len(lines[-1]))
+        composer.focus()
+        await self._sync()
+        return True
+
+    def _position_completions(self) -> None:
+        if not list(self.screen.query(BottomArea)):
+            return
+        bottom = self.query_one(BottomArea)
+        self.query_one(CompletionBar).styles.margin = (
+            0,
+            0,
+            max(4, bottom.region.height),
+            0,
+        )
 
 
 class _SessionPickerApp(App[str | None]):
@@ -1017,7 +1111,11 @@ class _SessionPickerApp(App[str | None]):
         self.sessions = sessions
 
     def on_mount(self) -> None:
-        self.push_screen(SessionPickerScreen(self.sessions), self.exit)
+        screen = SessionPickerScreen(self.sessions)
+        if no_color_enabled():
+            self.add_class("no-color")
+            screen.add_class("no-color")
+        self.push_screen(screen, self.exit)
 
 
 async def select_session_fullscreen(sessions: list[SessionInfo]) -> str | None:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import shutil
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -28,6 +28,8 @@ from ..permissions import PermissionMode
 from ..status import SPINNER_FRAMES
 from ..theme import build_prompt_style
 from .commands import command_descriptions, command_menu_completions
+from .choices import ChoiceViewModel, questions_view_model
+from .presentation import present_action, present_permission_request
 from .keybindings import load_keybindings
 from .suggestions import (
     StaticSuggestionProvider,
@@ -92,6 +94,150 @@ class SlashCommandLexer(Lexer):
 PROMPT_STYLE = build_prompt_style()
 
 
+def select_choice(title: str, choices: Sequence[object]) -> str | None:
+    """Render the shared selector with label/detail hierarchy and filtering."""
+
+    model = ChoiceViewModel.from_choices(title, choices)
+    options = model.options
+    if model.filterable:
+        from prompt_toolkit.shortcuts import prompt
+
+        query = prompt(
+            f"{title}\nFilter (blank shows all, Esc cancels): ",
+            style=PROMPT_STYLE,
+            key_bindings=_escape_bindings(),
+        )
+        if query is None:
+            return None
+        options = model.filtered(query)
+        if not options:
+            return None
+    labels = [
+        (
+            item.value,
+            FormattedText(
+                [
+                    ("class:user-input", item.label),
+                    ("class:footer", f"  {item.detail}" if item.detail else ""),
+                ]
+            ),
+        )
+        for item in options
+    ]
+    default = (
+        model.current if model.current in {item.value for item in options} else None
+    )
+    return choice(
+        title,
+        options=labels,
+        default=default,
+        style=PROMPT_STYLE,
+        symbol="❯",
+        bottom_toolbar="↑/↓ choose · Enter apply · Ctrl+C cancel",
+        key_bindings=_escape_bindings(),
+    )
+
+
+def _escape_bindings() -> KeyBindings:
+    bindings = KeyBindings()
+
+    @bindings.add("escape", eager=True)
+    def cancel(event: object) -> None:
+        event.app.exit(result=None)
+
+    return bindings
+
+
+def answer_questions(raw_questions: Sequence[object]) -> dict[str, object] | None:
+    """Collect validated ask_user answers with native prompt-toolkit controls."""
+
+    from prompt_toolkit.shortcuts import checkboxlist_dialog, prompt
+
+    questions = questions_view_model(raw_questions)
+    if not questions:
+        return None
+    while True:
+        answers: dict[str, object] = {}
+        for index, question in enumerate(questions, 1):
+            title = f"Question {index}/{len(questions)} · {question.question}"
+            if question.multiple:
+                values = [(item.value, item.label) for item in question.options]
+                if question.allow_free_text:
+                    values.append(("__other__", "Other…"))
+                selected = checkboxlist_dialog(
+                    title=title,
+                    text="Select one or more options (Space toggles)",
+                    values=values,
+                    style=PROMPT_STYLE,
+                    ok_text="Next",
+                    cancel_text="Cancel",
+                ).run()
+                if not selected:
+                    return None
+                resolved = [str(value) for value in selected if value != "__other__"]
+                if "__other__" in selected:
+                    other = prompt("Other: ", style=PROMPT_STYLE).strip()
+                    if not other:
+                        return None
+                    resolved.append(other)
+                answers[question.identifier] = resolved
+                continue
+
+            options = list(question.options)
+            if question.allow_free_text:
+                from .choices import ChoiceOption
+
+                options.append(ChoiceOption("__other__", "Other…", "Enter free text"))
+            selected = choice(
+                title,
+                options=[
+                    (
+                        item.value,
+                        FormattedText(
+                            [
+                                ("class:user-input", item.label),
+                                (
+                                    "class:footer",
+                                    f"  {item.detail}" if item.detail else "",
+                                ),
+                            ]
+                        ),
+                    )
+                    for item in options
+                ],
+                default=options[0].value if options else None,
+                style=PROMPT_STYLE,
+                symbol="❯",
+                bottom_toolbar="↑/↓ choose · Enter next · Ctrl+C cancel",
+                key_bindings=_escape_bindings(),
+            )
+            if selected == "__other__":
+                selected = prompt("Other: ", style=PROMPT_STYLE).strip()
+            if not selected:
+                return None
+            answers[question.identifier] = selected
+
+        summary = "\n".join(
+            f"{question.question}: "
+            + (
+                ", ".join(str(item) for item in answers[question.identifier])
+                if isinstance(answers[question.identifier], list)
+                else str(answers[question.identifier])
+            )
+            for question in questions
+        )
+        decision = choice(
+            f"Review answers\n{summary}",
+            options=(("submit", "Submit"), ("edit", "Edit answers")),
+            default="submit",
+            style=PROMPT_STYLE,
+            symbol="❯",
+            key_bindings=_escape_bindings(),
+        )
+        if decision == "submit":
+            return answers
+
+
 def prompt_tokens(
     mode: PermissionMode,
     width: int | None = None,
@@ -110,17 +256,20 @@ def prompt_prelude(
     permission: str | None = None,
     workspace: str | None = None,
     usage: tuple[int, int, float] = (0, 0, 0.0),
+    context: tuple[int | None, int] = (None, 0),
 ) -> FormattedText:
     terminal_width = width or shutil.get_terminal_size(fallback=(80, 24)).columns
     queue_rows: list[tuple[str, str]] = []
     if queued_items:
-        previews = "  ·  ".join(
-            f"{identifier[:8]} {text}" for identifier, text in queued_items[:3]
-        )
+        _identifier, latest = queued_items[-1]
+        preview = " ".join(latest.split())
         queue_rows = [
             (
                 "class:permission",
-                _fit_cell(f"Queue  {previews}", max(20, terminal_width - 1)).rstrip(),
+                _fit_cell(
+                    f"Queued {len(queued_items)} · {preview} · ↑ edit",
+                    max(20, terminal_width - 1),
+                ).rstrip(),
             ),
             ("", "\n"),
         ]
@@ -131,13 +280,15 @@ def prompt_prelude(
         permission=permission,
         workspace=workspace,
         usage=usage,
+        context=context,
     )
-    activity_rows = _activity_fragments(activity, spinner_frame)
+    footer = _combined_status(
+        status_row, activity, spinner_frame, terminal_width=terminal_width
+    )
     return FormattedText(
         [
             *queue_rows,
-            *activity_rows,
-            ("class:footer", _fit_cell(status_row, terminal_width - 1).rstrip()),
+            *footer,
         ]
     )
 
@@ -161,9 +312,9 @@ def prompt_footer(
     permission: str | None = None,
     workspace: str | None = None,
     usage: tuple[int, int, float] = (0, 0, 0.0),
+    context: tuple[int | None, int] = (None, 0),
 ) -> FormattedText:
     terminal_width = width or shutil.get_terminal_size(fallback=(80, 24)).columns
-    status = _activity_fragments(activity, spinner_frame, trailing_newline=False)
     status_row = _status_label(
         terminal_width,
         details_expanded=details_expanded,
@@ -171,17 +322,41 @@ def prompt_footer(
         permission=permission,
         workspace=workspace,
         usage=usage,
+        context=context,
     )
     bottom = "╰" + "─" * max(1, terminal_width - 2) + "╯"
     return FormattedText(
         [
             ("class:input-border", bottom),
             ("", "\n"),
-            *(status or [("", " ")]),
-            ("", "\n"),
-            ("class:footer", _fit_cell(status_row, terminal_width - 1).rstrip()),
+            *_combined_status(
+                status_row, activity, spinner_frame, terminal_width=terminal_width
+            ),
         ]
     )
+
+
+def _combined_status(
+    status: str,
+    activity: str | None,
+    spinner_frame: int,
+    *,
+    terminal_width: int,
+) -> list[tuple[str, str]]:
+    if not activity:
+        return [("class:footer", _fit_cell(status, terminal_width - 1).rstrip())]
+    activity_label = activity if activity.endswith("...") else f"{activity}..."
+    glyph = SPINNER_FRAMES[spinner_frame % len(SPINNER_FRAMES)]
+    if terminal_width < 72:
+        value = f"{glyph} {activity_label}"
+    else:
+        value = f"{glyph} {activity_label} · {status}"
+    return [
+        (
+            "class:running class:running.bold",
+            _fit_cell(value, terminal_width - 1).rstrip(),
+        )
+    ]
 
 
 def _activity_fragments(
@@ -218,23 +393,36 @@ def _status_label(
     permission: str | None,
     workspace: str | None,
     usage: tuple[int, int, float],
+    context: tuple[int | None, int],
 ) -> str:
-    detail_state = "details on" if details_expanded else "details off"
+    del details_expanded
     input_tokens, output_tokens, cost_usd = usage
+    context_label = _context_label(*context)
     if terminal_width >= 100:
         return (
             f"{workspace or '-'}  ·  {model or '-'}  ·  {permission or '-'}  ·  "
-            f"{input_tokens}/{output_tokens} tok  ·  ${cost_usd:.4f}  ·  {detail_state}"
+            f"{context_label}  ·  {input_tokens}/{output_tokens} tok  ·  "
+            f"${cost_usd:.4f}"
         )
     if terminal_width >= 72:
         return (
             f"{model or '-'}  ·  {permission or '-'}  ·  "
-            f"{input_tokens}/{output_tokens} tok  ·  {detail_state}"
+            f"{context_label}  ·  turn {input_tokens + output_tokens} tok"
         )
-    return (
-        f"{permission or '-'}  ·  {input_tokens + output_tokens} tok  ·  "
-        f"{'details on' if details_expanded else 'details off'}"
-    )
+    return f"{permission or '-'}  ·  {context_label}"
+
+
+def _context_label(used: int | None, limit: int) -> str:
+    def compact(value: int) -> str:
+        if value >= 1_000_000:
+            return f"{value / 1_000_000:.1f}m"
+        if value >= 1_000:
+            return f"{value / 1_000:.1f}k"
+        return str(value)
+
+    if used is None:
+        return f"ctx —/{compact(limit)}"
+    return f"ctx {compact(used)}/{compact(limit)} ({used * 100 / max(1, limit):.1f}%)"
 
 
 def select_session(
@@ -391,13 +579,19 @@ def select_action_decision(
         ]
         default = ApprovalChoice.REJECT
     if "session" in destinations:
-        options.append(
-            (ApprovalChoice.APPROVE_SESSION, "Yes, allow for this session")
+        view = present_action(action)
+        rule = next(
+            (rule for target, rule in view.permission_rules if target == "session"),
+            "allow matching action",
         )
+        options.append((ApprovalChoice.APPROVE_SESSION, f"Session: {rule}"))
     if "local" in destinations:
-        options.append(
-            (ApprovalChoice.APPROVE_LOCAL, "Yes, always allow in this workspace")
+        view = present_action(action)
+        rule = next(
+            (rule for target, rule in view.permission_rules if target == "local"),
+            "allow matching action",
         )
+        options.append((ApprovalChoice.APPROVE_LOCAL, f"Local: {rule}"))
     return choice(
         header,
         options=options,
@@ -412,22 +606,25 @@ def select_permission_request_decision(
 ) -> ApprovalChoice:
     suggestions = request.get("suggestions", [])
     destinations = {
-        item.get("destination")
-        for item in suggestions
-        if isinstance(item, dict)
+        item.get("destination") for item in suggestions if isinstance(item, dict)
     }
     options = [
         (ApprovalChoice.REJECT, "No, reject this invocation"),
         (ApprovalChoice.APPROVE_ONCE, "Yes, allow this invocation once"),
     ]
+    view = present_permission_request(request)
     if "session" in destinations:
-        options.append(
-            (ApprovalChoice.APPROVE_SESSION, "Yes, allow for this session")
+        rule = next(
+            (rule for target, rule in view.permission_rules if target == "session"),
+            "allow matching tool",
         )
+        options.append((ApprovalChoice.APPROVE_SESSION, f"Session: {rule}"))
     if "local" in destinations:
-        options.append(
-            (ApprovalChoice.APPROVE_LOCAL, "Yes, always allow in this workspace")
+        rule = next(
+            (rule for target, rule in view.permission_rules if target == "local"),
+            "allow matching tool",
         )
+        options.append((ApprovalChoice.APPROVE_LOCAL, f"Local: {rule}"))
     return choice(
         FormattedText(
             [
@@ -541,17 +738,19 @@ def prompt_session(
     prelude_provider: Callable[[], FormattedText] | None = None,
     workspace: Path | None = None,
     keybinding_path: Path | None = None,
+    recall_latest: Callable[[], Awaitable[str | None]] | None = None,
+    show_help: Callable[[], Awaitable[None]] | None = None,
 ) -> PromptSession[str]:
     keymap = load_keybindings(keybinding_path)
     inline_bindings = KeyBindings()
 
     for key in keymap.bindings["insert_newline"]:
-        inline_bindings.add(key)(
-            lambda event: event.current_buffer.insert_text("\n")
-        )
+        inline_bindings.add(key)(lambda event: event.current_buffer.insert_text("\n"))
 
     for key in keymap.bindings["submit"]:
-        inline_bindings.add(key)(lambda event: event.current_buffer.validate_and_handle())
+        inline_bindings.add(key)(
+            lambda event: event.current_buffer.validate_and_handle()
+        )
 
     def cancel(event: object) -> None:
         event.app.exit(exception=KeyboardInterrupt())
@@ -567,6 +766,35 @@ def prompt_session(
 
         for key in keymap.bindings["toggle_details"]:
             inline_bindings.add(key)(_toggle_details)
+
+    if recall_latest is not None:
+
+        def _recall_latest(event: object) -> None:
+            buffer = event.current_buffer
+            if buffer.text:
+                buffer.history_backward()
+                return
+
+            async def recall() -> None:
+                value = await recall_latest()
+                if value is None:
+                    return
+                buffer.document = Document(value, cursor_position=len(value))
+                event.app.invalidate()
+
+            event.app.create_background_task(recall())
+
+        inline_bindings.add("up", eager=True)(_recall_latest)
+
+    if show_help is not None:
+
+        def _show_help(event: object) -> None:
+            if event.current_buffer.text:
+                event.current_buffer.insert_text("?")
+                return
+            event.app.create_background_task(show_help())
+
+        inline_bindings.add("?", eager=True)(_show_help)
 
     session = PromptSession(
         completer=SlashCommandCompleter(skill_provider, workspace=workspace),
