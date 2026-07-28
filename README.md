@@ -2,7 +2,7 @@
 
 CapsLock 是一个本机工作区 Agent，用于读取和修改代码、检索证据、运行受沙箱保护的 Shell、查询代码语义，以及按审批策略访问 Web、MCP 和本地插件。Tool Runtime v2 将工具契约、参数级策略、可恢复暂停、调度、富结果与审计统一到异步执行链。
 
-当前源码版本为 `2.7.0`。本版本完成 Shell AST 安全分析、Composer 文件引用与可配置按键、自适应 token/context、IDE Bridge、远程 MCP、本地性能追踪，以及可双向通信的多 Agent mailbox/artifact 协作。当前协议为 workspace schema 14、memory schema 4、portable archive 6、session export 6 和 config 9。完整升级边界见 [2.7.0 发布说明](docs/releases/v2.7.0.md)。
+当前源码版本为 `2.7.1`。本版本收紧只读 Shell 自动批准，强化 Agent 产物原子发布、Web 与文件搜索硬上限，并完成 CLI、权限、运行日志、运行时、协作、记忆及工具模块的职责拆分和正式路径全量迁移。当前协议仍为 workspace schema 14、memory schema 4、portable archive 6、session export 6 和 config 9。完整边界见 [2.7.1 发布说明](docs/releases/v2.7.1.md)。
 
 正式支持矩阵：Linux/macOS，Python 3.12。发布 CI 会在两个操作系统组合中执行测试、构建、依赖审计和安装冒烟。
 
@@ -140,7 +140,7 @@ Markdown、代码高亮和输入光标行只移除字符背景，不改变前景
 
 ## 权限与动作
 
-CapsLock 只提供 `full_access`、`approve_for_me` 和 `ask_for_approval` 三种模式。默认的 `approve_for_me` 自动放行安全本地读取和确定性安全的断网沙箱命令；文件修改、网络、后台进程、MCP 与插件副作用默认询问。`full_access` 放行其余调用，但 hard deny、强制安全确认及显式 deny/ask 仍生效；`ask_for_approval` 只有显式 allow 才自动放行。Shell 快速分类器只可在 `approve_for_me`、默认断网沙箱、确定性分析未知、置信度至少 0.95 且没有显式 ask/deny 时放行。
+CapsLock 只提供 `full_access`、`approve_for_me` 和 `ask_for_approval` 三种模式。默认的 `approve_for_me` 自动放行安全本地读取和确定性只读的断网沙箱命令；文件修改、网络、后台进程、MCP 与插件副作用默认询问。`full_access` 放行其余调用，但 hard deny、强制安全确认及显式 deny/ask 仍生效；`ask_for_approval` 只有显式 allow 才自动放行。Shell 自动批准只覆盖受参数约束的 Git 查询、`pwd` 和只消费标准输入的有界过滤器，并将工作区只读挂载；快速分类器只提供风险审计，不会扩大该白名单。
 
 ```text
 /permissions full
@@ -175,7 +175,7 @@ path = "**/.env*"
 所有动作共用 `pending -> approved -> running -> completed|failed|cancelled` 状态机。拒绝从 `pending` 进入 `rejected`。Coordinator 负责风险、审批、状态和审计；handler 负责文件、命令、Web 或 MCP 的校验与执行。
 
 - 文件动作在提案和执行时校验路径、内容与哈希，且支持安全 `/undo`。
-- Shell 通过确定性规则、结构化权限和 OS 沙箱执行；默认断网，越界、联网或宿主执行必须单独授权，取消使用 TERM→KILL 收尾。
+- Shell 通过确定性规则、结构化权限和 OS 沙箱执行；默认断网，自动批准仅使用只读工作区，越界、写入、联网或宿主执行必须单独授权，取消使用 TERM→KILL 收尾。
 - Web 只访问公开 HTTP/HTTPS 地址，拒绝私网、重定向越界和非文本响应；来源始终是不可信数据。
 - MCP 只连接显式配置且带工具 allowlist 的 server；本地支持 stdio，远程支持公开 HTTPS 上的 Streamable HTTP/SSE。项目配置不得保存 header/env 凭据，Authorization 必须从本机 `env:` 或 `keyring:` 引用解析，远程 mutating tool 失败不会自动重放。
 - 本地工具插件必须显式安装和逐工作区启用；安装、升级、权限变化和卸载均展示内容摘要与 capability 并记录审计。插件默认在 OS sandbox 中运行，通过宿主 broker 请求受限能力；没有 sandbox backend 时拒绝执行。
@@ -221,7 +221,7 @@ capslock plugin uninstall my-plugin --yes
 
 子任务默认只有只读类工具，文件访问仍必须命中任务契约的路径 allowlist，空 allowlist 不授予文件访问。文件写入、Shell、Web 和 MCP 必须在任务契约中逐项声明；子工具目录不包含 `delegate_agents`，也不自动包含工作区插件。自由文本、证据和产物均是不可信数据，只有通过路径、schema、实际检查状态和 SHA-256 校验的输出才返回父 Agent。
 
-后台子任务使用持久化 mailbox 双向通信。父 Agent 可发送 instruction/response/cancel 并读取、确认 question/progress/response/artifact offer；子 Agent 通过契约绑定的 mailbox 工具读取与回传。artifact offer 的 SHA-256 由子端从受限快照自动计算，发布时父端再次校验 allowlist、大小、摘要和父工作区 snapshot baseline，避免覆盖并发修改。
+后台子任务使用持久化 mailbox 双向通信。父 Agent 可发送 instruction/response/cancel 并读取、确认 question/progress/response/artifact offer；子 Agent 通过契约绑定的 mailbox 工具读取与回传。artifact offer 的 SHA-256 由子端从受限快照自动计算，发布时先暂存全部产物，再与文件 Action 共用工作区写锁，在批量替换前复验 allowlist、大小、摘要和父工作区 snapshot baseline；部分失败会从备份回滚。外部编辑器不遵守应用写锁时只能通过最终复验尽力检测，不能提供跨任意进程的绝对 CAS 保证。
 
 ```text
 /agents
@@ -442,6 +442,7 @@ CapsLock 只接受 canonical 布局：
 ## 架构
 
 运行内核以 `capslock.bootstrap` 为组合根，以 `capslock.ports` 隔离 runtime/tooling 与具体应用、SQLite 实现。每个 session 由 `RunEngine` 串行执行；token budget、tool artifact、事件耐久化、审批和收尾使用独立组件。
+模块依赖方向、兼容 façade 和重构约束见 [Architecture boundaries](docs/architecture.md)。
 
 - `domain/`：session、workflow、action 和 memory 领域类型。
 - `configuration/`：当前配置文档读取、校验与 typed settings。

@@ -32,7 +32,14 @@ class _NoCompactions:
 def test_shell_ast_is_fail_closed_for_dynamic_and_redirected_commands() -> None:
     syntax = parse_shell("git status && rg TODO | head -10")
     assert syntax.parser_available and syntax.commands == ("git", "rg", "head")
-    assert assess_shell("git status && rg TODO | head -10").behavior == "allow"
+    assert [segment.argv for segment in syntax.segments] == [
+        ("git", "status"),
+        ("rg", "TODO"),
+        ("head", "-10"),
+    ]
+    assert assess_shell("git status && rg TODO | head -10").behavior == "ask"
+    safe = assess_shell("git status && git diff | head -10")
+    assert safe.behavior == "allow" and safe.read_only_workspace
     assert assess_shell("git status > out.txt").behavior == "ask"
     assert assess_shell("echo $(whoami)").behavior == "ask"
     assert assess_shell("echo $HOME").behavior == "ask"
@@ -50,7 +57,8 @@ def test_child_agents_receive_contract_bound_mailbox_tools() -> None:
 
 
 def test_bridge_context_requires_auth_and_only_explicit_mentions_expand(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class FakeServer:
         def close(self) -> None:
@@ -181,7 +189,8 @@ def test_performance_spans_and_mailbox_are_digest_checked(tmp_path: Path) -> Non
 
 
 def test_remote_mcp_config_requires_https_public_and_private_headers(
-    tmp_path: Path, monkeypatch,
+    tmp_path: Path,
+    monkeypatch,
 ) -> None:
     layout = ProjectLayout.discover(tmp_path)
     layout.project_mcp.parent.mkdir(parents=True)

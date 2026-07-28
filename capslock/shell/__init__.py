@@ -3,7 +3,7 @@
 from .assessment import ShellAssessment, assess_shell
 from .classifier import ModelShellClassifier, ShellClassification
 from .processes import ProcessJob, SessionProcessManager, stop_process
-from .parser import ShellSyntax, TreeSitterShellParser, parse_shell
+from .parser import ShellSegment, ShellSyntax, TreeSitterShellParser, parse_shell
 from .sandbox import SandboxedCommand, ShellSandboxUnavailable, sandboxed_command
 
 __all__ = [
@@ -14,6 +14,7 @@ __all__ = [
     "ShellAssessment",
     "ShellClassification",
     "ShellSandboxUnavailable",
+    "ShellSegment",
     "ShellSyntax",
     "TreeSitterShellParser",
     "assess_shell",

@@ -14,7 +14,7 @@ from capslock.cli.commands import (
     CommandOutcomeKind,
 )
 from capslock.cli.context import CliContext
-from capslock.cli.new_commands import copy_answer, resume
+from capslock.cli.command_handlers.session import copy_answer, resume
 from capslock.domain import RunKind
 from capslock.policy import WorkspacePolicy
 from capslock.runtime.model import ModelMessage, ModelResponse, ModelToolCall

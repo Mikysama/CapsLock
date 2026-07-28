@@ -1,6 +1,6 @@
 # CapsLock v2 开发者文档
 
-本目录记录 CapsLock v2 的架构、开发过程、安全边界与发布验证。当前稳定版本为 `2.7.0`，开发协议为 Tool Runtime v2、permissions v2、config 9、workspace schema 14、memory schema 4 和 plugin protocol 4。
+本目录记录 CapsLock v2 的架构、开发过程、安全边界与发布验证。当前稳定版本为 `2.7.1`，开发协议为 Tool Runtime v2、permissions v2、config 9、workspace schema 14、memory schema 4 和 plugin protocol 4。
 
 ## 文档入口
 
@@ -8,6 +8,7 @@
 - [v2.1 插件 SDK](v2.1.md)：本地工具插件的 manifest、stdio 协议、安装授权、安全边界和测试要求。
 - [v2.2 多 Agent 协作](v2.2.md)：任务契约、隔离快照、能力衰减、调度、验证和审计协议。
 - [v2.6 权限与 Plan Mode](v2.6.md)：权限 v2 判定内核、Planning boundary、可恢复审批、TUI 交互、迁移和并发治理。
+- [v2.7 安全加固与模块边界](v2.7.md)：Shell/Web/搜索/产物发布边界，以及 CLI、权限、运行日志和运行时的正式模块所有权。
 - [当前运行内核与安全边界](current.md)：RunEngine、工具契约、上下文压缩、artifact、插件 sandbox、事件与存储协议。
 - [Agent Reference](../../reference.md)：面向 CLI、工具、事件、权限和持久化协议的完整参考。
 - [v2.0.0 发布说明](../../releases/v2.0.0.md)：面向使用者的版本变化和已知限制。
@@ -23,6 +24,7 @@
 - [v2.5.0 发布说明](../../releases/v2.5.0.md)：记忆后台作业、混合召回、长期整理、受控指令和子 Agent 记忆提案。
 - [v2.6.0 发布说明](../../releases/v2.6.0.md)：权限 v2、Plan Mode、Claude Code 风格审批和并发工具序号修复。
 - [v2.7.0 发布说明](../../releases/v2.7.0.md)：Shell AST、Composer/context、IDE Bridge、远程 MCP、local tracing 与 Agent mailbox。
+- [v2.7.1 发布说明](../../releases/v2.7.1.md)：只读 Shell 白名单、原子产物发布、有界网络/搜索和全量模块迁移。
 
 ## 当前稳定边界
 

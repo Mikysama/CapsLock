@@ -13,6 +13,7 @@ from rich.console import Console
 from .. import __version__
 from ..environment import load_project_environment
 from ..layout import ProjectLayout
+from .factory import create_application as _create_application
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -169,25 +170,6 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-async def create_application(
-    workspace: Path,
-    settings,
-    session_id: str | None = None,
-    *,
-    layout: ProjectLayout | None = None,
-):
-    from ..bootstrap import WorkspaceApplication
-    from .providers import create_provider_clients
-
-    return await WorkspaceApplication.open(
-        workspace=workspace,
-        settings=settings,
-        client=create_provider_clients(settings),
-        session_id=session_id,
-        layout=layout,
-    )
-
-
 def main(argv: list[str] | None = None, *, console: Console | None = None) -> int:
     try:
         return asyncio.run(async_main(argv, console=console))
@@ -338,7 +320,7 @@ async def async_main(
 
         next_session_id = session_id
         while True:
-            application = await create_application(
+            application = await _create_application(
                 workspace, settings, next_session_id, layout=layout
             )
             async with application:
@@ -432,7 +414,9 @@ async def _trace(output: Console, workspace: Path, layout: ProjectLayout, args) 
 
     from ..storage.repositories import WorkspaceRepositories
 
-    repositories = await WorkspaceRepositories.open(layout.database, workspace=workspace)
+    repositories = await WorkspaceRepositories.open(
+        layout.database, workspace=workspace
+    )
     try:
         command = args.trace_command or "list"
         if command == "list":

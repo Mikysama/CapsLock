@@ -42,7 +42,8 @@ from capslock.tooling.contracts import (
     ToolOutcome,
     define_tool,
 )
-from capslock.tooling.authorization import PermissionEngine, PermissionMiddleware
+from capslock.tooling.permission_policy.engine import PermissionEngine
+from capslock.tooling.permission_policy.middleware import PermissionMiddleware
 from capslock.tooling.planning import PlanningBoundaryMiddleware
 from capslock.tooling.executor import ToolRuntime
 from capslock.tooling.tools import workspace_tools
@@ -142,9 +143,7 @@ def test_model_enter_plan_mode_resumes_with_attachment_and_blocks_hidden_tool(
         shell_calls = 0
         try:
             session = await repositories.sessions.create("test-model")
-            planning = PlanningService(
-                repositories.plans, root=tmp_path / "plans"
-            )
+            planning = PlanningService(repositories.plans, root=tmp_path / "plans")
 
             async def shell(context, arguments):
                 nonlocal shell_calls
@@ -202,12 +201,12 @@ def test_model_enter_plan_mode_resumes_with_attachment_and_blocks_hidden_tool(
             first = await collect(agent, "Plan this change")
             paused = first[-1]
             assert paused.kind is AgentEventKind.WAITING_APPROVAL
-            request = await agent.resolve_plan_request(
-                str(paused.data["request_id"])
-            )
+            request = await agent.resolve_plan_request(str(paused.data["request_id"]))
             await agent.decide_plan_request(request.id, "enter")
 
-            resumed = [event async for event in agent.resume_paused_stream(paused.run_id)]
+            resumed = [
+                event async for event in agent.resume_paused_stream(paused.run_id)
+            ]
             assert resumed[-1].kind is AgentEventKind.COMPLETED
             assert any(
                 str(message.get("content", "")).startswith("<capslock-plan-mode>")
@@ -241,9 +240,7 @@ def test_submitted_plan_approval_queues_exactly_one_implementation(
         )
         try:
             session = await repositories.sessions.create("test-model")
-            planning = PlanningService(
-                repositories.plans, root=tmp_path / "plans"
-            )
+            planning = PlanningService(repositories.plans, root=tmp_path / "plans")
             plan, revision = await planning.create(
                 session.id,
                 "Implement the approved change",
@@ -286,25 +283,28 @@ def test_submitted_plan_approval_queues_exactly_one_implementation(
 
             first = await collect(agent, "Submit the completed plan")
             paused = first[-1]
-            request = await agent.resolve_plan_request(
-                str(paused.data["request_id"])
-            )
+            request = await agent.resolve_plan_request(str(paused.data["request_id"]))
             await agent.decide_plan_request(request.id, "implement")
-            resumed = [event async for event in agent.resume_paused_stream(paused.run_id)]
+            resumed = [
+                event async for event in agent.resume_paused_stream(paused.run_id)
+            ]
             assert resumed[-1].kind is AgentEventKind.COMPLETED
 
             implementation = await repositories.plans.implementation(plan.id)
-            item = await repositories.work_items.require(
-                implementation.work_item_id
-            )
+            item = await repositories.work_items.require(implementation.work_item_id)
             assert item.status.value == "queued"
             assert revision.sha256 in item.question
-            assert (await repositories.plans.require(plan.id)).status.value == "implementing"
-            assert len(
-                await repositories.database.fetch_all(
-                    "SELECT * FROM plan_implementations WHERE plan_id=?", (plan.id,)
+            assert (
+                await repositories.plans.require(plan.id)
+            ).status.value == "implementing"
+            assert (
+                len(
+                    await repositories.database.fetch_all(
+                        "SELECT * FROM plan_implementations WHERE plan_id=?", (plan.id,)
+                    )
                 )
-            ) == 1
+                == 1
+            )
         finally:
             await repositories.close()
 
@@ -570,13 +570,13 @@ def test_non_action_permission_request_executes_real_tool_and_resumes(
             request = await agent.resolve_permission_request(
                 str(paused.data["request_id"])
             )
-            decided = await agent.decide_permission_request(
-                str(request["id"]), choice
-            )
+            decided = await agent.decide_permission_request(str(request["id"]), choice)
             assert decided["result"]["status"] == expected_status
             assert calls == expected_calls
 
-            resumed = [event async for event in agent.resume_paused_stream(paused.run_id)]
+            resumed = [
+                event async for event in agent.resume_paused_stream(paused.run_id)
+            ]
             assert resumed[-1].kind is AgentEventKind.COMPLETED
             invocation = await repositories.run_journal.tool_invocation(
                 str(request["invocation_id"])

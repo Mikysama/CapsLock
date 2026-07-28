@@ -132,20 +132,20 @@ async def _shell_policy(arguments, context):
     from ...shell import assess_shell
     from ..contracts import InterruptBehavior, ResolvedToolPolicy
 
+    context.runtime_state.pop("shell_classifier", None)
+    context.runtime_state.pop("classifier_auto_allow", None)
     assessment = assess_shell(str(arguments.get("command", "")))
     context.runtime_state["shell_deterministic_behavior"] = assessment.behavior
     network = arguments.get("network", [])
     explicitly_restricted = False
-    if (
-        assessment.behavior == "ask"
-        and context.permission_engine is not None
-        and hasattr(context.permission_engine, "has_explicit_restriction")
-    ):
-        explicitly_restricted = await context.permission_engine.has_explicit_restriction(
-            session_id=context.session_id,
-            tool="shell",
-            arguments=arguments,
-            context=context,
+    if assessment.behavior == "ask" and context.permission_engine is not None:
+        explicitly_restricted = (
+            await context.permission_engine.has_explicit_restriction(
+                session_id=context.session_id,
+                tool="shell",
+                arguments=arguments,
+                context=context,
+            )
         )
     if (
         assessment.behavior == "ask"
@@ -162,8 +162,6 @@ async def _shell_policy(arguments, context):
             parsed=assessment.parsed,
         )
         context.runtime_state["shell_classifier"] = classified.audit
-        if classified.behavior == "allow":
-            context.runtime_state["classifier_auto_allow"] = True
     return ResolvedToolPolicy(
         destructive=assessment.behavior == "deny",
         external_side_effects=True,

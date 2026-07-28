@@ -6,12 +6,9 @@ import asyncio
 import hashlib
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
-from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 
 from .models import (
-    AgentMessage,
     AgentMessageKind,
     AgentTaskContract,
     AgentTaskState,
@@ -20,6 +17,11 @@ from .models import (
 )
 from .verifier import AgentOutputVerifier, VerificationError
 from .workspace import AgentWorkspaceManager, WorkspaceSnapshot
+from .components import (
+    CollaborationArtifactPublisher,
+    CollaborationAudit,
+    CollaborationMailbox,
+)
 
 
 ChildRunner = Callable[
@@ -73,6 +75,18 @@ class CollaborationService:
         self.proposal_handler = proposal_handler
         self._tasks: dict[str, asyncio.Task[ValidatedAgentOutput]] = {}
         self._contracts: dict[str, AgentTaskContract] = {}
+        self._mailbox = CollaborationMailbox(
+            repository=repository,
+            enabled=mailbox_enabled,
+            ttl_seconds=message_ttl_seconds,
+            active_states=set(self._ACTIVE_STATES),
+            cancel=self.cancel,
+        )
+        self._artifact_publisher = CollaborationArtifactPublisher(
+            repository=repository,
+            workspace_manager=workspace_manager,
+        )
+        self._audit_log = CollaborationAudit(repository=repository)
 
     async def delegate(
         self,
@@ -254,50 +268,19 @@ class CollaborationService:
         kind: MailboxMessageKind,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
-        if not self.mailbox_enabled:
-            raise ValueError("agent mailbox is disabled")
-        task = await self.repository.get_task(task_id)
-        if task is None or str(task["parent_run_id"]) != parent_run_id:
-            raise ValueError("child task does not belong to this run")
-        if str(task["state"]) not in self._ACTIVE_STATES:
-            raise ValueError("mailbox messages can only be sent to an active child task")
-        if kind not in {
-            MailboxMessageKind.INSTRUCTION,
-            MailboxMessageKind.RESPONSE,
-            MailboxMessageKind.CANCEL,
-        }:
-            raise ValueError("parent cannot send this mailbox message kind")
-        if kind is MailboxMessageKind.CANCEL:
-            await self.cancel(task_id)
-        return await self.repository.send_mailbox(
-            task_id=task_id,
-            parent_run_id=parent_run_id,
-            sender="parent",
-            recipient="child",
-            kind=kind,
-            payload=payload,
-            ttl_seconds=self.message_ttl_seconds,
+        return await self._mailbox.send_message(
+            task_id, parent_run_id=parent_run_id, kind=kind, payload=payload
         )
 
     async def read_messages(
         self, task_id: str, *, parent_run_id: str
     ) -> list[dict[str, Any]]:
-        if not self.mailbox_enabled:
-            raise ValueError("agent mailbox is disabled")
-        task = await self.repository.get_task(task_id)
-        if task is None or str(task["parent_run_id"]) != parent_run_id:
-            raise ValueError("child task does not belong to this run")
-        return await self.repository.receive_mailbox(task_id, recipient="parent")
+        return await self._mailbox.read_messages(task_id, parent_run_id=parent_run_id)
 
-    async def acknowledge_message(
-        self, message_id: str, *, parent_run_id: str
-    ) -> None:
-        if not self.mailbox_enabled:
-            raise ValueError("agent mailbox is disabled")
-        message = await self.repository.mailbox_message(message_id)
-        if message is None or str(message["parent_run_id"]) != parent_run_id:
-            raise ValueError("mailbox message does not belong to this run")
-        await self.repository.acknowledge_mailbox(message_id, recipient="parent")
+    async def acknowledge_message(self, message_id: str, *, parent_run_id: str) -> None:
+        return await self._mailbox.acknowledge_message(
+            message_id, parent_run_id=parent_run_id
+        )
 
     async def send_child_message(
         self,
@@ -307,53 +290,23 @@ class CollaborationService:
         kind: MailboxMessageKind,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
-        if not self.mailbox_enabled:
-            raise ValueError("agent mailbox is disabled")
-        task = await self.repository.get_task(task_id)
-        if task is None or str(task["parent_run_id"]) != parent_run_id:
-            raise ValueError("child task does not belong to this run")
-        if str(task["state"]) not in self._ACTIVE_STATES:
-            raise ValueError("only an active child task can send mailbox messages")
-        if kind not in {
-            MailboxMessageKind.QUESTION,
-            MailboxMessageKind.RESPONSE,
-            MailboxMessageKind.PROGRESS,
-            MailboxMessageKind.ARTIFACT_OFFER,
-        }:
-            raise ValueError("child cannot send this mailbox message kind")
-        return await self.repository.send_mailbox(
-            task_id=task_id,
-            parent_run_id=parent_run_id,
-            sender="child",
-            recipient="parent",
-            kind=kind,
-            payload=payload,
-            ttl_seconds=self.message_ttl_seconds,
+        return await self._mailbox.send_child_message(
+            task_id, parent_run_id=parent_run_id, kind=kind, payload=payload
         )
 
     async def read_child_messages(
         self, task_id: str, *, parent_run_id: str
     ) -> list[dict[str, Any]]:
-        if not self.mailbox_enabled:
-            raise ValueError("agent mailbox is disabled")
-        task = await self.repository.get_task(task_id)
-        if task is None or str(task["parent_run_id"]) != parent_run_id:
-            raise ValueError("child task does not belong to this run")
-        return await self.repository.receive_mailbox(task_id, recipient="child")
+        return await self._mailbox.read_child_messages(
+            task_id, parent_run_id=parent_run_id
+        )
 
     async def acknowledge_child_message(
         self, message_id: str, *, task_id: str, parent_run_id: str
     ) -> None:
-        if not self.mailbox_enabled:
-            raise ValueError("agent mailbox is disabled")
-        message = await self.repository.mailbox_message(message_id)
-        if (
-            message is None
-            or str(message["task_id"]) != task_id
-            or str(message["parent_run_id"]) != parent_run_id
-        ):
-            raise ValueError("mailbox message does not belong to this child task")
-        await self.repository.acknowledge_mailbox(message_id, recipient="child")
+        return await self._mailbox.acknowledge_child_message(
+            message_id, task_id=task_id, parent_run_id=parent_run_id
+        )
 
     async def publish_artifact(
         self,
@@ -362,22 +315,8 @@ class CollaborationService:
         *,
         parent_run_id: str,
     ) -> None:
-        task = await self.repository.get_task(task_id)
-        if task is None or str(task["parent_run_id"]) != parent_run_id:
-            raise ValueError("child task does not belong to this run")
-        contract = AgentTaskContract.from_dict(json.loads(str(task["contract_json"])))
-        snapshot = await self._snapshot_for(task_id)
-        if not snapshot.root.is_dir():
-            raise ValueError("child workspace is no longer available")
-        source = snapshot.resolve(
-            str(artifact.get("path", "")), allowed_paths=contract.allowed_paths
-        )
-        if not source.is_file():
-            raise ValueError("child artifact is not a regular file")
-        if source.stat().st_size > contract.verification_requirements.max_artifact_bytes:
-            raise ValueError("child artifact exceeds the contract size limit")
-        self.workspace_manager.publish_artifacts(
-            snapshot, (artifact,), allowed_paths=contract.allowed_paths
+        return await self._artifact_publisher.publish_artifact(
+            task_id, artifact, parent_run_id=parent_run_id
         )
 
     async def stream_status(
@@ -442,12 +381,8 @@ class CollaborationService:
         decided: bool,
         payload: dict[str, Any],
     ) -> None:
-        await self._audit(
-            contract,
-            AgentMessageKind.APPROVAL_DECIDED
-            if decided
-            else AgentMessageKind.APPROVAL_REQUESTED,
-            payload,
+        return await self._audit_log.audit_approval(
+            contract, decided=decided, payload=payload
         )
 
     async def _run_one(self, contract: AgentTaskContract) -> ValidatedAgentOutput:
@@ -596,14 +531,7 @@ class CollaborationService:
         return output
 
     async def _snapshot_for(self, task_id: str) -> WorkspaceSnapshot:
-        row = await self.repository.one(
-            "SELECT path FROM agent_workspaces WHERE task_id=?", (task_id,)
-        )
-        if row is None:
-            raise ValueError(f"child workspace does not exist: {task_id}")
-        return WorkspaceSnapshot(
-            self.workspace_manager.parent_workspace, Path(str(row["path"]))
-        )
+        return await self._artifact_publisher._snapshot_for(task_id)
 
     async def _audit(
         self,
@@ -611,9 +539,7 @@ class CollaborationService:
         kind: AgentMessageKind,
         payload: dict[str, Any],
     ) -> None:
-        await self._audit_by_id(
-            contract.task_id, kind, payload, parent_run_id=contract.parent_run_id
-        )
+        return await self._audit_log._audit(contract, kind, payload)
 
     async def _audit_by_id(
         self,
@@ -623,29 +549,6 @@ class CollaborationService:
         *,
         parent_run_id: str | None = None,
     ) -> None:
-        if parent_run_id is None:
-            row = await self.repository.one(
-                "SELECT parent_run_id FROM agent_tasks WHERE id=?", (task_id,)
-            )
-            if row is None:
-                return
-            parent_run_id = str(row[0])
-        row = await self.repository.one(
-            "SELECT coalesce(max(sequence),0)+1 FROM agent_messages WHERE task_id=?",
-            (task_id,),
+        return await self._audit_log._audit_by_id(
+            task_id, kind, payload, parent_run_id=parent_run_id
         )
-        sequence = int(row[0])
-        message = AgentMessage(
-            message_id=f"msg_{task_id}_{sequence}",
-            task_id=task_id,
-            parent_run_id=parent_run_id,
-            sender=("child" if kind is AgentMessageKind.MESSAGE_RECEIVED else "parent"),
-            recipient=(
-                "parent" if kind is AgentMessageKind.MESSAGE_RECEIVED else "child"
-            ),
-            sequence=sequence,
-            kind=kind,
-            payload=payload,
-            created_at=datetime.now(UTC).isoformat(),
-        )
-        await self.repository.record_message(message)

@@ -4,12 +4,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import shlex
 from typing import Any
+
+
+@dataclass(frozen=True)
+class ShellSegment:
+    argv: tuple[str, ...]
+    operator_before: str | None = None
 
 
 @dataclass(frozen=True)
 class ShellSyntax:
     commands: tuple[str, ...] = ()
+    segments: tuple[ShellSegment, ...] = ()
     redirects: tuple[str, ...] = ()
     operators: tuple[str, ...] = ()
     dynamic: tuple[str, ...] = ()
@@ -58,6 +66,7 @@ class TreeSitterShellParser:
         commands: list[str] = []
         redirects: list[str] = []
         operators: list[str] = []
+        operator_spans: list[tuple[int, int, str]] = []
         dynamic: list[str] = []
         has_error = bool(root.has_error)
 
@@ -87,9 +96,31 @@ class TreeSitterShellParser:
                 dynamic.append("background execution")
             if kind in _OPERATOR_NODES:
                 operators.append(kind)
+                operator_spans.append((node.start_byte, node.end_byte, kind))
             stack.extend(reversed(node.children))
+        segments: list[ShellSegment] = []
+        cursor = 0
+        operator_before: str | None = None
+        for start, end, operator in sorted(set(operator_spans)):
+            raw = encoded[cursor:start].decode("utf-8", errors="replace").strip()
+            if raw:
+                try:
+                    segments.append(
+                        ShellSegment(tuple(shlex.split(raw)), operator_before)
+                    )
+                except ValueError:
+                    has_error = True
+            cursor = end
+            operator_before = operator
+        raw = encoded[cursor:].decode("utf-8", errors="replace").strip()
+        if raw:
+            try:
+                segments.append(ShellSegment(tuple(shlex.split(raw)), operator_before))
+            except ValueError:
+                has_error = True
         return ShellSyntax(
             tuple(commands),
+            tuple(segments),
             tuple(redirects),
             tuple(operators),
             tuple(dict.fromkeys(dynamic)),
@@ -105,4 +136,4 @@ def parse_shell(command: str) -> ShellSyntax:
     return _DEFAULT_PARSER.parse(command)
 
 
-__all__ = ["ShellSyntax", "TreeSitterShellParser", "parse_shell"]
+__all__ = ["ShellSegment", "ShellSyntax", "TreeSitterShellParser", "parse_shell"]

@@ -13,7 +13,7 @@ from ..mcp import McpManager, McpRegistry
 from ..plugins import PluginProcessClient, PluginRegistry
 from ..policy import WorkspacePolicy
 from ..shell import SessionProcessManager
-from ..tooling.authorization import PermissionEngine
+from ..tooling.permission_policy.engine import PermissionEngine
 
 
 @dataclass(frozen=True)
@@ -52,9 +52,7 @@ async def build_integrations(
     )
     mcp = McpManager(
         policy,
-        McpRegistry(
-            policy, layout=layout, remote_enabled=settings.mcp.remote_enabled
-        ),
+        McpRegistry(policy, layout=layout, remote_enabled=settings.mcp.remote_enabled),
         timeout_seconds=settings.mcp.mcp_timeout_seconds,
         remote_enabled=settings.mcp.remote_enabled,
     )

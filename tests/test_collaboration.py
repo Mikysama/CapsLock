@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import sqlite3
+import threading
 from pathlib import Path
 
 import pytest
@@ -26,6 +27,7 @@ from capslock.tooling.tools import workspace_tools
 from capslock.tooling.tools.collaboration import _reserve_parent_budget
 from capslock.domain import BudgetSnapshot, RunLimits, RunMode
 from capslock.policy import WorkspacePolicy
+from capslock.workspace_writes import WorkspaceMutationCoordinator
 from tests.helpers import workspace_run
 
 
@@ -128,6 +130,202 @@ def test_verified_artifact_is_published_without_overwriting_parent_change(
     report.write_text("parent", encoding="utf-8")
     with pytest.raises(ValueError, match="changed after child snapshot"):
         manager.publish_artifacts(snapshot, (artifact,), allowed_paths=("report.md",))
+
+
+def test_artifact_publish_revalidates_after_staging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    report = workspace / "report.md"
+    report.write_text("before", encoding="utf-8")
+    manager = AgentWorkspaceManager(workspace, state_root=tmp_path / "agents")
+    snapshot = manager.create("task")
+    child = snapshot.root / "report.md"
+    child.write_text("child", encoding="utf-8")
+    original_copy = __import__("shutil").copy2
+
+    def race(source, target, *args, **kwargs):
+        if str(target).endswith(".capslock-agent"):
+            report.write_text("parent", encoding="utf-8")
+        return original_copy(source, target, *args, **kwargs)
+
+    monkeypatch.setattr("capslock.collaboration.workspace.shutil.copy2", race)
+    artifact = {"path": "report.md", "sha256": hashlib.sha256(b"child").hexdigest()}
+    with pytest.raises(ValueError, match="changed after child snapshot"):
+        manager.publish_artifacts(snapshot, (artifact,), allowed_paths=("report.md",))
+    assert report.read_text(encoding="utf-8") == "parent"
+
+
+def test_artifact_publish_rolls_back_partial_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    for name in ("one.md", "two.md"):
+        (workspace / name).write_text(f"before-{name}", encoding="utf-8")
+    manager = AgentWorkspaceManager(workspace, state_root=tmp_path / "agents")
+    snapshot = manager.create("task")
+    artifacts = []
+    for name in ("one.md", "two.md"):
+        content = f"child-{name}"
+        (snapshot.root / name).write_text(content, encoding="utf-8")
+        artifacts.append(
+            {"path": name, "sha256": hashlib.sha256(content.encode()).hexdigest()}
+        )
+
+    original_replace = Path.replace
+    replacements = 0
+
+    def fail_second(source: Path, target: Path):
+        nonlocal replacements
+        if source.name.endswith(".capslock-agent"):
+            replacements += 1
+            if replacements == 2:
+                raise OSError("simulated publish failure")
+        return original_replace(source, target)
+
+    monkeypatch.setattr(Path, "replace", fail_second)
+    with pytest.raises(OSError, match="simulated publish failure"):
+        manager.publish_artifacts(
+            snapshot, tuple(artifacts), allowed_paths=("one.md", "two.md")
+        )
+    assert (workspace / "one.md").read_text(encoding="utf-8") == "before-one.md"
+    assert (workspace / "two.md").read_text(encoding="utf-8") == "before-two.md"
+
+
+def test_artifact_publish_retains_backup_when_rollback_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    for name in ("one.md", "two.md"):
+        (workspace / name).write_text(f"before-{name}", encoding="utf-8")
+    manager = AgentWorkspaceManager(workspace, state_root=tmp_path / "agents")
+    snapshot = manager.create("task")
+    artifacts = []
+    for name in ("one.md", "two.md"):
+        content = f"child-{name}"
+        (snapshot.root / name).write_text(content, encoding="utf-8")
+        artifacts.append(
+            {"path": name, "sha256": hashlib.sha256(content.encode()).hexdigest()}
+        )
+
+    original_replace = Path.replace
+    replacements = 0
+
+    def fail_publish_and_restore(source: Path, target: Path):
+        nonlocal replacements
+        if source.name.endswith(".capslock-agent"):
+            replacements += 1
+            if replacements == 2:
+                raise OSError("simulated publish failure")
+        if source.name.endswith(".capslock-backup"):
+            raise OSError("simulated restore failure")
+        return original_replace(source, target)
+
+    monkeypatch.setattr(Path, "replace", fail_publish_and_restore)
+    with pytest.raises(OSError, match="rollback needs recovery") as error:
+        manager.publish_artifacts(
+            snapshot, tuple(artifacts), allowed_paths=("one.md", "two.md")
+        )
+
+    backups = list(workspace.glob("*.capslock-backup"))
+    assert len(backups) == 1
+    assert str(backups[0]) in str(error.value)
+    assert backups[0].read_text(encoding="utf-8") == "before-one.md"
+
+
+def test_artifact_publish_supports_mixed_create_and_update(tmp_path: Path) -> None:
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    (workspace / "existing.md").write_text("before", encoding="utf-8")
+    manager = AgentWorkspaceManager(workspace, state_root=tmp_path / "agents")
+    snapshot = manager.create("task")
+    (snapshot.root / "existing.md").write_text("updated", encoding="utf-8")
+    created = snapshot.root / "reports" / "new.md"
+    created.parent.mkdir()
+    created.write_text("created", encoding="utf-8")
+    artifacts = tuple(
+        {
+            "path": path,
+            "sha256": hashlib.sha256(content.encode()).hexdigest(),
+        }
+        for path, content in (
+            ("existing.md", "updated"),
+            ("reports/new.md", "created"),
+        )
+    )
+
+    manager.publish_artifacts(
+        snapshot,
+        artifacts,
+        allowed_paths=("existing.md", "reports"),
+    )
+
+    assert (workspace / "existing.md").read_text(encoding="utf-8") == "updated"
+    assert (workspace / "reports" / "new.md").read_text(encoding="utf-8") == "created"
+    assert not list(workspace.rglob("*.capslock-agent"))
+    assert not list(workspace.rglob("*.capslock-backup"))
+
+
+def test_artifact_publish_serializes_coordinated_workspace_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    report = workspace / "report.md"
+    report.write_text("before", encoding="utf-8")
+    coordinator = WorkspaceMutationCoordinator()
+    manager = AgentWorkspaceManager(
+        workspace,
+        state_root=tmp_path / "agents",
+        write_coordinator=coordinator,
+    )
+    snapshot = manager.create("task")
+    (snapshot.root / "report.md").write_text("child", encoding="utf-8")
+    artifact = {"path": "report.md", "sha256": hashlib.sha256(b"child").hexdigest()}
+    entered = threading.Event()
+    release = threading.Event()
+    writer_finished = threading.Event()
+    failures = []
+    original_revalidate = manager._revalidate_parent_artifacts
+
+    def pause_while_locked(staged):
+        entered.set()
+        if not release.wait(2):
+            raise TimeoutError("test did not release artifact publisher")
+        original_revalidate(staged)
+
+    monkeypatch.setattr(manager, "_revalidate_parent_artifacts", pause_while_locked)
+
+    def publish() -> None:
+        try:
+            manager.publish_artifacts(
+                snapshot, (artifact,), allowed_paths=("report.md",)
+            )
+        except BaseException as exc:
+            failures.append(exc)
+
+    def coordinated_writer() -> None:
+        with coordinator.lock(workspace):
+            report.write_text("writer", encoding="utf-8")
+        writer_finished.set()
+
+    publisher = threading.Thread(target=publish)
+    publisher.start()
+    assert entered.wait(2)
+    writer = threading.Thread(target=coordinated_writer)
+    writer.start()
+    assert not writer_finished.wait(0.05)
+    release.set()
+    publisher.join(2)
+    writer.join(2)
+
+    assert not publisher.is_alive() and not writer.is_alive()
+    assert failures == []
+    assert writer_finished.is_set()
+    assert report.read_text(encoding="utf-8") == "writer"
 
 
 def test_output_verifier_checks_allowlist_and_digest(tmp_path: Path) -> None:

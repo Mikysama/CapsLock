@@ -37,6 +37,7 @@ from .shell import ModelShellClassifier, SessionProcessManager
 from .skills import SkillRegistry, SkillService
 from .storage.memory_repositories import MemoryRepositories
 from .storage.repositories import WorkspaceRepositories
+from .workspace_writes import WorkspaceMutationCoordinator
 from .storage.artifacts import ToolArtifactStore
 from .bridge import IdeBridgeServer
 
@@ -168,6 +169,9 @@ class WorkspaceApplication:
                 await ide_bridge.start()
                 resources.push_async_callback(ide_bridge.close)
             execution_scope = WorkspaceExecutionScope(root, policy)
+            write_coordinator = WorkspaceMutationCoordinator(
+                layout.root / "state" / "workspace-write-locks"
+            )
             active_worktree = await repositories.database.fetch_one(
                 "SELECT path FROM session_worktrees WHERE session_id=? AND active=1",
                 (session.id,),
@@ -253,7 +257,7 @@ class WorkspaceApplication:
                 memory_repositories,
                 workspace=root,
                 session_id=session.id,
-                project_write_enabled=settings.memory.manual_write_enabled,
+                manual_write_enabled=settings.memory.manual_write_enabled,
                 capture_enabled=settings.memory.capture_enabled,
                 recall_enabled=settings.memory.recall_enabled,
                 maintenance_enabled=settings.memory.maintenance_enabled,
@@ -279,6 +283,7 @@ class WorkspaceApplication:
                 interaction=interaction,
                 permission_engine=permission_engine,
                 emit=events.emit,
+                write_coordinator=write_coordinator,
             )
             collaboration = build_collaboration(
                 settings=settings,
@@ -291,6 +296,7 @@ class WorkspaceApplication:
                 repository=repositories.collaboration,
                 open_application=cls.open,
                 memory=memory,
+                write_coordinator=write_coordinator,
             )
 
             agent_session = AgentSession(

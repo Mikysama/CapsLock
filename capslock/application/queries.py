@@ -22,7 +22,7 @@ from ..storage.repositories.actions import ActionRepository
 from ..storage.repositories.collaboration import CollaborationRepository
 from ..storage.repositories.governance import GovernanceRepository
 from ..storage.repositories.misc import SourceRepository, TaskRepository
-from ..storage.repositories.run_journal import RunJournalRepository
+from ..storage.repositories.journal.repository import RunJournalRepository
 from ..storage.repositories.runs import RunRepository
 from ..storage.repositories.sessions import SessionRepository
 from ..storage.repositories.work_items import WorkItemRepository
@@ -101,9 +101,7 @@ class WorkspaceQueries:
     async def collaboration_task(self, task_id: str) -> dict[str, Any] | None:
         return await self._collaboration.get_task(task_id)
 
-    async def collaboration_output(
-        self, task_id: str
-    ) -> ValidatedAgentOutput | None:
+    async def collaboration_output(self, task_id: str) -> ValidatedAgentOutput | None:
         return await self._collaboration.get_output(task_id)
 
     async def collaboration_messages(self, task_id: str) -> list[dict[str, Any]]:

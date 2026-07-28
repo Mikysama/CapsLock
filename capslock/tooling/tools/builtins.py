@@ -8,7 +8,7 @@ from ..contracts import ToolMiddleware
 from ..executor import ToolRuntime
 from .collaboration import agent_control_tools, delegation_tool
 from .documents import document_tools
-from .filesystem import filesystem_tools
+from .filesystem.registry import filesystem_tools
 from .git import git_tools
 from .interaction import interaction_tools
 from .memory import memory_tools

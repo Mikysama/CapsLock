@@ -4,7 +4,7 @@
 
 ## 稳定契约
 
-CapsLock 2.7.0 支持 Linux/macOS 与 Python 3.12。当前开发协议为 `permissions_version = 2`、`config_version = 9`、workspace schema 14、memory schema 4、portable archive 6、session export 6、JSONL schema 3、IDE Bridge protocol 1 和插件 manifest/protocol/grant 4。config v3-v8、workspace schema v6-v13 与 memory schema v3 使用 backup-first 自动迁移。
+CapsLock 2.7.1 支持 Linux/macOS 与 Python 3.12。当前开发协议为 `permissions_version = 2`、`config_version = 9`、workspace schema 14、memory schema 4、portable archive 6、session export 6、JSONL schema 3、IDE Bridge protocol 1 和插件 manifest/protocol/grant 4。config v3-v8、workspace schema v6-v13 与 memory schema v3 使用 backup-first 自动迁移。
 
 公开运行入口为 `AgentSession.run_stream(RunRequest)`。CLI 通过应用查询面读取状态，不应依赖 repository 聚合对象。
 
@@ -13,7 +13,7 @@ CapsLock 2.7.0 支持 Linux/macOS 与 Python 3.12。当前开发协议为 `permi
 | 模式 | 行为 |
 | --- | --- |
 | `full_access` | hard deny、强制安全确认和显式 deny/ask 仍生效；其余允许，不调用 Shell 分类器。 |
-| `approve_for_me` | 默认模式。安全本地读取和确定性安全的断网沙箱命令自动允许；修改、网络、后台进程、MCP/插件副作用默认询问。 |
+| `approve_for_me` | 默认模式。安全本地读取和受参数约束的确定性只读 Shell 自动允许；工作区写入、网络、后台进程、MCP/插件副作用默认询问。 |
 | `ask_for_approval` | 显式 allow 可放行，其余每次调用询问；分类器不能自动放行。 |
 
 使用 `/permissions` 打开三档权限选择框，或使用 `/permissions full|approve|ask` 直接切换。选择保存在工作区 settings repository。没有其他模式或别名。
@@ -47,7 +47,7 @@ Markdown 镜像位于 `.capslock/state/plans/<session-id>/<plan-id>.md`。数据
 | `search_files` | 使用 ripgrep 搜索文本并返回 Evidence。 | 只读；有稳定排序和结果上限。 |
 | `edit_file` / `create_file` / `write_file` | 通过 Action 修改文件。 | 审批、hash revalidate、diff 和 undo。 |
 | `git_status` / `git_diff` | 查询 Git 状态或差异。 | 只读；不接受任意 Git 参数。 |
-| `shell` | 在 OS 沙箱运行命令。 | Tree-sitter Bash AST、工作区可写、默认断网；动态语法/重定向 fail closed，危险命令 hard deny。 |
+| `shell` | 在 OS 沙箱运行命令。 | Tree-sitter Bash AST、默认断网；自动批准只覆盖 Git 查询、`pwd` 与标准输入过滤器并只读挂载工作区，其他命令询问；动态语法/重定向 fail closed，危险命令 hard deny。 |
 | `process_output` / `process_stop` | 管理 session 隔离的后台进程。 | 有界输出和 TERM→KILL 取消。 |
 | `ask_user` | 创建可持久化结构化问题。 | 暂停同一 invocation，可跨进程回答。 |
 | `enter_plan_mode` / `get_plan` / `update_plan` / `submit_plan` | 进入、读取、更新和提交当前 session 的计划。 | 主 Agent 专用；状态、归属、大小与 revision SHA-256 强校验。 |
@@ -250,7 +250,7 @@ ToolLoop 每个模型或工具阶段写 `run_steps`。只有 completed 且带 ch
 
 ## 多 Agent 契约
 
-`AgentTaskContract` 固定记录父 run、目标、输入数据、允许路径、能力、模型 profile、限制和验证要求。能力缺省为空，子运行仍仅装配工作区只读工具；写入、命令、Web 与 MCP 工具按显式 grant 加入，插件和二次委派不自动加入。
+`AgentTaskContract` 固定记录父 run、目标、输入数据、允许路径、能力、模型 profile、限制和验证要求。能力缺省为空，子运行仍仅装配工作区只读工具；写入、命令、Web 与 MCP 工具按显式 grant 加入，插件和二次委派不自动加入。已验证产物先完整暂存，再与普通文件 Action 共用规范化工作区写锁；锁内复验全部父文件基线、创建备份并批量替换，失败时回滚已替换文件并在恢复失败时保留备份路径。该锁协调 CapsLock 管理的写入；外部进程只能通过替换前最终复验尽力检测，不构成绝对 CAS。
 
 调度器按契约顺序返回结果，兄弟任务失败不会互相取消，父运行取消会传播到全部未完成子任务。子快照排除 `.git`、`.capslock`、环境文件和符号链接，并使用自己的 workspace/memory 数据库。后台任务通过独立 `agent_mailbox` 表交换 instruction/question/response/progress/artifact offer/cancel；消息先脱敏并限制为 32 KiB，读取时复验 SHA-256，状态为 queued/delivered/acknowledged/expired。`AgentOutputVerifier` 校验输出对象、allowlist 路径、必需检查、文件大小和 SHA-256；未通过的输出只返回失败诊断。
 

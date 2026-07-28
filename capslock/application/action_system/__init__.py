@@ -9,7 +9,8 @@ from .core import (
     ActionRunState,
 )
 from .credentials import CredentialActionHandler, resolve_named_credential
-from .external import McpActionHandler, WebActionHandler
+from .external_actions.mcp import McpActionHandler
+from .external_actions.web import WebActionHandler
 from .files import FileActionHandler
 from .worktrees import WorkspaceExecutionScope, WorktreeActionHandler
 from .session import SessionRewindActionHandler

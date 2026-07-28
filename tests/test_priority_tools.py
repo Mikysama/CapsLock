@@ -26,7 +26,9 @@ from capslock.storage.repositories import WorkspaceRepositories
 from capslock.tooling.contracts import ExecutionContext, ToolOutcome
 from capslock.tooling.tools import workspace_tools
 from capslock.tooling.tools.documents import edit_notebook, read_notebook
-from capslock.tooling.tools.filesystem import glob_files, read_image, write_file
+from capslock.tooling.tools.filesystem.read import read_image
+from capslock.tooling.tools.filesystem.search import glob_files
+from capslock.tooling.tools.filesystem.write import write_file
 from capslock.tooling.tools.lsp import lsp_tools
 from capslock.tooling.tools.mcp import mcp_resource_tools
 from tests.helpers import StubActionHandler, workspace_run
@@ -84,7 +86,7 @@ def test_glob_python_fallback_honors_gitignore_and_reads_binary_images(
     (tmp_path / "top.py").write_text("pass\n", encoding="utf-8")
     (tmp_path / "debug.log").write_text("ignored\n", encoding="utf-8")
     monkeypatch.setattr(
-        "capslock.tooling.tools.filesystem.shutil.which", lambda name: None
+        "capslock.tooling.tools.filesystem.search.shutil.which", lambda name: None
     )
 
     async def scenario() -> None:

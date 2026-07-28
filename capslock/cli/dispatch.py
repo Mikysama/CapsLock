@@ -335,7 +335,13 @@ async def _queue(context: CliContext, parts: list[str]) -> None:
 
 
 # Registration stays at the boundary so the catalog has no dependency on CLI services.
-from . import new_commands as _new  # noqa: E402
+from .command_handlers import (  # noqa: E402
+    context as context_handlers,
+    diagnostics as diagnostic_handlers,
+    rewind as rewind_handlers,
+    session as session_handlers,
+    worktree as worktree_handlers,
+)
 
 register_handler("/help", _help)
 register_handler("/plan", plan_command)
@@ -358,17 +364,17 @@ for _path in (
 ):
     register_handler(_path, _builtin)
 for _path, _handler in {
-    "/resume": _new.resume,
-    "/btw": _new.btw,
-    "/compact": _new.compact,
-    "/new": _new.new_session,
-    "/copy": _new.copy_answer,
-    "/export": _new.export_session,
-    "/branch": _new.branch,
-    "/context": _new.context_info,
-    "/worktree": _new.worktree,
-    "/rewind": _new.rewind,
-    "/stats": _new.stats,
-    "/doctor": _new.doctor,
+    "/resume": session_handlers.resume,
+    "/btw": session_handlers.btw,
+    "/compact": session_handlers.compact,
+    "/new": session_handlers.new_session,
+    "/copy": session_handlers.copy_answer,
+    "/export": session_handlers.export_session,
+    "/branch": session_handlers.branch,
+    "/context": context_handlers.context_info,
+    "/worktree": worktree_handlers.worktree,
+    "/rewind": rewind_handlers.rewind,
+    "/stats": diagnostic_handlers.stats,
+    "/doctor": diagnostic_handlers.doctor,
 }.items():
     register_handler(_path, _handler)

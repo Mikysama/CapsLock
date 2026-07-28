@@ -176,11 +176,6 @@ class MemorySettings:
     policy: str = "automatic"
     database: Path | None = None
 
-    @property
-    def project_write_enabled(self) -> bool:
-        """Compatibility alias for integrations written against config v5."""
-        return self.manual_write_enabled
-
 
 @dataclass(frozen=True)
 class ConfigIssue:

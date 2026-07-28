@@ -42,6 +42,7 @@ class SessionProcessManager:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             start_new_session=True,
+            env=command.environment,
         )
         identifier = f"proc_{uuid.uuid4().hex}"
         job = ProcessJob(
@@ -66,9 +67,11 @@ class SessionProcessManager:
     async def _cleanup(
         self, job: ProcessJob, captures: tuple[asyncio.Task[Any], ...]
     ) -> None:
-        await job.process.wait()
-        await asyncio.gather(*captures, return_exceptions=True)
-        shutil.rmtree(job.temporary, ignore_errors=True)
+        try:
+            await job.process.wait()
+            await asyncio.gather(*captures, return_exceptions=True)
+        finally:
+            shutil.rmtree(job.temporary, ignore_errors=True)
 
     def get(self, session_id: str, identifier: str) -> ProcessJob:
         job = self._jobs.get(identifier)

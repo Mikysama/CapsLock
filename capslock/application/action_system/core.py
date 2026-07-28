@@ -222,10 +222,10 @@ class ActionCoordinator:
         if self.permission_engine is None:
             raise ValueError("permission persistence is unavailable")
         permission = record.request.get("_permission")
-        suggestions = permission.get("suggestions") if isinstance(permission, dict) else None
-        destination = (
-            "session" if choice is ApprovalChoice.APPROVE_SESSION else "local"
+        suggestions = (
+            permission.get("suggestions") if isinstance(permission, dict) else None
         )
+        destination = "session" if choice is ApprovalChoice.APPROVE_SESSION else "local"
         selected = next(
             (
                 item
@@ -236,7 +236,7 @@ class ActionCoordinator:
         )
         if selected is None:
             raise ValueError(f"no {destination} permission suggestion is available")
-        from ...tooling.authorization import (
+        from ...tooling.permission_policy.models import (
             PermissionBehavior,
             PermissionDestination,
             PermissionUpdate,
@@ -455,7 +455,8 @@ def _permission_arguments(request: dict[str, Any]) -> dict[str, Any]:
     return {
         key: value
         for key, value in request.items()
-        if key not in {"_permission", "force_manual_approval", "argv", "temporary", "safety"}
+        if key
+        not in {"_permission", "force_manual_approval", "argv", "temporary", "safety"}
     }
 
 

@@ -4,6 +4,29 @@
 
 ## [Unreleased]
 
+## [2.7.1] - 2026-07-28
+
+### Security
+
+- 将 `approve_for_me` 的 Shell 自动批准收紧为参数级确定性只读白名单；自动批准使用只读工作区，模型分类器不能扩大白名单，所有临时沙箱目录在失败、取消、超时和后台结束路径统一清理。
+- Agent 产物发布与普通文件 Action 共用工作区写协调器；全部产物先暂存，锁内复验父文件基线并备份后批量替换，部分失败会完整回滚。
+- Web Fetch/Search 使用流式硬字节上限，拒绝异常压缩并逐跳复验公开地址；文件搜索流式消费 ripgrep 输出，并统一执行隐私、大小、UTF-8、符号链接、结果数和文件数限制。
+
+### Changed
+
+- 将 CLI handler、权限策略、运行日志、文件工具及 Web/MCP Action 全量迁移到按职责组织的正式包路径，删除 `new_commands` 等过渡命名和旧路径兼容文件。
+- 将 `AgentSession`、`ToolCallExecutor`、Collaboration 与 Memory 内部职责拆为窄服务和 Protocol；保留现有运行入口、数据库 schema、配置格式、工具注册顺序和事件协议。
+- 删除 `MemorySettings.project_write_enabled` 兼容别名，统一使用 `manual_write_enabled`。
+
+### Documentation
+
+- 新增模块所有权、依赖方向、façade 边界和全量迁移约束，并补充 2.7 系列开发者文档。
+
+### Compatibility
+
+- workspace schema 14、memory schema 4、portable archive 6、session export 6、config 9、permissions 2、JSONL 3、IDE Bridge protocol 1 和 plugin protocol 4 均保持不变。
+- 本次删除的内部旧导入路径不提供弃用期或兼容 shim；CLI 命令、配置、数据库及模型可见工具 schema 保持不变。
+
 ## [2.6.0] - 2026-07-27
 
 ### Added

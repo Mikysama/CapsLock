@@ -22,10 +22,12 @@ from capslock.tooling.contracts import (
     define_tool,
 )
 from capslock.tooling.executor import ToolRuntime
-from capslock.tooling.authorization import (
+from capslock.tooling.tools.filesystem.search import search_files
+from capslock.tooling.permission_policy.engine import PermissionEngine
+from capslock.tooling.permission_policy.middleware import PermissionMiddleware
+from capslock.tooling.permission_policy.models import (
     PermissionBehavior,
     PermissionDestination,
-    PermissionEngine,
     PermissionUpdate,
     PermissionUpdateOperation,
 )
@@ -40,6 +42,70 @@ def _context(tmp_path: Path, **values) -> ExecutionContext:
         actions=object(),
         **values,
     )
+
+
+@pytest.mark.parametrize("use_ripgrep", [True, False])
+def test_search_files_enforces_read_limit_with_and_without_ripgrep(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, use_ripgrep: bool
+) -> None:
+    large = tmp_path / "large.txt"
+    large.write_text("needle " + "x" * 200, encoding="utf-8")
+    private = tmp_path / ".env"
+    private.write_text("needle-secret", encoding="utf-8")
+    context = ExecutionContext(
+        session_id="session",
+        run_id="run",
+        policy=WorkspacePolicy(tmp_path, max_file_bytes=16),
+        event=lambda *args, **kwargs: None,
+        actions=object(),
+    )
+    if not use_ripgrep:
+        monkeypatch.setattr(
+            "capslock.tooling.tools.filesystem.search.shutil.which", lambda _: None
+        )
+    result = asyncio.run(
+        search_files(context, {"path": ".", "query": "needle", "limit": 1})
+    )
+    assert result.ok and result.data == []
+
+
+@pytest.mark.parametrize("use_ripgrep", [True, False])
+def test_search_files_honors_privacy_glob_and_result_limits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, use_ripgrep: bool
+) -> None:
+    (tmp_path / ".env").write_text("needle-secret", encoding="utf-8")
+    (tmp_path / "one.txt").write_text("needle-one\nneedle-two", encoding="utf-8")
+    (tmp_path / "two.md").write_text("needle-three", encoding="utf-8")
+    if not use_ripgrep:
+        monkeypatch.setattr(
+            "capslock.tooling.tools.filesystem.search.shutil.which", lambda _: None
+        )
+    result = asyncio.run(
+        search_files(
+            _context(tmp_path),
+            {"path": ".", "query": "needle", "glob": "*.txt", "limit": 1},
+        )
+    )
+    assert result.ok and len(result.data) == 1
+    assert result.data[0]["path"].endswith("one.txt")
+    assert "secret" not in result.data[0]["text"]
+
+
+def test_search_files_fallback_rejects_symlinked_matches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    secret = tmp_path / "secret.txt"
+    secret.write_text("needle-secret", encoding="utf-8")
+    (workspace / "linked.txt").symlink_to(secret)
+    monkeypatch.setattr(
+        "capslock.tooling.tools.filesystem.search.shutil.which", lambda _: None
+    )
+    result = asyncio.run(
+        search_files(_context(workspace), {"path": ".", "query": "needle"})
+    )
+    assert result.ok and result.data == []
 
 
 def test_invalid_output_preserves_execution_truth(tmp_path: Path) -> None:
@@ -159,7 +225,10 @@ unknown = true
         return ToolOutcome.success({})
 
     tool = define_tool(
-        "read_file", "Read.", {"type": "object"}, execute,
+        "read_file",
+        "Read.",
+        {"type": "object"},
+        execute,
         policy=ResolvedToolPolicy.safe_read(),
     )
     engine = PermissionEngine((("local", permissions),), object())
@@ -195,7 +264,10 @@ path = "src/*.py"
         return ToolOutcome.success({})
 
     tool = define_tool(
-        "read_file", "Read.", {"type": "object"}, execute,
+        "read_file",
+        "Read.",
+        {"type": "object"},
+        execute,
         policy=ResolvedToolPolicy.safe_read(),
     )
     engine = PermissionEngine((("local", permissions),), object())
@@ -267,22 +339,47 @@ command = "custom-build"
         assert decision.reason_code == "explicit_ask"
 
     no_rules = PermissionEngine((), object())
-    assert asyncio.run(
-        no_rules.decide(
-            tool,
-            arguments,
-            ResolvedToolPolicy(),
-            context(PermissionMode.ASK_FOR_APPROVAL),
-        )
-    ).behavior is PermissionBehavior.ASK
-    assert asyncio.run(
+    assert (
+        asyncio.run(
+            no_rules.decide(
+                tool,
+                arguments,
+                ResolvedToolPolicy(),
+                context(PermissionMode.ASK_FOR_APPROVAL),
+            )
+        ).behavior
+        is PermissionBehavior.ASK
+    )
+    classifier_cannot_allow = asyncio.run(
         no_rules.decide(
             tool,
             arguments,
             ResolvedToolPolicy(),
             context(PermissionMode.APPROVE_FOR_ME),
         )
-    ).reason_code == "classifier_allow"
+    )
+    assert classifier_cannot_allow.behavior is PermissionBehavior.ASK
+    assert classifier_cannot_allow.reason_code == "mode_default"
+
+    audit_context = context(PermissionMode.APPROVE_FOR_ME)
+    audit_context.runtime_state["shell_deterministic_behavior"] = "ask"
+    middleware = PermissionMiddleware(no_rules)
+    assert (
+        asyncio.run(
+            middleware.authorize(
+                tool,
+                arguments,
+                ResolvedToolPolicy(external_side_effects=True),
+                audit_context,
+            )
+        )
+        is None
+    )
+    assert audit_context.runtime_state["permission_decision"]["classifier"] == {
+        "honored": True,
+        "confidence": 0.99,
+        "result": "allow",
+    }
 
 
 def test_shell_allow_rejects_compounds_dynamic_expansion_and_redirection(
@@ -349,16 +446,17 @@ def test_project_allow_requires_current_digest_trust(tmp_path: Path) -> None:
         return ToolOutcome.success({})
 
     tool = define_tool(
-        "read_file", "Read.", {"type": "object"}, execute,
+        "read_file",
+        "Read.",
+        {"type": "object"},
+        execute,
         policy=ResolvedToolPolicy.safe_read(),
     )
     engine = PermissionEngine((("project", project),), repository)
     context = _context(tmp_path, permission_mode=PermissionMode.ASK_FOR_APPROVAL)
 
     async def decide():
-        return await engine.decide(
-            tool, {}, ResolvedToolPolicy.safe_read(), context
-        )
+        return await engine.decide(tool, {}, ResolvedToolPolicy.safe_read(), context)
 
     assert asyncio.run(decide()).reason_code == "project_allow_untrusted"
     asyncio.run(engine.trust_project_permissions())
@@ -388,12 +486,14 @@ mcp_tool = "lookup"
     other = define_tool("mcp__docs__write", "MCP.", {"type": "object"}, execute)
     engine = PermissionEngine((("local", permissions),), object())
     context = _context(tmp_path, permission_mode=PermissionMode.ASK_FOR_APPROVAL)
-    assert asyncio.run(
-        engine.decide(allowed, {}, ResolvedToolPolicy(), context)
-    ).behavior is PermissionBehavior.ALLOW
-    assert asyncio.run(
-        engine.decide(other, {}, ResolvedToolPolicy(), context)
-    ).behavior is PermissionBehavior.ASK
+    assert (
+        asyncio.run(engine.decide(allowed, {}, ResolvedToolPolicy(), context)).behavior
+        is PermissionBehavior.ALLOW
+    )
+    assert (
+        asyncio.run(engine.decide(other, {}, ResolvedToolPolicy(), context)).behavior
+        is PermissionBehavior.ASK
+    )
 
 
 def test_local_permission_updates_are_atomic_preserve_unknown_toml_and_reject_symlink(
@@ -427,12 +527,24 @@ def test_local_permission_updates_are_atomic_preserve_unknown_toml_and_reject_sy
 def test_shell_deterministic_hard_denies_and_model_threshold() -> None:
     assert assess_shell("git status").behavior == "allow"
     assert assess_shell("printf 'a|b'").behavior == "ask"
-    assert assess_shell("git status && rg TODO | head -10").behavior == "allow"
+    assert assess_shell("git status && rg TODO | head -10").behavior == "ask"
+    assert assess_shell("git status && git diff | head -10").behavior == "allow"
     assert assess_shell("git status > status.txt").behavior == "ask"
     assert assess_shell("cat <<'EOF'\nhello\nEOF").behavior == "ask"
     assert assess_shell("sudo rm -rf /").behavior == "deny"
     assert assess_shell("rm -rf $TARGET").behavior == "deny"
     assert assess_shell("echo $(whoami)").behavior == "ask"
+    for command in (
+        "python -c \"from pathlib import Path; Path('important.py').unlink()\"",
+        "git clean -fdx",
+        "find . -delete",
+        "sed -i 's/a/b/' README.md",
+        "ruff format .",
+        "git diff --no-index .env README.md",
+        "/tmp/git status",
+        "git status --output-indicator-new=X",
+    ):
+        assert assess_shell(command).behavior == "ask"
 
     class Model:
         async def complete(self, **values):

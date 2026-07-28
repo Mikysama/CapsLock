@@ -22,7 +22,8 @@ from capslock.runtime import AgentSession, ModelRouter
 from capslock.runtime.tool_loop import ToolLoop
 from capslock.skills import SkillValidationError, load_skill_package
 from capslock.tooling import ExecutionContext
-from capslock.tooling.tools import filesystem, shell, web
+from capslock.tooling.tools import shell, web
+from capslock.tooling.tools.filesystem import write as filesystem_write
 from capslock.tooling.tools import workspace_tools
 
 
@@ -73,6 +74,18 @@ def test_python_names_do_not_encode_protocol_generations() -> None:
     assert failures == []
 
 
+def test_python_module_names_are_not_transitional() -> None:
+    project = Path(__file__).parents[1]
+    transitional = re.compile(r"(?i)(?:^|_)(?:new|old|compat|deprecated)(?:_|$)")
+    failures = [
+        str(path.relative_to(project))
+        for directory_name in ("capslock", "tests", "scripts")
+        for path in (project / directory_name).rglob("*.py")
+        if "__pycache__" not in path.parts and transitional.search(path.stem)
+    ]
+    assert failures == []
+
+
 def test_removed_facades_and_sync_clients_are_absent() -> None:
     root = Path(__file__).parents[1] / "capslock"
     for removed in (
@@ -85,6 +98,23 @@ def test_removed_facades_and_sync_clients_are_absent() -> None:
         "cli/chat.py",
         "cli/render.py",
         "cli/migration.py",
+        "cli/new_commands.py",
+        "application/action_system/external.py",
+        "application/action_system/external_support.py",
+        "application/action_system/mcp_actions.py",
+        "application/action_system/web_actions.py",
+        "tooling/authorization.py",
+        "tooling/authorization_models.py",
+        "tooling/authorization_specs.py",
+        "tooling/tools/filesystem.py",
+        "tooling/tools/filesystem_read.py",
+        "tooling/tools/filesystem_search.py",
+        "tooling/tools/filesystem_write.py",
+        "storage/repositories/run_journal.py",
+        "storage/repositories/run_journal_events.py",
+        "storage/repositories/run_journal_inputs.py",
+        "storage/repositories/run_journal_permissions.py",
+        "storage/repositories/run_journal_tools.py",
     ):
         assert not (root / removed).exists(), removed
     text = production_text()
@@ -313,7 +343,7 @@ def test_direct_capability_tools_do_not_expose_proposal_adapters() -> None:
             if name == "shell"
             else web
             if name.startswith("web_")
-            else filesystem,
+            else filesystem_write,
             name,
         )
         assert executor.__name__ == name
@@ -326,7 +356,9 @@ def test_direct_capability_tools_do_not_expose_proposal_adapters() -> None:
         "propose_mcp_connect",
         "propose_mcp_call",
     ):
-        assert not any(hasattr(module, removed) for module in (filesystem, shell, web))
+        assert not any(
+            hasattr(module, removed) for module in (filesystem_write, shell, web)
+        )
 
 
 def test_settings_use_explicit_groups(
@@ -406,7 +438,6 @@ enabled = false
     assert settings.command.command_timeout_seconds == 12
     assert settings.web.web_max_redirects == 1
     assert settings.mcp.mcp_output_bytes == 2048
-    assert settings.memory.project_write_enabled is False
     assert settings.memory.capture_enabled is False
     assert settings.memory.recall_enabled is False
     assert settings.memory.manual_write_enabled is False

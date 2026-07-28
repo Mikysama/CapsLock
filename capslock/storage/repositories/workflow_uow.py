@@ -18,7 +18,7 @@ from ...domain import (
     validate_final_status,
 )
 from .core import Repository, now
-from .run_journal import RunJournalRepository
+from .journal.repository import RunJournalRepository
 from .runs import RunRepository
 
 

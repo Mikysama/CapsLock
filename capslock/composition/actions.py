@@ -30,6 +30,7 @@ from ..plugins.broker import BrokerCallbacks
 from ..policy import PolicyError
 from ..shell import SessionProcessManager
 from ..storage.repositories import WorkspaceRepositories
+from ..workspace_writes import WorkspaceMutationCoordinator
 
 
 def build_action_factory(
@@ -47,6 +48,7 @@ def build_action_factory(
     interaction: RunInteraction,
     permission_engine: Any = None,
     emit: Callable[..., None],
+    write_coordinator: WorkspaceMutationCoordinator | None = None,
 ) -> Callable[[str], ActionCoordinator]:
     def actions(run_id: str) -> ActionCoordinator:
         coordinator: ActionCoordinator | None = None
@@ -114,7 +116,11 @@ def build_action_factory(
             )
 
         handlers = [
-            FileActionHandler(scope.policy, did_change=lsp.did_change),
+            FileActionHandler(
+                scope.policy,
+                did_change=lsp.did_change,
+                write_coordinator=write_coordinator,
+            ),
             CommandActionHandler(
                 scope.policy,
                 timeout_seconds=settings.shell.default_timeout_seconds,

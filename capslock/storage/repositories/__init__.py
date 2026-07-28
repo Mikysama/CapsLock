@@ -19,7 +19,7 @@ from .governance import GovernanceRepository
 from .models import ModelRepository
 from .plans import PlanRepository
 from .performance import PerformanceRepository
-from .run_journal import RunJournalRepository
+from .journal.repository import RunJournalRepository
 from .runs import RunRepository
 from .sessions import SessionRepository
 from .work_items import WorkItemRepository

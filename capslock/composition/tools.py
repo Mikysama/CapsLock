@@ -8,7 +8,8 @@ from ..configuration import Settings
 from ..lsp import LspManager
 from ..mcp import McpManager
 from ..plugins import PluginRegistry
-from ..tooling.authorization import PermissionEngine, PermissionMiddleware
+from ..tooling.permission_policy.engine import PermissionEngine
+from ..tooling.permission_policy.middleware import PermissionMiddleware
 from ..tooling.contracts import PlanToolVisibility, ToolDefinition
 from ..tooling.executor import ToolRuntime
 from ..tooling.planning import PlanningBoundaryMiddleware

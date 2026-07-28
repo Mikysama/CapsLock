@@ -8,7 +8,9 @@ from ..storage.repositories import WorkspaceRepositories
 
 
 async def input_command(output, layout, workspace, settings, args) -> int:
-    repositories = await WorkspaceRepositories.open(layout.database, workspace=workspace)
+    repositories = await WorkspaceRepositories.open(
+        layout.database, workspace=workspace
+    )
     try:
         command = args.input_command
         if command in {None, "list"}:
@@ -58,9 +60,9 @@ async def input_command(output, layout, workspace, settings, args) -> int:
         output.print(json.dumps(result, ensure_ascii=False))
     finally:
         await repositories.close()
-    from .app import create_application
     from .context import CliContext
     from .exec import run_exec
+    from .factory import create_application
 
     application = await create_application(
         workspace, settings, session_id=session_id, layout=layout

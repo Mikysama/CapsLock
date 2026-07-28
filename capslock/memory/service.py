@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 from datetime import UTC, datetime, timedelta
 import json
@@ -30,31 +29,7 @@ from .recall import RecallService
 from .transfer import MemoryTransferService
 from .validation import confidence, expiry, validated_text
 from .jobs import MemoryJobWorker
-
-
-@dataclass(frozen=True)
-class MemorySettingsView:
-    manual_write_enabled: bool
-    capture_enabled: bool
-    project_recall_enabled: bool
-    maintenance_enabled: bool
-    local_write_enabled: bool
-    policy: MemoryPolicy
-    recall_enabled: bool
-    embedding_backend: EmbeddingBackend
-    embedding_model: str | None
-    embedding_endpoint: str | None
-    embedding_provider: str | None = None
-    embedding_data_policy: str | None = None
-    embedding_consent_id: int | None = None
-
-    @property
-    def write_enabled(self) -> bool:
-        return self.manual_write_enabled and self.local_write_enabled
-
-    @property
-    def project_write_enabled(self) -> bool:
-        return self.manual_write_enabled
+from .settings_service import MemorySettingsService, MemorySettingsView
 
 
 def default_memory_database() -> Path:
@@ -68,7 +43,7 @@ class MemoryService:
         *,
         workspace: Path,
         session_id: str,
-        project_write_enabled: bool = True,
+        manual_write_enabled: bool = True,
         capture_enabled: bool = True,
         recall_enabled: bool = True,
         maintenance_enabled: bool = True,
@@ -83,7 +58,7 @@ class MemoryService:
         self.workspace = workspace.resolve()
         self.workspace_key = workspace_key(self.workspace)
         self.session_id = session_id
-        self.project_write_enabled = project_write_enabled
+        self.manual_write_enabled = manual_write_enabled
         self.capture_enabled = capture_enabled
         self.project_recall_enabled = recall_enabled
         self.maintenance_enabled = maintenance_enabled
@@ -128,69 +103,39 @@ class MemoryService:
             list_memories=lambda: self.list(limit=-1),
             event=self.event,
         )
+        self.settings_service = MemorySettingsService(
+            repositories=repositories,
+            workspace_key=self.workspace_key,
+            manual_write_enabled=manual_write_enabled,
+            capture_enabled=capture_enabled,
+            recall_enabled=recall_enabled,
+            maintenance_enabled=maintenance_enabled,
+            capture_policy=self.project_capture_policy,
+            embedding_policy=self.embedding_policy,
+            event=self.event,
+        )
         self.jobs = MemoryJobWorker(self)
 
     async def settings(self) -> MemorySettingsView:
-        raw = await self.repositories.settings.get(self.workspace_key)
-        policies = {
-            MemoryPolicy.OFF: 0,
-            MemoryPolicy.REVIEW: 1,
-            MemoryPolicy.AUTOMATIC: 2,
-        }
-        effective_policy = min(
-            (self.project_capture_policy, raw["policy"]), key=policies.__getitem__
-        )
-        return MemorySettingsView(
-            self.project_write_enabled,
-            self.capture_enabled and bool(raw["capture_enabled"]),
-            self.project_recall_enabled,
-            self.maintenance_enabled and bool(raw["maintenance_enabled"]),
-            bool(raw["write_enabled"]),
-            effective_policy,
-            self.project_recall_enabled and bool(raw["recall_enabled"]),
-            raw["embedding_backend"],
-            raw["embedding_model"],
-            raw["embedding_endpoint"],
-            raw["embedding_provider"],
-            raw["embedding_data_policy"],
-            raw["embedding_consent_id"],
-        )
+        return await self.settings_service.settings()
 
     async def set_local_write_enabled(self, enabled: bool) -> None:
-        await self.repositories.settings.set(
-            self.workspace_key, "write_enabled", int(enabled)
-        )
+        await self.settings_service.set_local_write_enabled(enabled)
 
     async def set_capture_enabled(self, enabled: bool) -> None:
-        await self.repositories.settings.set(
-            self.workspace_key, "capture_enabled", int(enabled)
-        )
-        self.event("memory_capture_policy_changed", enabled=enabled)
-        self.event(
-            "memory_policy_changed",
-            enabled=enabled,
-            effective=(await self.settings()).write_enabled,
-        )
+        await self.settings_service.set_capture_enabled(enabled)
 
     async def set_policy(self, policy: MemoryPolicy) -> None:
-        await self.repositories.settings.set(self.workspace_key, "policy", policy.value)
-        self.event("memory_capture_policy_changed", policy=policy.value)
+        await self.settings_service.set_policy(policy)
 
     async def set_recall_enabled(self, enabled: bool) -> None:
-        await self.repositories.settings.set(
-            self.workspace_key, "recall_enabled", int(enabled)
-        )
-        self.event("memory_recall_policy_changed", enabled=enabled)
+        await self.settings_service.set_recall_enabled(enabled)
 
     async def set_manual_write_enabled(self, enabled: bool) -> None:
-        await self.repositories.settings.set(
-            self.workspace_key, "write_enabled", int(enabled)
-        )
+        await self.settings_service.set_manual_write_enabled(enabled)
 
     async def set_maintenance_enabled(self, enabled: bool) -> None:
-        await self.repositories.settings.set(
-            self.workspace_key, "maintenance_enabled", int(enabled)
-        )
+        await self.settings_service.set_maintenance_enabled(enabled)
 
     async def configure_embeddings(
         self,
@@ -199,15 +144,17 @@ class MemoryService:
         model: str | None = None,
         endpoint: str | None = None,
     ) -> None:
-        await self.embedding_policy.configure(backend, model=model, endpoint=endpoint)
+        await self.settings_service.configure_embeddings(
+            backend, model=model, endpoint=endpoint
+        )
 
     async def external_embedding_preview(self, profile: str) -> dict[str, object]:
-        return await self.embedding_policy.preview(profile)
+        return await self.settings_service.external_embedding_preview(profile)
 
     async def enable_external_embeddings(
         self, profile: str, preview: dict[str, object]
     ) -> None:
-        await self.embedding_policy.enable(profile, preview)
+        await self.settings_service.enable_external_embeddings(profile, preview)
 
     async def add(
         self,

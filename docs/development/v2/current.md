@@ -1,6 +1,6 @@
 # 当前运行内核与安全边界
 
-本文描述 CapsLock 2.7.0 的开发边界。产品在本机运行，支持直接能力工具、类型化斜杠命令、可审批 Action、AST 分析与沙箱保护的通用 Shell、session 隔离后台进程、受管理的本地/远程 MCP、LSP、IDE 上下文桥、受控仓库指令和单层子 Agent；不提供远程控制、后台 daemon 或第三方可执行 Hook。
+本文描述 CapsLock 2.7.1 的开发边界。产品在本机运行，支持直接能力工具、类型化斜杠命令、可审批 Action、AST 分析与沙箱保护的通用 Shell、session 隔离后台进程、受管理的本地/远程 MCP、LSP、IDE 上下文桥、受控仓库指令和单层子 Agent；不提供远程控制、后台 daemon 或第三方可执行 Hook。
 
 ## 模块边界
 
@@ -19,7 +19,7 @@
 
 ## 外部执行
 
-Shell 在 Linux Bubblewrap 或 macOS sandbox-exec 中执行，工作区可写、系统只读、默认断网；沙箱不可用时 fail closed。确定性规则可 hard deny 危险命令，快速分类器只能在默认无网络沙箱和高置信度边界内自动 allow。后台任务由 session-scoped process manager 管理并支持有界输出和 TERM→KILL 取消。
+Shell 在 Linux Bubblewrap 或 macOS sandbox-exec 中执行，系统只读、默认断网；沙箱不可用时 fail closed。`approve_for_me` 仅自动批准 `pwd`、受限 Git 查询及只消费标准输入的安全管道过滤器，并将工作区只读挂载。模型分类器只记录风险提示，不能将白名单外命令升级为 allow；显式批准或明确权限规则仍可使用可写工作区。后台任务由 session-scoped process manager 管理并支持有界输出、TERM→KILL 取消和统一临时目录清理。
 
 MCP 使用唯一的受管理长连接路径，负责 stdio/Streamable HTTP/SSE、tools/resources discovery、list-changed、重连、取消和 workspace 切换；远程只接受公开 HTTPS，凭据只从私有配置引用解析，mutating call 不自动重放。LSP 使用已安装或显式配置的 server，在只读、禁网沙箱中运行，支持请求取消、didOpen/didChange、崩溃恢复和空闲回收。
 

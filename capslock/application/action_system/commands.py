@@ -149,30 +149,25 @@ class CommandActionHandler:
         if assessment.behavior == "deny":
             raise PolicyError(assessment.reason)
         directory = self.policy.command_directory(cwd)
-        built = sandboxed_command(
-            command=command,
-            workspace=self.policy.root,
-            cwd=directory,
-            network=network,
-        )
         # PermissionEngine owns ask/allow semantics. This handler only preserves
-        # an upstream hard/manual decision after validating the executable plan.
+        # an upstream hard/manual decision after validating the canonical request.
         force_approval = payload.get("force_manual_approval") is True
         return ActionProposal(
             f"Run sandboxed shell command: {command[:160]}",
             {
                 "command": command,
-                "argv": list(built.argv),
                 "cwd": str(directory.relative_to(self.policy.root)),
                 "sandbox": "default",
                 "network": network,
                 "background": background,
                 "timeout_seconds": timeout,
-                "temporary": str(built.temporary),
                 "safety": {
                     "behavior": assessment.behavior,
                     "reason": assessment.reason,
                     "parsed": list(assessment.parsed),
+                    "workspace_access": (
+                        "read_only" if assessment.read_only_workspace else "read_write"
+                    ),
                 },
                 "force_manual_approval": force_approval,
             },
@@ -224,17 +219,21 @@ class CommandActionHandler:
 
     async def execute(self, action: ActionRecord) -> ActionExecution:
         request = action.request
+        built = self._execution_command(request)
         if request.get("background") is True:
             if self.process_manager is None:
+                if built is not None:
+                    shutil.rmtree(built.temporary, ignore_errors=True)
                 raise RuntimeError("background process manager is unavailable")
-            job = await self.process_manager.start(
-                action.session_id,
-                SandboxedCommand(
-                    tuple(str(item) for item in request["argv"]),
-                    self.policy.root,
-                    Path(str(request["temporary"])),
-                ),
-            )
+            if built is None:
+                raise ValueError(
+                    "background execution requires a sandboxed shell command"
+                )
+            try:
+                job = await self.process_manager.start(action.session_id, built)
+            except BaseException:
+                shutil.rmtree(built.temporary, ignore_errors=True)
+                raise
             return ActionExecution(
                 {
                     "process_id": job.id,
@@ -246,13 +245,27 @@ class CommandActionHandler:
                 },
                 ActionResultKind.EXIT_ZERO,
             )
-        process = await asyncio.create_subprocess_exec(
-            *[str(item) for item in request["argv"]],
-            cwd=self.policy.resolve(str(request["cwd"])),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            start_new_session=True,
+        argv = (
+            built.argv
+            if built is not None
+            else tuple(str(item) for item in request["argv"])
         )
+        cwd = (
+            built.cwd if built is not None else self.policy.resolve(str(request["cwd"]))
+        )
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *argv,
+                cwd=cwd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
+                env=built.environment if built is not None else None,
+            )
+        except BaseException:
+            if built is not None:
+                shutil.rmtree(built.temporary, ignore_errors=True)
+            raise
         try:
             async with asyncio.timeout(float(request["timeout_seconds"])):
                 stdout_bytes, stderr_bytes = await process.communicate()
@@ -267,10 +280,35 @@ class CommandActionHandler:
             await _await_cleanup(cleanup)
             raise
         finally:
-            temporary = request.get("temporary")
-            if isinstance(temporary, str):
-                shutil.rmtree(temporary, ignore_errors=True)
+            if built is not None:
+                shutil.rmtree(built.temporary, ignore_errors=True)
         return self._result(process.returncode, stdout_bytes, stderr_bytes)
+
+    def _execution_command(self, request: dict[str, Any]) -> SandboxedCommand | None:
+        command = request.get("command")
+        if not isinstance(command, str):
+            return None
+        assessment = assess_shell(command)
+        if assessment.behavior == "deny":
+            raise PolicyError(assessment.reason)
+        automatic_read_only = _is_deterministic_auto_approval(request)
+        if automatic_read_only and not assessment.read_only_workspace:
+            raise PolicyError(
+                "automatically approved shell command no longer matches the read-only allowlist"
+            )
+        network = request.get("network", [])
+        if not isinstance(network, list) or not all(
+            isinstance(item, str) for item in network
+        ):
+            raise ValueError("shell network must be an array of host scopes")
+        directory = self.policy.command_directory(str(request.get("cwd", ".")))
+        return sandboxed_command(
+            command=command,
+            workspace=self.policy.root,
+            cwd=directory,
+            network=network,
+            workspace_writable=not automatic_read_only,
+        )
 
     def _result(
         self,
@@ -321,3 +359,15 @@ async def _await_cleanup(task: asyncio.Task) -> None:
         except asyncio.CancelledError:
             continue
     await task
+
+
+def _is_deterministic_auto_approval(request: dict[str, Any]) -> bool:
+    permission = request.get("_permission")
+    return (
+        isinstance(permission, dict)
+        and permission.get("behavior") == "allow"
+        and permission.get("source") == "permission_mode"
+        and permission.get("reason_code") == "mode_default"
+        and permission.get("mode") == "approve_for_me"
+        and permission.get("decided_by") == "mode"
+    )

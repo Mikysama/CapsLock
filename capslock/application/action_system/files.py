@@ -11,6 +11,7 @@ from typing import Any
 from ...changes import make_diff
 from ...domain import ActionRecord, ActionResultKind, ActionType
 from ...policy import WorkspacePolicy
+from ...workspace_writes import WorkspaceMutationCoordinator
 from .core import ActionExecution, ActionProposal
 
 
@@ -28,9 +29,11 @@ class FileActionHandler:
         policy: WorkspacePolicy,
         *,
         did_change: Callable[[str], Awaitable[None]] | None = None,
+        write_coordinator: WorkspaceMutationCoordinator | None = None,
     ) -> None:
         self.policy = policy
         self.did_change = did_change
+        self.write_coordinator = write_coordinator or WorkspaceMutationCoordinator()
 
     async def propose(
         self, action_type: ActionType, payload: dict[str, Any]
@@ -162,6 +165,10 @@ class FileActionHandler:
         return await self.propose(action.type, payload)
 
     def _apply(self, action: ActionRecord) -> None:
+        with self.write_coordinator.lock(self.policy.root):
+            self._apply_locked(action)
+
+    def _apply_locked(self, action: ActionRecord) -> None:
         request = action.request
         path = self.policy.writable_file(
             str(request["path"]), create=request["operation"] == "create"
@@ -182,6 +189,10 @@ class FileActionHandler:
         return await asyncio.to_thread(self._reverse, action)
 
     def _reverse(self, action: ActionRecord) -> dict[str, Any]:
+        with self.write_coordinator.lock(self.policy.root):
+            return self._reverse_locked(action)
+
+    def _reverse_locked(self, action: ActionRecord) -> dict[str, Any]:
         request = action.request
         path = self.policy.writable_file(
             str(request["path"]), create=request["operation"] == "create"
@@ -203,8 +214,6 @@ def _string(payload: dict[str, Any], key: str) -> str:
     return value
 
 
-def _preserve_manual_approval(
-    source: dict[str, Any], target: dict[str, Any]
-) -> None:
+def _preserve_manual_approval(source: dict[str, Any], target: dict[str, Any]) -> None:
     if source.get("force_manual_approval") is True:
         target["force_manual_approval"] = True

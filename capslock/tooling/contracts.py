@@ -14,6 +14,17 @@ from ..permissions import PermissionMode
 from ..policy import WorkspacePolicy
 from ..ports import ActionPort, MemoryPort, SkillPort, SourcePort, TaskPort
 from .schema import compile_json_schema
+from .service_ports import (
+    ArtifactStorePort,
+    CollaborationPort,
+    DiscoveryStorePort,
+    PermissionEnginePort,
+    PlanningPort,
+    ProcessManagerPort,
+    RunGovernorPort,
+    ShellClassifierPort,
+    ToolCatalogPort,
+)
 
 
 class InterruptBehavior(StrEnum):
@@ -316,17 +327,17 @@ class ExecutionContext:
     memory: MemoryPort | None = None
     skills: SkillPort | None = None
     permission_mode: PermissionMode = PermissionMode.APPROVE_FOR_ME
-    collaboration: Any = None
-    governor: Any = None
-    artifacts: Any = None
-    permission_engine: Any = None
-    process_manager: Any = None
+    collaboration: CollaborationPort | None = None
+    governor: RunGovernorPort | None = None
+    artifacts: ArtifactStorePort | None = None
+    permission_engine: PermissionEnginePort | None = None
+    process_manager: ProcessManagerPort | None = None
     invocation_id: str | None = None
-    catalog: Any = None
-    discoveries: Any = None
+    catalog: ToolCatalogPort | None = None
+    discoveries: DiscoveryStorePort | None = None
     runtime_state: dict[str, object] = field(default_factory=dict)
-    shell_classifier: Any = None
-    planning: Any = None
+    shell_classifier: ShellClassifierPort | None = None
+    planning: PlanningPort | None = None
 
 
 ToolExecuteCallable = Callable[

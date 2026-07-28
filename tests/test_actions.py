@@ -20,6 +20,7 @@ from capslock.application.action_system import (
     WebActionHandler,
 )
 from capslock.application.action_system.commands import CommandTemplate, TEMPLATES
+from capslock.application.action_system.external_actions.transport import _read_bounded
 from capslock.domain import (
     ActionResultKind,
     ActionStatus,
@@ -28,6 +29,12 @@ from capslock.domain import (
 )
 from capslock.permissions import PermissionMode
 from capslock.policy import PolicyError, WorkspacePolicy
+from capslock.shell import (
+    SandboxedCommand,
+    SessionProcessManager,
+    ShellSandboxUnavailable,
+    sandboxed_command,
+)
 from capslock.storage.repositories import WorkspaceRepositories
 from tests.helpers import StubActionHandler, workspace_run
 
@@ -333,6 +340,359 @@ def test_full_access_shell_allow_is_not_overridden_by_action_risk_classifier(
             assert result.result == {"stdout": "test-date\n", "exit_code": 0}
         finally:
             await repositories.close()
+
+    asyncio.run(scenario())
+
+
+def test_shell_proposal_is_read_only_and_does_not_allocate_sandbox(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def unexpected(**_kwargs):
+        raise AssertionError("sandbox must be allocated only during execution")
+
+    monkeypatch.setattr(
+        "capslock.application.action_system.commands.sandboxed_command", unexpected
+    )
+    handler = CommandActionHandler(
+        WorkspacePolicy(tmp_path), timeout_seconds=10, output_limit_bytes=1000
+    )
+    proposal = asyncio.run(
+        handler.propose(ActionType.COMMAND, {"command": "git status", "cwd": "."})
+    )
+    assert "argv" not in proposal.request and "temporary" not in proposal.request
+    assert proposal.request["safety"]["workspace_access"] == "read_only"
+
+
+def test_sandbox_validates_backend_before_allocating_temporary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    allocations = []
+    monkeypatch.setattr("capslock.shell.sandbox.platform.system", lambda: "Linux")
+    monkeypatch.setattr("capslock.shell.sandbox.shutil.which", lambda _name: None)
+    monkeypatch.setattr(
+        "capslock.shell.sandbox.tempfile.mkdtemp",
+        lambda **kwargs: allocations.append(kwargs) or str(tmp_path / "unexpected"),
+    )
+    with pytest.raises(ShellSandboxUnavailable):
+        sandboxed_command(
+            command="git status", workspace=tmp_path, cwd=tmp_path, network=[]
+        )
+    assert allocations == []
+
+
+def test_read_only_shell_uses_read_only_workspace_bind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    temporary = tmp_path / "shell-tmp"
+    temporary.mkdir()
+    monkeypatch.setattr("capslock.shell.sandbox.platform.system", lambda: "Linux")
+    monkeypatch.setattr(
+        "capslock.shell.sandbox.shutil.which", lambda _name: "/usr/bin/bwrap"
+    )
+    monkeypatch.setattr(
+        "capslock.shell.sandbox.tempfile.mkdtemp", lambda **_kwargs: str(temporary)
+    )
+    command = sandboxed_command(
+        command="git status",
+        workspace=tmp_path,
+        cwd=tmp_path,
+        network=[],
+        workspace_writable=False,
+    )
+    bind = command.argv.index(str(tmp_path))
+    assert command.argv[bind - 1] == "--ro-bind"
+
+
+@pytest.mark.parametrize(
+    ("permission", "workspace_writable"),
+    [
+        (
+            {
+                "behavior": "allow",
+                "source": "permission_mode",
+                "reason_code": "mode_default",
+                "mode": "approve_for_me",
+                "decided_by": "mode",
+            },
+            False,
+        ),
+        (
+            {
+                "behavior": "allow",
+                "source": "local",
+                "reason_code": "explicit_allow",
+                "mode": "approve_for_me",
+                "decided_by": "rule",
+            },
+            True,
+        ),
+        (
+            {
+                "behavior": "allow",
+                "source": "permission_mode",
+                "reason_code": "mode_default",
+                "mode": "full_access",
+                "decided_by": "mode",
+            },
+            True,
+        ),
+        ({"behavior": "ask", "source": "permission_mode"}, True),
+    ],
+)
+def test_only_deterministic_auto_approval_uses_read_only_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    permission: dict[str, str],
+    workspace_writable: bool,
+) -> None:
+    observed = []
+
+    def build(**values):
+        observed.append(values["workspace_writable"])
+        return SimpleNamespace()
+
+    monkeypatch.setattr(
+        "capslock.application.action_system.commands.sandboxed_command", build
+    )
+    handler = CommandActionHandler(
+        WorkspacePolicy(tmp_path), timeout_seconds=10, output_limit_bytes=1000
+    )
+    handler._execution_command(
+        {
+            "command": "git status",
+            "cwd": ".",
+            "network": [],
+            "_permission": permission,
+        }
+    )
+    assert observed == [workspace_writable]
+
+
+def test_execution_rejects_stale_deterministic_shell_approval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "capslock.application.action_system.commands.sandboxed_command",
+        lambda **_values: SimpleNamespace(),
+    )
+    handler = CommandActionHandler(
+        WorkspacePolicy(tmp_path), timeout_seconds=10, output_limit_bytes=1000
+    )
+    with pytest.raises(PolicyError, match="no longer matches"):
+        handler._execution_command(
+            {
+                "command": "python -c pass",
+                "cwd": ".",
+                "network": [],
+                "_permission": {
+                    "behavior": "allow",
+                    "source": "permission_mode",
+                    "reason_code": "mode_default",
+                    "mode": "approve_for_me",
+                    "decided_by": "mode",
+                },
+            }
+        )
+
+
+def test_sandbox_rejects_host_scoped_network_before_allocating_temporary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    allocations = []
+    monkeypatch.setattr("capslock.shell.sandbox.platform.system", lambda: "Darwin")
+    monkeypatch.setattr(
+        "capslock.shell.sandbox.shutil.which", lambda _name: "/usr/bin/sandbox-exec"
+    )
+    monkeypatch.setattr(
+        "capslock.shell.sandbox.tempfile.mkdtemp",
+        lambda **kwargs: allocations.append(kwargs) or str(tmp_path / "unexpected"),
+    )
+    with pytest.raises(ShellSandboxUnavailable, match="host-scoped"):
+        sandboxed_command(
+            command="git status",
+            workspace=tmp_path,
+            cwd=tmp_path,
+            network=["example.com"],
+        )
+    assert allocations == []
+
+
+def test_shell_launch_failure_cleans_temporary_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        temporary = tmp_path / "capslock-shell-launch"
+        temporary.mkdir()
+        monkeypatch.setattr(
+            "capslock.application.action_system.commands.sandboxed_command",
+            lambda **_values: SandboxedCommand(
+                ("missing-executable",), tmp_path, temporary
+            ),
+        )
+
+        async def fail_launch(*_args, **_kwargs):
+            raise OSError("launch failed")
+
+        monkeypatch.setattr(
+            "capslock.application.action_system.commands.asyncio.create_subprocess_exec",
+            fail_launch,
+        )
+        handler = CommandActionHandler(
+            WorkspacePolicy(tmp_path), timeout_seconds=10, output_limit_bytes=1000
+        )
+        action = SimpleNamespace(
+            session_id="session",
+            request={
+                "command": "python -c pass",
+                "cwd": ".",
+                "network": [],
+                "background": False,
+                "timeout_seconds": 1,
+            },
+        )
+        with pytest.raises(OSError, match="launch failed"):
+            await handler.execute(action)
+        assert not temporary.exists()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_shell_timeout_and_cancellation_clean_temporary_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cancel: bool
+) -> None:
+    async def scenario() -> None:
+        temporary = tmp_path / f"capslock-shell-{'cancel' if cancel else 'timeout'}"
+        temporary.mkdir()
+        monkeypatch.setattr(
+            "capslock.application.action_system.commands.sandboxed_command",
+            lambda **_values: SandboxedCommand(
+                (
+                    sys.executable,
+                    "-c",
+                    "import time; time.sleep(5)",
+                ),
+                tmp_path,
+                temporary,
+            ),
+        )
+        handler = CommandActionHandler(
+            WorkspacePolicy(tmp_path), timeout_seconds=10, output_limit_bytes=1000
+        )
+        action = SimpleNamespace(
+            session_id="session",
+            request={
+                "command": "python -c pass",
+                "cwd": ".",
+                "network": [],
+                "background": False,
+                "timeout_seconds": 5 if cancel else 0.01,
+            },
+        )
+        task = asyncio.create_task(handler.execute(action))
+        if cancel:
+            await asyncio.sleep(0.05)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        else:
+            result = await task
+            assert result.result_kind is ActionResultKind.TIMEOUT
+        assert not temporary.exists()
+
+    asyncio.run(scenario())
+
+
+def test_background_shell_completion_cleans_temporary_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        temporary = tmp_path / "capslock-shell-background"
+        temporary.mkdir()
+        monkeypatch.setattr(
+            "capslock.application.action_system.commands.sandboxed_command",
+            lambda **_values: SandboxedCommand(
+                (sys.executable, "-c", "print('done')"),
+                tmp_path,
+                temporary,
+            ),
+        )
+        manager = SessionProcessManager(output_limit=1000)
+        handler = CommandActionHandler(
+            WorkspacePolicy(tmp_path),
+            timeout_seconds=10,
+            output_limit_bytes=1000,
+            process_manager=manager,
+        )
+        action = SimpleNamespace(
+            session_id="session",
+            request={
+                "command": "python -c pass",
+                "cwd": ".",
+                "network": [],
+                "background": True,
+                "timeout_seconds": 1,
+            },
+        )
+        result = await handler.execute(action)
+        job = manager.get("session", result.result["process_id"])
+        await asyncio.gather(*job.tasks)
+        assert not temporary.exists()
+        await manager.close()
+
+    asyncio.run(scenario())
+
+
+class _Chunks(httpx.AsyncByteStream):
+    def __init__(self, *chunks: bytes) -> None:
+        self.chunks = chunks
+
+    async def __aiter__(self):
+        for chunk in self.chunks:
+            yield chunk
+
+
+def test_web_response_reader_enforces_streaming_hard_limits() -> None:
+    async def scenario() -> None:
+        request = httpx.Request("GET", "https://example.com")
+        response = httpx.Response(
+            200,
+            headers={"content-type": "text/plain"},
+            stream=_Chunks(b"1234", b"5678"),
+            request=request,
+        )
+        content, truncated = await _read_bounded(response, 6)
+        await response.aclose()
+        assert content == b"123456" and truncated
+
+        exact = httpx.Response(
+            200,
+            stream=_Chunks(b"123", b"456"),
+            request=request,
+        )
+        content, truncated = await _read_bounded(exact, 6)
+        await exact.aclose()
+        assert content == b"123456" and not truncated
+
+        declared = httpx.Response(
+            200,
+            headers={"content-length": "7"},
+            stream=_Chunks(b"ignored"),
+            request=request,
+        )
+        with pytest.raises(ValueError, match="byte limit"):
+            await _read_bounded(declared, 6)
+        await declared.aclose()
+
+        compressed = httpx.Response(
+            200,
+            headers={"content-encoding": "gzip"},
+            stream=_Chunks(b"ignored"),
+            request=request,
+        )
+        with pytest.raises(ValueError, match="compressed"):
+            await _read_bounded(compressed, 6)
+        await compressed.aclose()
 
     asyncio.run(scenario())
 
@@ -710,6 +1070,109 @@ def test_web_search_is_async_audited_and_untrusted(tmp_path: Path) -> None:
             source = (await repositories.sources.list(session.id))[0]
             assert source.suspicious is True
             assert result.result["results"][0]["source_id"] == source.id
+        finally:
+            await repositories.close()
+
+    asyncio.run(scenario())
+
+
+def test_web_fetch_revalidates_redirects_and_requests_identity_encoding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        validated = []
+        requests = []
+
+        def validate(url: str) -> str:
+            validated.append(url)
+            return url
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            if request.url.path == "/start":
+                return httpx.Response(
+                    302,
+                    headers={"location": "https://example.com/final"},
+                    request=request,
+                )
+            return httpx.Response(
+                200,
+                text="final body",
+                headers={"content-type": "text/plain"},
+                request=request,
+            )
+
+        monkeypatch.setattr(
+            "capslock.application.action_system.external_actions.web.validate_public_url",
+            validate,
+        )
+        repositories = await WorkspaceRepositories.open(
+            tmp_path / "fetch.sqlite3", workspace=tmp_path
+        )
+        try:
+            session, prepared = await workspace_run(repositories)
+            handler = WebActionHandler(
+                repositories.sources,
+                tavily_api_key="test",
+                timeout_seconds=1,
+                max_bytes=1000,
+                max_redirects=1,
+                client_factory=lambda **kwargs: httpx.AsyncClient(
+                    transport=httpx.MockTransport(respond), **kwargs
+                ),
+            )
+            actions = coordinator(repositories, session.id, prepared.run.id, [handler])
+            proposal = await actions.propose(
+                ActionType.WEB_FETCH, url="https://example.com/start"
+            )
+            result = await actions.approve_and_execute(proposal.id)
+            assert result.status is ActionStatus.COMPLETED
+            assert result.result["excerpt"] == "final body"
+            assert validated == [
+                "https://example.com/start",
+                "https://example.com/start",
+                "https://example.com/final",
+            ]
+            assert all(
+                request.headers["accept-encoding"] == "identity" for request in requests
+            )
+        finally:
+            await repositories.close()
+
+    asyncio.run(scenario())
+
+
+def test_web_search_rejects_response_over_transfer_limit(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        def respond(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                content=b'{"results":[]}' + b" " * 100,
+                headers={"content-type": "application/json"},
+                request=request,
+            )
+
+        repositories = await WorkspaceRepositories.open(
+            tmp_path / "large-search.sqlite3", workspace=tmp_path
+        )
+        try:
+            session, prepared = await workspace_run(repositories)
+            handler = WebActionHandler(
+                repositories.sources,
+                tavily_api_key="test",
+                timeout_seconds=1,
+                max_bytes=16,
+                max_redirects=1,
+                client_factory=lambda **kwargs: httpx.AsyncClient(
+                    transport=httpx.MockTransport(respond), **kwargs
+                ),
+            )
+            actions = coordinator(repositories, session.id, prepared.run.id, [handler])
+            proposal = await actions.propose(ActionType.WEB_SEARCH, query="large")
+            result = await actions.approve_and_execute(proposal.id)
+            assert result.status is ActionStatus.FAILED
+            assert result.error_code == "ValueError"
+            assert "byte limit" in (result.error_message or "")
         finally:
             await repositories.close()
 

@@ -16,6 +16,7 @@ class ShellAssessment:
     parsed: tuple[str, ...] = ()
     commands: tuple[str, ...] = ()
     parser_available: bool = True
+    read_only_workspace: bool = False
 
 
 _HARD_DENY_WORDS = {
@@ -37,33 +38,16 @@ _HARD_DENY_WORDS = {
     "swapon",
     "swapoff",
 }
-_SAFE_COMMANDS = {
-    "git",
-    "pytest",
-    "ruff",
-    "python",
-    "python3",
-    "npm",
-    "pnpm",
-    "yarn",
-    "cargo",
-    "go",
-    "make",
-    "cmake",
-    "ninja",
-    "rg",
-    "grep",
-    "find",
-    "ls",
-    "pwd",
-    "sed",
-    "awk",
-    "head",
-    "tail",
-    "wc",
-    "sort",
-    "uniq",
-    "diff",
+_READ_ONLY_GIT_COMMANDS = {"status", "diff", "log", "show", "rev-parse", "ls-files"}
+_UNSAFE_GIT_OPTIONS = {
+    "--ext-diff",
+    "--no-index",
+    "--output",
+    "--textconv",
+    "--exec-path",
+    "--git-dir",
+    "--work-tree",
+    "--config-env",
 }
 
 
@@ -114,9 +98,7 @@ def assess_shell(command: str) -> ShellAssessment:
             "deny", "recursive ownership or mode changes at root are forbidden", words
         )
     if not syntax.parser_available:
-        return ShellAssessment(
-            "ask", "Bash parser is unavailable", words, (), False
-        )
+        return ShellAssessment("ask", "Bash parser is unavailable", words, (), False)
     if syntax.has_error:
         return ShellAssessment(
             "ask", "command could not be parsed reliably", words, command_names
@@ -132,16 +114,106 @@ def assess_shell(command: str) -> ShellAssessment:
         return ShellAssessment(
             "ask", "command contains shell redirection", words, command_names
         )
-    if command_names and all(item in _SAFE_COMMANDS for item in command_names):
+    if _read_only_segments(syntax.segments):
         return ShellAssessment(
             "allow",
-            "all command segments are in the deterministic sandbox allowlist",
+            "all command segments are in the deterministic read-only allowlist",
             words,
             command_names,
+            syntax.parser_available,
+            True,
         )
     return ShellAssessment(
         "ask", "command requires explicit review", words, command_names
     )
+
+
+def _read_only_segments(segments) -> bool:
+    if not segments:
+        return False
+    for index, segment in enumerate(segments):
+        argv = segment.argv
+        if not argv:
+            return False
+        command = argv[0]
+        if command == "pwd":
+            if len(argv) != 1 or segment.operator_before == "|":
+                return False
+            continue
+        if command == "git":
+            if segment.operator_before == "|" or not _read_only_git(argv):
+                return False
+            continue
+        if command in {"head", "tail", "wc", "uniq"}:
+            if index == 0 or segment.operator_before != "|":
+                return False
+            if not _stdin_filter(command, argv[1:]):
+                return False
+            continue
+        return False
+    return True
+
+
+def _read_only_git(argv: tuple[str, ...]) -> bool:
+    index = 1
+    if index < len(argv) and argv[index] == "--no-pager":
+        index += 1
+    if index >= len(argv) or argv[index] not in _READ_ONLY_GIT_COMMANDS:
+        return False
+    for value in argv[index + 1 :]:
+        if value in {"-c", "-C"} or value.startswith(("-c=", "-C=")):
+            return False
+        if value in _UNSAFE_GIT_OPTIONS or value.startswith(
+            (
+                "--output",
+                "--ext-diff=",
+                "--textconv=",
+                "--exec-path=",
+                "--git-dir=",
+                "--work-tree=",
+                "--config-env=",
+            )
+        ):
+            return False
+    return True
+
+
+def _stdin_filter(command: str, arguments: tuple[str, ...]) -> bool:
+    if command in {"head", "tail"}:
+        index = 0
+        while index < len(arguments):
+            value = arguments[index]
+            if re.fullmatch(r"-\d+", value):
+                index += 1
+                continue
+            if value in {"-n", "--lines", "-c", "--bytes"}:
+                if index + 1 >= len(arguments) or not _count(arguments[index + 1]):
+                    return False
+                index += 2
+                continue
+            if value.startswith(("--lines=", "--bytes=")) and _count(
+                value.split("=", 1)[1]
+            ):
+                index += 1
+                continue
+            return False
+        return True
+    if command == "wc":
+        return all(
+            re.fullmatch(r"-[cmlwL]+", value)
+            or value
+            in {"--bytes", "--chars", "--lines", "--max-line-length", "--words"}
+            for value in arguments
+        )
+    return all(
+        re.fullmatch(r"-[cdiu]+", value)
+        or value in {"--count", "--repeated", "--ignore-case", "--unique"}
+        for value in arguments
+    )
+
+
+def _count(value: str) -> bool:
+    return re.fullmatch(r"[+-]?\d+", value) is not None
 
 
 __all__ = ["ShellAssessment", "assess_shell"]

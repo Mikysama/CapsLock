@@ -6,7 +6,7 @@ from ...domain import RunInfo, RunKind
 from .core import now
 import uuid
 from .core import Repository
-from .run_journal import RunJournalRepository
+from .journal.repository import RunJournalRepository
 from .workflow_records import run
 
 

@@ -14,6 +14,7 @@ from ..collaboration import (
 from ..configuration import Settings
 from ..interaction import RunInteraction
 from ..plugins import PluginRegistry
+from ..workspace_writes import WorkspaceMutationCoordinator
 
 
 def build_collaboration(
@@ -28,10 +29,15 @@ def build_collaboration(
     repository: Any,
     open_application: Any,
     memory: Any = None,
+    write_coordinator: WorkspaceMutationCoordinator | None = None,
 ) -> CollaborationService | None:
     if child_mode or not settings.agents.enabled:
         return None
-    manager = AgentWorkspaceManager(active_root, state_root=state_root)
+    manager = AgentWorkspaceManager(
+        active_root,
+        state_root=state_root,
+        write_coordinator=write_coordinator,
+    )
     runner = ChildAgentRunner(
         settings=settings,
         client=client,
