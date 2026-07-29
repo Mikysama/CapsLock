@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import hashlib
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from typing import Any
@@ -25,6 +26,7 @@ from ..tooling.executor import ToolRuntime
 from ..tooling.presentation import tool_presentation
 from .governance import RunGovernor
 from .model import ModelToolCall
+from ..external import assess_prompt_injection
 
 
 class InvocationPreparer:
@@ -212,6 +214,104 @@ class InvocationPreparer:
                 await governor.record_external_usage(**outcome.external_usage)
             event_data = outcome.event_data or {}
             audit_outcome = outcome
+            if resolved_policy.open_world and outcome.executed:
+                source = outcome.content_source or call.name
+                raw_payload = json.dumps(
+                    {
+                        "source": source,
+                        "data": outcome.data,
+                        "content": [item.as_dict() for item in outcome.content],
+                    },
+                    ensure_ascii=False,
+                    default=str,
+                    sort_keys=True,
+                ).encode("utf-8")
+                assessment = assess_prompt_injection(
+                    raw_payload.decode("utf-8", errors="replace")
+                )
+                outcome = replace(
+                    outcome,
+                    content_trust=(
+                        outcome.content_trust
+                        if outcome.content_trust != "tool_data"
+                        else "untrusted_external"
+                    ),
+                    content_source=source,
+                    suspicious=assessment.suspicious,
+                    risk_signals=assessment.risk_signals,
+                )
+                audit_outcome = outcome
+                if assessment.suspicious:
+                    digest = hashlib.sha256(raw_payload).hexdigest()
+                    if context.artifacts is None:
+                        outcome = ToolOutcome.failure(
+                            "suspicious tool content was blocked because quarantine storage is unavailable",
+                            code="quarantine_unavailable",
+                            executed=True,
+                            data={
+                                "quarantined": True,
+                                "source": source,
+                                "bytes": len(raw_payload),
+                                "sha256": digest,
+                                "risk_signals": list(assessment.risk_signals),
+                                "content_available": False,
+                            },
+                        )
+                        outcome = replace(
+                            outcome,
+                            content_trust="untrusted_external",
+                            content_source=source,
+                            suspicious=True,
+                            risk_signals=assessment.risk_signals,
+                            delivery_status=DeliveryStatus.DELIVERY_FAILED,
+                        )
+                    else:
+                        try:
+                            artifact = await context.artifacts.put(
+                                session_id=context.session_id,
+                                run_id=run_id,
+                                invocation_id=invocation_id,
+                                content=raw_payload,
+                            )
+                        except Exception:
+                            outcome = ToolOutcome.failure(
+                                "suspicious tool content could not be quarantined",
+                                code="quarantine_failed",
+                                executed=True,
+                                data={
+                                    "quarantined": True,
+                                    "source": source,
+                                    "bytes": len(raw_payload),
+                                    "sha256": digest,
+                                    "risk_signals": list(assessment.risk_signals),
+                                    "content_available": False,
+                                },
+                            )
+                            outcome = replace(
+                                outcome,
+                                content_trust="untrusted_external",
+                                content_source=source,
+                                suspicious=True,
+                                risk_signals=assessment.risk_signals,
+                                delivery_status=DeliveryStatus.DELIVERY_FAILED,
+                            )
+                        else:
+                            artifact_id = artifact.id
+                            descriptor = {
+                                "quarantined": True,
+                                "source": source,
+                                "bytes": len(raw_payload),
+                                "sha256": artifact.sha256,
+                                "risk_signals": list(assessment.risk_signals),
+                                "artifact_id": artifact.id,
+                                "read_with": "read_tool_artifact",
+                            }
+                            outcome = replace(
+                                outcome,
+                                data=descriptor,
+                                content=(ToolContent.artifact(descriptor),),
+                                delivery_status=DeliveryStatus.ARTIFACT,
+                            )
             result_text = outcome.for_model()
             encoded = result_text.encode("utf-8")
             if contract is not None and len(encoded) > contract.inline_result_bytes:

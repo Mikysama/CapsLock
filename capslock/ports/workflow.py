@@ -8,6 +8,7 @@ from ..domain import (
     AgentEvent,
     AgentEventKind,
     RunInfo,
+    RunKind,
     RunStepInfo,
     RunStepKind,
     RunStepStatus,
@@ -20,7 +21,8 @@ from ..domain import (
 
 class WorkflowPort(Protocol):
     async def enqueue(
-        self, session_id: str, question: str, *, parent_work_item_id: str | None = None
+        self, session_id: str, question: str, *, parent_work_item_id: str | None = None,
+        kind: RunKind = RunKind.AGENT,
     ) -> WorkItemInfo: ...
     async def prepare(
         self,
@@ -54,7 +56,8 @@ class WorkflowPort(Protocol):
 
 class WorkItemRepositoryPort(Protocol):
     async def enqueue(
-        self, session_id: str, question: str, *, parent_work_item_id: str | None = None
+        self, session_id: str, question: str, *, parent_work_item_id: str | None = None,
+        kind: RunKind = RunKind.AGENT,
     ) -> WorkItemInfo: ...
     async def require(self, item_id: str) -> WorkItemInfo: ...
     async def list(
@@ -128,6 +131,9 @@ class RunJournal(Protocol):
         arguments: dict[str, Any],
         status: str = "received",
     ) -> str: ...
+    async def tool_invocation_for_call(
+        self, run_id: str, tool_call_id: str
+    ) -> dict[str, Any] | None: ...
     async def update_tool_invocation(
         self,
         identifier: str,

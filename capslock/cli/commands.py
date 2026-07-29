@@ -92,6 +92,12 @@ COMMANDS = (
         "session",
         CommandAvailability.IDLE_ONLY,
     ),
+    _spec(
+        "/init",
+        "Analyze the repository and propose root CAPSLOCK.md",
+        group="workspace",
+        availability=CommandAvailability.IDLE_ONLY,
+    ),
     _spec("/status", "Show session, plan, queue, context, and usage"),
     _spec(
         "/resume",

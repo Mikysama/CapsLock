@@ -13,6 +13,7 @@ from ...collaboration.models import (
     VerificationRequirement,
     MailboxMessageKind,
 )
+from ...external import assess_prompt_injection
 from ..contracts import (
     ExecutionContext,
     InterruptBehavior,
@@ -112,6 +113,7 @@ def delegation_tool() -> ToolDefinition:
         policy=ResolvedToolPolicy(
             context_mutation=True,
             external_side_effects=True,
+            open_world=True,
             interrupt_behavior=InterruptBehavior.COMPLETE,
         ),
     )
@@ -184,7 +186,7 @@ def child_mailbox_tools(
             "Read new instructions, responses, or cancellation notices from the parent Agent.",
             {"type": "object", "properties": {}, "additionalProperties": False},
             read_parent_messages,
-            policy=ResolvedToolPolicy.safe_read(),
+            policy=ResolvedToolPolicy(read_only=True, open_world=True),
         ),
         define_tool(
             "send_parent_message",
@@ -264,8 +266,49 @@ async def _delegate(
         outputs = await service.delegate(contracts, background=background)
     except (KeyError, TypeError, ValueError, RuntimeError) as exc:
         return _outcome(False, {}, str(exc))
+    raw_tasks = [output.as_dict() for output in outputs]
+    model_tasks: list[dict[str, Any]] = []
+    for output, raw in zip(outputs, raw_tasks, strict=True):
+        assessment = assess_prompt_injection(output.summary)
+        if not assessment.suspicious:
+            model_tasks.append(raw)
+            continue
+        encoded = output.summary.encode("utf-8")
+        descriptor: dict[str, Any] = {
+            "quarantined": True,
+            "source": f"child_agent_summary:{output.task_id}",
+            "bytes": len(encoded),
+            "sha256": hashlib.sha256(encoded).hexdigest(),
+            "risk_signals": list(assessment.risk_signals),
+        }
+        if context.artifacts is None or context.invocation_id is None:
+            descriptor.update(
+                {"content_available": False, "error_code": "quarantine_unavailable"}
+            )
+        else:
+            try:
+                artifact = await context.artifacts.put(
+                    session_id=context.session_id,
+                    run_id=context.run_id,
+                    invocation_id=context.invocation_id,
+                    content=encoded,
+                    media_type="text/plain",
+                )
+            except Exception:
+                descriptor.update(
+                    {"content_available": False, "error_code": "quarantine_failed"}
+                )
+            else:
+                descriptor.update(
+                    {
+                        "artifact_id": artifact.id,
+                        "sha256": artifact.sha256,
+                        "read_with": "read_tool_artifact",
+                    }
+                )
+        model_tasks.append({**raw, "summary": descriptor})
     data = {
-        "tasks": [output.as_dict() for output in outputs],
+        "tasks": model_tasks,
         "background": background,
     }
     usage = {
@@ -281,6 +324,9 @@ async def _delegate(
     return _outcome(
         True,
         data,
+        content_trust="untrusted_agent",
+        content_source="child_agent_outputs",
+        audit_data={"tasks": raw_tasks, "background": background},
         event_data={
             "collaboration": {
                 "tasks": [
@@ -300,6 +346,7 @@ async def _delegate(
 def agent_control_tools() -> list[ToolDefinition]:
     safe_read = ResolvedToolPolicy(
         read_only=True,
+        open_world=True,
         interrupt_behavior=InterruptBehavior.CANCEL,
     )
     return [

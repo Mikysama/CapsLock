@@ -140,7 +140,8 @@ def test_parser_exposes_only_current_top_level_commands() -> None:
 def test_slash_command_catalog_has_no_removed_aliases() -> None:
     expected = {
         "/help",
-        "/plan",
+            "/plan",
+            "/init",
         "/status",
         "/resume",
         "/btw",

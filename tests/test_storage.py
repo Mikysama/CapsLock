@@ -264,7 +264,7 @@ def test_current_state_reopens_without_mutation(tmp_path: Path) -> None:
         try:
             workspace_version = (await workspace.fetch_one("PRAGMA user_version"))[0]
             memory_version = (await memory.fetch_one("PRAGMA user_version"))[0]
-            assert workspace_version == WORKSPACE_SCHEMA_VERSION == 14
+            assert workspace_version == WORKSPACE_SCHEMA_VERSION == 15
             assert memory_version == MEMORY_SCHEMA_VERSION == 4
         finally:
             await workspace.close()
@@ -332,7 +332,7 @@ PRAGMA user_version=10;
     async def upgrade() -> None:
         database = await WorkspaceDatabase.open(path)
         try:
-            assert (await database.fetch_one("PRAGMA user_version"))[0] == 14
+            assert (await database.fetch_one("PRAGMA user_version"))[0] == 15
             tables = {
                 row[0]
                 for row in await database.fetch_all(
@@ -398,7 +398,7 @@ PRAGMA user_version=11;
     async def upgrade() -> None:
         database = await WorkspaceDatabase.open(path)
         try:
-            assert (await database.fetch_one("PRAGMA user_version"))[0] == 14
+            assert (await database.fetch_one("PRAGMA user_version"))[0] == 15
             tables = {
                 row[0]
                 for row in await database.fetch_all(

@@ -345,7 +345,19 @@ def test_context_compaction_is_structured_and_reused(tmp_path: Path) -> None:
             )
             assert first.compaction_id == second.compaction_id
             assert len(summarizer.requests) == 1
-            assert "compaction-summary-json" in str(first.messages[0]["content"])
+            system_text = "\n".join(
+                str(item["content"])
+                for item in first.messages
+                if item["role"] == "system"
+            )
+            assert "compaction" not in system_text
+            compactions = [
+                item
+                for item in first.messages
+                if item["role"] == "user"
+                and '\"name\":\"compaction\"' in str(item["content"])
+            ]
+            assert len(compactions) == 1
         finally:
             await repositories.close()
 

@@ -33,6 +33,7 @@ from .plugins import PluginProcessClient, PluginRegistry
 from .lsp import LspManager
 from .mcp import McpManager
 from .runtime import AgentSession, AsyncOpenAIChatModel, ModelRouter
+from .runtime.agent import INSTRUCTIONS
 from .shell import ModelShellClassifier, SessionProcessManager
 from .skills import SkillRegistry, SkillService
 from .storage.memory_repositories import MemoryRepositories
@@ -109,6 +110,8 @@ class WorkspaceApplication:
         close_client: bool = True,
         extra_tools: list[Any] | None = None,
         plugin_registry_override: PluginRegistry | None = None,
+        core_instructions: str | None = None,
+        runtime_controls: tuple[str, ...] = (),
     ) -> "WorkspaceApplication":
         root = workspace.resolve()
         layout = layout or ProjectLayout.discover(root)
@@ -335,6 +338,8 @@ class WorkspaceApplication:
                 process_manager=process_manager,
                 max_read_concurrency=settings.tools.max_read_concurrency,
                 aggregate_result_bytes=settings.tools.aggregate_result_bytes,
+                core_instructions=core_instructions or INSTRUCTIONS,
+                runtime_controls=runtime_controls,
                 shell_classifier_factory=(
                     lambda model_session: (
                         ModelShellClassifier(

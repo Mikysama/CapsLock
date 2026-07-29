@@ -43,19 +43,21 @@ def web_tools():
     from ..contracts import ResolvedToolPolicy, define_tool
     from .schemas import _schema, _str
 
-    ResolvedToolPolicy.safe_read()
+    external_read = ResolvedToolPolicy(read_only=True, open_world=True)
     return [
         define_tool(
             "web_search",
             "Search the Web through the durable approval workflow.",
             _schema({"query": _str()}, ["query"]),
             web_search,
+            policy=external_read,
         ),
         define_tool(
             "web_fetch",
             "Fetch a public HTTP URL through the durable approval workflow.",
             _schema({"url": _str()}, ["url"]),
             web_fetch,
+            policy=external_read,
         ),
     ]
 

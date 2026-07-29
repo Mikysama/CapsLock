@@ -12,6 +12,7 @@ from ..domain import (
     ApprovalChoice,
     ApprovalDecision,
     AgentEvent,
+    RunKind,
     RunMode,
     WorkItemStatus,
 )
@@ -56,9 +57,18 @@ class SessionAdministration:
     async def delete_if_empty(self) -> bool:
         return await self.sessions.delete_if_empty(self.session_id)
 
-    async def enqueue(self, question: str, *, parent_work_item_id: str | None = None):
+    async def enqueue(
+        self,
+        question: str,
+        *,
+        parent_work_item_id: str | None = None,
+        kind: RunKind = RunKind.AGENT,
+    ):
         return await self.workflow.enqueue(
-            self.session_id, question, parent_work_item_id=parent_work_item_id
+            self.session_id,
+            question,
+            parent_work_item_id=parent_work_item_id,
+            kind=kind,
         )
 
 

@@ -17,6 +17,7 @@ from .model import (
 )
 from .routing import ModelRouter
 from .governance import RunGovernor
+from .prompts import PromptBundle, PromptSection, PromptTrust
 
 __all__ = [
     "AgentRuntimeError",
@@ -36,5 +37,8 @@ __all__ = [
     "RunEngine",
     "RunRequest",
     "MemoryRunMode",
+    "PromptBundle",
+    "PromptSection",
+    "PromptTrust",
     "open_model_session",
 ]

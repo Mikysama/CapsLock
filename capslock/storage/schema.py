@@ -2,7 +2,7 @@
 
 WORKSPACE_APPLICATION_ID = 0x434C4B32  # CLK2
 MEMORY_APPLICATION_ID = 0x434C4D32  # CLM2
-WORKSPACE_SCHEMA_VERSION = 14
+WORKSPACE_SCHEMA_VERSION = 15
 MEMORY_SCHEMA_VERSION = 4
 
 WORKSPACE_SCHEMA = """
@@ -45,7 +45,7 @@ CREATE TABLE work_items (
   id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
   question TEXT NOT NULL,
-  kind TEXT NOT NULL DEFAULT 'agent' CHECK(kind IN ('agent','local_command','side_question','session_seed')),
+  kind TEXT NOT NULL DEFAULT 'agent' CHECK(kind IN ('agent','init','local_command','side_question','session_seed')),
   status TEXT NOT NULL CHECK(status IN ('queued','running','waiting_approval','waiting_input','completed','failed','cancelled','interrupted','stopped')),
   position INTEGER NOT NULL CHECK(position>=0),
   parent_work_item_id TEXT REFERENCES work_items(id) ON DELETE SET NULL,
@@ -59,7 +59,7 @@ CREATE TABLE runs (
   session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
   work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE,
   question TEXT NOT NULL,
-  kind TEXT NOT NULL DEFAULT 'agent' CHECK(kind IN ('agent','local_command','side_question','session_seed')),
+  kind TEXT NOT NULL DEFAULT 'agent' CHECK(kind IN ('agent','init','local_command','side_question','session_seed')),
   status TEXT NOT NULL CHECK(status IN ('running','waiting_approval','waiting_input','completed','failed','cancelled','interrupted','stopped')),
   started_at TEXT NOT NULL,
   finished_at TEXT,

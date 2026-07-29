@@ -177,7 +177,7 @@ def mcp_resource_tools(manager: McpClientPort) -> list[ToolDefinition]:
             content=tuple(blocks),
         )
 
-    safe_read = ResolvedToolPolicy.safe_read()
+    safe_read = ResolvedToolPolicy(read_only=True, open_world=True)
     return [
         define_tool(
             "list_mcp_resources",

@@ -4,6 +4,27 @@
 
 ## [Unreleased]
 
+## [2.7.3] - 2026-07-29
+
+### Added
+
+- 新增统一提示词装配模块与 `core_policy`、`runtime_control`、`user_instruction`、`untrusted_data` 信任分类；`/context` 按来源展示 token 占用。
+- 新增 idle-only `/init` 初始化 run：受限分析仓库，只能经 Action 审批创建或最小编辑项目根目录 `CAPSLOCK.md`。
+- `ToolOutcome`、子 Agent 验证输出和协作交接新增内容信任、风险信号与验证范围元数据。
+
+### Security
+
+- 只有内置策略与运行时控制进入 system role；仓库指令以低权限用户上下文注入，Skill、memory、attachment、compaction 和外部结果始终标记为不可信数据。
+- 子 Agent 改用固定任务契约和结构化交接，父 Agent 仅自动接收路径、摘要哈希和检查状态等已验证事实，自由文本 summary 不再被视为语义可信。
+- Web、MCP、插件和 Agent 协作内容统一执行确定性提示词注入检测；可疑全文只写入只读 Artifact，模型仅收到来源、大小、SHA-256、风险信号和分段读取引用，Artifact 故障时 fail closed。
+- 恢复旧 checkpoint 时在内存中重建可信 core prompt，并将历史 compaction 规范化为不可信 user context，不改写历史数据库记录。
+
+### Compatibility
+
+- workspace schema 从 14 升至 15，增加 init run 类型；旧 workspace 使用 backup-first 迁移。
+- memory schema 4、portable archive 6、session export 6、config 9、permissions 2、JSONL schema 3、IDE Bridge protocol 1 和 plugin protocol 4 保持不变。
+- `AGENTS.md` 继续作为兼容输入读取；CapsLock 不会自动创建指令文件，只有显式 `/init` 经审批后生成 `CAPSLOCK.md`。
+
 ## [2.7.2] - 2026-07-28
 
 ### Changed

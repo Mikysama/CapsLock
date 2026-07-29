@@ -20,6 +20,10 @@ class TokenBreakdown:
     memory: int = 0
     tools: int = 0
     total: int = 0
+    core: int = 0
+    repository_instructions: int = 0
+    skills: int = 0
+    compaction: int = 0
 
     def as_dict(self) -> dict[str, int]:
         return {
@@ -29,6 +33,10 @@ class TokenBreakdown:
             "memory": self.memory,
             "tools": self.tools,
             "total": self.total,
+            "core": self.core or self.system,
+            "repository_instructions": self.repository_instructions,
+            "skills": self.skills,
+            "compaction": self.compaction,
         }
 
 

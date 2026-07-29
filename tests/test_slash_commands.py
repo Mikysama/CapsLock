@@ -25,6 +25,7 @@ from capslock.tooling import ExecutionContext, ToolOutcome, ToolRuntime, define_
 
 
 REQUIRED = {
+    "/init",
     "/resume",
     "/btw",
     "/compact",
@@ -80,6 +81,7 @@ def test_command_catalog_is_typed_and_has_no_new_aliases() -> None:
     assert all(item.usage and item.group and item.handler for item in COMMANDS)
     assert by_path["/btw"].availability is CommandAvailability.IMMEDIATE
     assert by_path["/resume"].availability is CommandAvailability.IDLE_ONLY
+    assert by_path["/init"].availability is CommandAvailability.IDLE_ONLY
 
 
 def test_inline_command_ui_renders_markdown() -> None:

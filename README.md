@@ -2,7 +2,7 @@
 
 CapsLock 是一个本机工作区 Agent，用于读取和修改代码、检索证据、运行受沙箱保护的 Shell、查询代码语义，以及按审批策略访问 Web、MCP 和本地插件。Tool Runtime v2 将工具契约、参数级策略、可恢复暂停、调度、富结果与审计统一到异步执行链。
 
-当前源码版本为 `2.7.2`。本版本同步升级 inline/fullscreen 的信息密度、context 状态、结构化选择与审批体验，并修复 resume 对话顺序和 Plan 上下文恢复。当前协议仍为 workspace schema 14、memory schema 4、portable archive 6、session export 6 和 config 9。完整边界见 [2.7.2 发布说明](docs/releases/v2.7.2.md)。
+当前源码版本为 `2.7.3`。本版本统一提示词信任边界，强化子 Agent 与开放世界内容隔离，并新增通过审批生成项目 `CAPSLOCK.md` 的 `/init`。当前协议为 workspace schema 15、memory schema 4、portable archive 6、session export 6 和 config 9。完整边界见 [2.7.3 发布说明](docs/releases/v2.7.3.md)。
 
 正式支持矩阵：Linux/macOS，Python 3.12。发布 CI 会在两个操作系统组合中执行测试、构建、依赖审计和安装冒烟。
 

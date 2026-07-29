@@ -8,6 +8,7 @@ from typing import Any
 from ..domain import (
     AgentEvent,
     AgentEventKind,
+    RunKind,
     RunInfo,
     RunStepInfo,
     WorkItemInfo,
@@ -43,13 +44,21 @@ class WorkflowService:
         self.unit_of_work = unit_of_work
 
     async def enqueue(
-        self, session_id: str, question: str, *, parent_work_item_id: str | None = None
+        self,
+        session_id: str,
+        question: str,
+        *,
+        parent_work_item_id: str | None = None,
+        kind: RunKind = RunKind.AGENT,
     ) -> WorkItemInfo:
         normalized = question.strip()
         if not normalized:
             raise ValueError("question must not be empty")
         return await self.work_items.enqueue(
-            session_id, normalized, parent_work_item_id=parent_work_item_id
+            session_id,
+            normalized,
+            parent_work_item_id=parent_work_item_id,
+            kind=kind,
         )
 
     async def prepare(
@@ -62,6 +71,7 @@ class WorkflowService:
     ) -> PreparedRun:
         checkpoint = None
         parent_work_item_id = None
+        work_kind = RunKind.AGENT
         if resume_from_run_id is not None:
             candidate = await self.runs.get(
                 resume_from_run_id, session_id=session_id
@@ -83,9 +93,13 @@ class WorkflowService:
             checkpoint = await self.journal.last_stable_step(parent.id)
             assert checkpoint is not None
             parent_work_item_id = parent.work_item_id
+            work_kind = parent.kind
         if work_item_id is None:
             work_item = await self.enqueue(
-                session_id, question, parent_work_item_id=parent_work_item_id
+                session_id,
+                question,
+                parent_work_item_id=parent_work_item_id,
+                kind=work_kind,
             )
         else:
             work_item = await self.work_items.require(work_item_id)

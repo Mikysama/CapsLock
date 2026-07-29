@@ -280,6 +280,8 @@ class CollaborationRepository(Repository):
             checks=tuple(value.get("checks", ())),
             usage=value.get("usage", {}),
             verified=bool(value.get("verified", False)),
+            content_trust=str(value.get("content_trust", "untrusted_agent")),
+            verification_scope=dict(value.get("verification_scope", {})),
             error=value.get("error"),
             memory_proposals=tuple(value.get("memory_proposals", ())),
         )

@@ -6,7 +6,7 @@ import asyncio
 import json
 import shlex
 
-from ..domain import ActionRecord, ActionStatus
+from ..domain import ActionRecord, ActionStatus, RunKind
 from ..layout import ProjectLayout
 from ..mcp import McpRegistry
 from ..permissions import PermissionMode
@@ -176,6 +176,13 @@ async def _resume_paused_action(context: CliContext, run_id: str):
         final_run_id = event.run_id
         if event.kind.value == "text_delta":
             context.console.print(str(event.data.get("text", "")), end="")
+    if run.kind is RunKind.INIT:
+        bundle = await asyncio.to_thread(
+            context.session.instruction_loader.load, context.session.workspace
+        )
+        context.console.print(
+            f"\n[success]Reloaded repository instructions:[/] {bundle.digest[:12]}"
+        )
     implementation_loader = getattr(
         context.session, "implementation_for_planning_run", None
     )

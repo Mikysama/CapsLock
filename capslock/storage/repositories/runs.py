@@ -53,7 +53,7 @@ class RunRepository(Repository):
     async def session_cost(self, session_id: str) -> tuple[int, int, float]:
         row = await self.one(
             """SELECT coalesce(sum(input_tokens),0),coalesce(sum(output_tokens),0),coalesce(sum(cost_usd),0)
-               FROM runs WHERE session_id=? AND kind IN ('agent','session_seed')""",
+               FROM runs WHERE session_id=? AND kind IN ('agent','init','session_seed')""",
             (session_id,),
         )
         return (int(row[0]), int(row[1]), float(row[2])) if row else (0, 0, 0.0)

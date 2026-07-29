@@ -20,9 +20,20 @@ class ToolInvocationJournalRepository:
             "run_id": str(row["run_id"]),
             "session_id": str(row["session_id"]),
             "name": str(row["name"]),
+            "tool_call_id": str(row["tool_call_id"]),
+            "resolved_policy": json.loads(row["resolved_policy_json"]),
             "arguments": json.loads(row["arguments_json"]),
             "status": str(row["status"]),
         }
+
+    async def tool_invocation_for_call(
+        self, run_id: str, tool_call_id: str
+    ) -> dict[str, Any] | None:
+        row = await self.one(
+            "SELECT id FROM tool_invocations WHERE run_id=? AND tool_call_id=?",
+            (run_id, tool_call_id),
+        )
+        return None if row is None else await self.tool_invocation(str(row["id"]))
 
     async def record_tool_discoveries(
         self, session_id: str, names: list[str], generation: int

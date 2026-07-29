@@ -291,6 +291,8 @@ class ValidatedAgentOutput:
     checks: tuple[dict[str, Any], ...] = ()
     usage: Mapping[str, int | float] = field(default_factory=dict)
     verified: bool = False
+    content_trust: str = "untrusted_agent"
+    verification_scope: Mapping[str, Any] = field(default_factory=dict)
     error: str | None = None
     memory_proposals: tuple[dict[str, Any], ...] = ()
 
@@ -304,6 +306,8 @@ class ValidatedAgentOutput:
             "checks": list(self.checks),
             "usage": dict(self.usage),
             "verified": self.verified,
+            "content_trust": self.content_trust,
+            "verification_scope": dict(self.verification_scope),
             "error": self.error,
             "memory_proposals": list(self.memory_proposals),
         }

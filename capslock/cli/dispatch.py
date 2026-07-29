@@ -338,6 +338,7 @@ async def _queue(context: CliContext, parts: list[str]) -> None:
 from .command_handlers import (  # noqa: E402
     context as context_handlers,
     diagnostics as diagnostic_handlers,
+    init as init_handlers,
     rewind as rewind_handlers,
     session as session_handlers,
     worktree as worktree_handlers,
@@ -365,6 +366,7 @@ for _path in (
     register_handler(_path, _builtin)
 for _path, _handler in {
     "/resume": session_handlers.resume,
+    "/init": init_handlers.initialize,
     "/btw": session_handlers.btw,
     "/compact": session_handlers.compact,
     "/new": session_handlers.new_session,

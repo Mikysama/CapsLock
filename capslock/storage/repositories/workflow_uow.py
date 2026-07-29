@@ -61,14 +61,15 @@ class WorkflowUnitOfWork(Repository):
                 )
             await connection.execute(
                 """INSERT INTO runs(
-                       id,session_id,work_item_id,question,status,started_at,
+                       id,session_id,work_item_id,question,kind,status,started_at,
                        parent_run_id,resume_from_step_id
-                   ) VALUES(?,?,?,?,'running',?,?,?)""",
+                   ) VALUES(?,?,?,?,(SELECT kind FROM work_items WHERE id=?),'running',?,?,?)""",
                 (
                     identifier,
                     session_id,
                     work_item_id,
                     question,
+                    work_item_id,
                     started,
                     parent_run_id,
                     resume_from_step_id,

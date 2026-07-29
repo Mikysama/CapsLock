@@ -44,6 +44,13 @@ class AgentOutputVerifier:
             checks=tuple(checks),
             usage=usage,
             verified=True,
+            verification_scope={
+                "schema": True,
+                "paths": True,
+                "sha256": True,
+                "required_checks": True,
+                "summary_semantics": False,
+            },
             memory_proposals=tuple(proposals),
         )
 
@@ -53,6 +60,13 @@ class AgentOutputVerifier:
             state=AgentTaskState.FAILED,
             summary="",
             verified=False,
+            verification_scope={
+                "schema": False,
+                "paths": False,
+                "sha256": False,
+                "required_checks": False,
+                "summary_semantics": False,
+            },
             error=error,
         )
 

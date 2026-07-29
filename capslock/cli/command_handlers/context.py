@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 
 from ...storage.repositories.core import now
+from ...runtime.prompts import PromptSection, PromptTrust
 from ..commands import CommandOutcome
 from .support import get_repositories, get_ui
 
@@ -18,23 +19,44 @@ async def context_info(context, parts: list[str], raw: str) -> CommandOutcome:
     if active is not None and active.last_message_id is not None:
         entries = [item for item in entries if int(item["id"]) > active.last_message_id]
     manager = context.session.context_budget
+    bundle = await context.session._prompt_bundle()
+    if active is not None:
+        bundle = bundle.add(
+            PromptSection(
+                "compaction",
+                f"compaction:{active.id}",
+                PromptTrust.UNTRUSTED_DATA,
+                str(active.summary),
+                "Active structured conversation summary.",
+            )
+        )
     messages = [
-        {"role": "system", "content": await context.session._instructions()},
+        *bundle.render(),
         *({"role": item["role"], "content": item["content"]} for item in entries),
     ]
-    breakdown = manager.breakdown(messages)
+    breakdown = manager.breakdown(messages, bundle)
     message_tokens = breakdown.history
     system_tokens = breakdown.system
     tool_tokens = breakdown.tools
-    compaction_tokens = manager.estimator.estimate(active.summary) if active else 0
-    total = system_tokens + tool_tokens + message_tokens + compaction_tokens
+    compaction_tokens = breakdown.compaction
+    total = breakdown.total
     budget = context.session.context_budget.input_budget
     trigger = int(budget * context.session.context_budget.settings.trigger_ratio)
     live = " live stable snapshot" if context.session.engine.active else ""
     lines = [
         f"Total: {total}/{budget} tokens ({total / budget:.1%}){live}",
         f"Auto-compact threshold: {trigger} ({context.session.context_budget.settings.trigger_ratio:.0%})",
-        f"System {system_tokens}; tools {tool_tokens}; messages {message_tokens}; memory 0; compaction summary {compaction_tokens}",
+        "Core {core}; repository instructions {repo}; skills {skills}; memory {memory}; "
+        "attachments {attachments}; compaction {compaction}; history {history}; tools {tools}".format(
+            core=breakdown.core,
+            repo=breakdown.repository_instructions,
+            skills=breakdown.skills,
+            memory=breakdown.memory,
+            attachments=breakdown.attachments,
+            compaction=breakdown.compaction,
+            history=breakdown.history,
+            tools=breakdown.tools,
+        ),
         f"Estimator: {manager.estimator.strategy} ratio {manager.estimator.ratio:.3f}; "
         f"samples {manager.estimator.samples}; safety margin "
         f"{manager.estimator.safety_margin:.0%}",

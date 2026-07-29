@@ -19,7 +19,7 @@ async def upgrade_workspace_schema(
     if source_version is None:
         row = await (await connection.execute("PRAGMA user_version")).fetchone()
         source_version = int(row[0])
-    if source_version not in {6, 7, 8, 9, 10, 11, 12, 13}:
+    if source_version not in {6, 7, 8, 9, 10, 11, 12, 13, 14}:
         raise ValueError(f"unsupported workspace upgrade source: {source_version}")
     checkpoint = await connection.execute("PRAGMA wal_checkpoint(FULL)")
     await checkpoint.close()
@@ -49,7 +49,9 @@ async def upgrade_workspace_schema(
             await connection.executescript(_UPGRADE_WORKSPACE_TWELVE)
         if source_version in {6, 7, 8, 9, 10, 11, 12}:
             await connection.executescript(_UPGRADE_WORKSPACE_THIRTEEN)
-        await connection.executescript(_UPGRADE_WORKSPACE_FOURTEEN)
+        if source_version in {6, 7, 8, 9, 10, 11, 12, 13}:
+            await connection.executescript(_UPGRADE_WORKSPACE_FOURTEEN)
+        await connection.executescript(_UPGRADE_WORKSPACE_FIFTEEN)
     except BaseException:
         await connection.rollback()
         raise
@@ -659,6 +661,58 @@ CREATE TABLE IF NOT EXISTS agent_mailbox (
 CREATE INDEX IF NOT EXISTS idx_agent_mailbox_delivery ON agent_mailbox(task_id,recipient,status,created_at);
 PRAGMA user_version=14;
 COMMIT;
+"""
+
+
+_UPGRADE_WORKSPACE_FIFTEEN = """
+PRAGMA foreign_keys=OFF;
+PRAGMA legacy_alter_table=ON;
+BEGIN IMMEDIATE;
+ALTER TABLE work_items RENAME TO work_items_v14;
+CREATE TABLE work_items (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  question TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'agent' CHECK(kind IN ('agent','init','local_command','side_question','session_seed')),
+  status TEXT NOT NULL CHECK(status IN ('queued','running','waiting_approval','waiting_input','completed','failed','cancelled','interrupted','stopped')),
+  position INTEGER NOT NULL CHECK(position>=0),
+  parent_work_item_id TEXT REFERENCES work_items(id) ON DELETE SET NULL,
+  error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+) STRICT;
+INSERT INTO work_items SELECT * FROM work_items_v14;
+DROP TABLE work_items_v14;
+CREATE INDEX idx_work_items_session_position ON work_items(session_id,status,position);
+
+ALTER TABLE runs RENAME TO runs_v14;
+CREATE TABLE runs (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE,
+  question TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'agent' CHECK(kind IN ('agent','init','local_command','side_question','session_seed')),
+  status TEXT NOT NULL CHECK(status IN ('running','waiting_approval','waiting_input','completed','failed','cancelled','interrupted','stopped')),
+  started_at TEXT NOT NULL,
+  finished_at TEXT,
+  duration_ms INTEGER CHECK(duration_ms IS NULL OR duration_ms>=0),
+  input_tokens INTEGER NOT NULL DEFAULT 0 CHECK(input_tokens>=0),
+  output_tokens INTEGER NOT NULL DEFAULT 0 CHECK(output_tokens>=0),
+  cost_usd REAL NOT NULL DEFAULT 0 CHECK(cost_usd>=0),
+  error_code TEXT,
+  error_message TEXT,
+  parent_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+  resume_from_step_id TEXT,
+  stop_reason TEXT CHECK(stop_reason IS NULL OR stop_reason IN ('max_tool_rounds','max_tool_calls','max_duration','max_tokens','max_budget_usd','repeated_tool_call'))
+) STRICT;
+INSERT INTO runs SELECT * FROM runs_v14;
+DROP TABLE runs_v14;
+CREATE INDEX idx_runs_session_started ON runs(session_id,started_at);
+CREATE INDEX idx_runs_work_item ON runs(work_item_id,started_at);
+PRAGMA user_version=15;
+COMMIT;
+PRAGMA legacy_alter_table=OFF;
+PRAGMA foreign_keys=ON;
 """
 
 

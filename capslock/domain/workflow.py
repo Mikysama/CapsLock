@@ -21,6 +21,7 @@ class WorkItemStatus(StrEnum):
 
 class RunKind(StrEnum):
     AGENT = "agent"
+    INIT = "init"
     LOCAL_COMMAND = "local_command"
     SIDE_QUESTION = "side_question"
     SESSION_SEED = "session_seed"

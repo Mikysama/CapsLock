@@ -234,6 +234,10 @@ class ToolOutcome:
     event_data: dict[str, object] | None = None
     external_usage: dict[str, int | float] | None = None
     delivery_status: DeliveryStatus = DeliveryStatus.INLINE
+    content_trust: str = "tool_data"
+    content_source: str | None = None
+    suspicious: bool = False
+    risk_signals: tuple[str, ...] = ()
 
     @property
     def ok(self) -> bool:
@@ -276,6 +280,10 @@ class ToolOutcome:
                 "content": [item.summary_dict() for item in self.content],
                 "error": self.error,
                 "error_code": self.error_code,
+                "content_trust": self.content_trust,
+                "content_source": self.content_source,
+                "suspicious": self.suspicious,
+                "risk_signals": list(self.risk_signals),
             },
             ensure_ascii=False,
             default=str,
@@ -290,6 +298,10 @@ class ToolOutcome:
                 "data": data,
                 "error": self.error,
                 "error_code": self.error_code,
+                "content_trust": self.content_trust,
+                "content_source": self.content_source,
+                "suspicious": self.suspicious,
+                "risk_signals": list(self.risk_signals),
             },
             ensure_ascii=False,
             default=str,

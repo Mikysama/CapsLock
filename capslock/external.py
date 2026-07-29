@@ -5,15 +5,47 @@ from __future__ import annotations
 import ipaddress
 import re
 import socket
+import json
+from dataclasses import dataclass
 from html.parser import HTMLParser
 from urllib.parse import urlparse
 
 from .policy import PolicyError
 
 TAVILY_SEARCH_URL = "https://api.tavily.com/search"
-_INJECTION = re.compile(
-    r"(?i)(ignore (?:all )?(?:previous )?instructions|system prompt|you are now|tool[_ ]?call|assistant message)"
-)
+_INJECTION_SIGNALS = {
+    "instruction_override": re.compile(
+        r"(?i)\b(ignore|disregard|override|forget)\b.{0,48}\b(previous|prior|system|developer|instructions?|rules?|policy)\b"
+    ),
+    "role_impersonation": re.compile(
+        r"(?i)(you are now|act as (?:the )?(?:system|developer|assistant)|assistant message|developer message|system prompt)"
+    ),
+    "tool_coercion": re.compile(
+        r"(?i)(tool[_ ]?call|call (?:the )?tool|execute (?:this )?(?:command|code)|use (?:your )?tools? to)"
+    ),
+    "delimiter_spoofing": re.compile(
+        r"(?i)</?(?:system|developer|assistant|tool|repository-instructions|untrusted-context)[^>]*>"
+    ),
+    "secret_exfiltration": re.compile(
+        r"(?i)(reveal|print|send|upload|exfiltrat).{0,48}(secret|token|password|credential|api[_ -]?key|system prompt)"
+    ),
+}
+
+
+@dataclass(frozen=True)
+class PromptInjectionAssessment:
+    suspicious: bool
+    risk_signals: tuple[str, ...] = ()
+
+
+def assess_prompt_injection(value: object) -> PromptInjectionAssessment:
+    text = value if isinstance(value, str) else json.dumps(
+        value, ensure_ascii=False, default=str, sort_keys=True
+    )
+    signals = tuple(
+        name for name, pattern in _INJECTION_SIGNALS.items() if pattern.search(text)
+    )
+    return PromptInjectionAssessment(bool(signals), signals)
 
 
 class _TextExtractor(HTMLParser):
@@ -42,7 +74,7 @@ def extract_text(body: str) -> str:
 
 
 def is_suspicious(text: str) -> bool:
-    return bool(_INJECTION.search(text))
+    return assess_prompt_injection(text).suspicious
 
 
 def validate_public_url(url: str, resolver=socket.getaddrinfo) -> str:
