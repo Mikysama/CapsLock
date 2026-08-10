@@ -4,6 +4,22 @@
 
 ## [Unreleased]
 
+## [2.7.5] - 2026-08-10
+
+### Added
+
+- Tool Runtime 增加一次受控参数修复、`execution_state`、工具候选 shadow 评估、provider strict function calling 与全部内置工具输出契约。
+
+### Fixed
+
+- 修复并发 tool attempt 状态错配与额度竞争；动态工具目录刷新失败继续使用 last-known-good snapshot，写型 MCP 断线不再自动 replay。
+- Agent eval 现在拒绝缺失测试场景并真实测量 live 工具选择和首次 Schema 通过率。
+- 修复 workspace v14→v15 迁移按物理列顺序复制 `work_items` 与 `runs`，导致已有数据的 `position` 错位并阻止启动的问题。
+
+### Compatibility
+
+- 保留现有工具名、`executed` 字段和 Python Tool API；workspace schema 16 与其他数据协议不变，config 9 backup-first 自动迁移到 config 10。
+
 ## [2.7.4] - 2026-08-10
 
 ### Added

@@ -161,6 +161,7 @@ class AgentSession:
         process_manager: Any = None,
         max_read_concurrency: int = 4,
         aggregate_result_bytes: int = 65_536,
+        max_argument_repair_attempts: int = 1,
         shell_classifier_factory: Callable[[Any], Any] | None = None,
         document_settings: Any = None,
         planning: Any = None,
@@ -211,6 +212,7 @@ class AgentSession:
         self.max_tool_rounds = max_tool_rounds
         self.max_read_concurrency = max_read_concurrency
         self.aggregate_result_bytes = aggregate_result_bytes
+        self.max_argument_repair_attempts = max_argument_repair_attempts
         self.input_cost = input_cost_per_million
         self.output_cost = output_cost_per_million
         self.default_limits = RunLimits(
@@ -250,6 +252,7 @@ class AgentSession:
             context_factory=self._run_context,
             max_read_concurrency=max_read_concurrency,
             aggregate_result_bytes=aggregate_result_bytes,
+            max_argument_repair_attempts=max_argument_repair_attempts,
         )
         self.run_orchestrator = RunOrchestrator(
             governance=governance,
@@ -470,6 +473,7 @@ class AgentSession:
                 context_factory=self._run_context,
                 max_read_concurrency=self.max_read_concurrency,
                 aggregate_result_bytes=self.aggregate_result_bytes,
+                max_argument_repair_attempts=self.max_argument_repair_attempts,
             )
             if is_init
             else self.tool_loop
@@ -535,11 +539,16 @@ class AgentSession:
             checkpoint_recalls: list[Any] = []
             self.context_budget.tool_schemas = active_tools.schemas
             if checkpoint:
-                if self.memory is not None and memory_mode is MemoryRunMode.DEFAULT and not is_init:
+                if (
+                    self.memory is not None
+                    and memory_mode is MemoryRunMode.DEFAULT
+                    and not is_init
+                ):
                     try:
-                        memory_context, checkpoint_recalls = await self.memory.recall_context(
-                            prompt, run_id=run_id
-                        )
+                        (
+                            memory_context,
+                            checkpoint_recalls,
+                        ) = await self.memory.recall_context(prompt, run_id=run_id)
                     except Exception:
                         memory_context, checkpoint_recalls = "", []
                     if memory_context:
@@ -771,9 +780,7 @@ class AgentSession:
                         "score": hit.score,
                         "reasons": list(hit.reasons),
                     }
-                    for hit in (
-                        active_recalls
-                    )
+                    for hit in (active_recalls)
                 ],
                 action_ids=[item.id for item in pending],
                 child_tasks=child_waiting,
@@ -1151,9 +1158,7 @@ class AgentSession:
             catalog=self._active_tools,
             discoveries=self.journal,
             shell_classifier=classifier,
-            planning=(
-                None if self._active_init_run_id == run_id else self.planning
-            ),
+            planning=(None if self._active_init_run_id == run_id else self.planning),
         )
         context.runtime_state["document_settings"] = self.document_settings
         if self.episodic is not None:

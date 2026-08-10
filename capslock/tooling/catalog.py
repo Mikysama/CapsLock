@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import inspect
 import json
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from typing import Any
 
 from .contracts import PlanToolVisibility, ToolContract, ToolDefinition
@@ -34,6 +36,7 @@ class ToolCatalog:
         self._discovered: set[str] = set()
         self._dynamic_provider: Any = None
         self._dynamic_names: set[str] = set()
+        self._refresh_diagnostics: list[dict[str, str]] = []
         self._replace(tools, increment=False)
 
     def _replace(
@@ -75,14 +78,36 @@ class ToolCatalog:
             for name, tool in self._tools.items()
             if name not in self._dynamic_names
         ]
-        dynamic = self._dynamic_provider()
-        if inspect.isawaitable(dynamic):
-            dynamic = await dynamic
-        values = tuple(dynamic)
-        self._dynamic_names = {item.name for item in values}
-        self._replace([*current, *values])
+        try:
+            dynamic = self._dynamic_provider()
+            if inspect.isawaitable(dynamic):
+                dynamic = await dynamic
+            values = tuple(dynamic)
+            dynamic_names = {item.name for item in values}
+            self._replace([*current, *values])
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._refresh_diagnostics.append(
+                {
+                    "code": "catalog_refresh_failed",
+                    "error": str(exc) or type(exc).__name__,
+                    "error_type": type(exc).__name__,
+                }
+            )
+            return self.snapshot()
+        self._dynamic_names = dynamic_names
         self._discovered.intersection_update(self._tools)
         return self.snapshot()
+
+    @property
+    def refresh_diagnostics(self) -> tuple[dict[str, str], ...]:
+        return tuple(self._refresh_diagnostics)
+
+    def pop_refresh_diagnostics(self) -> tuple[dict[str, str], ...]:
+        values = tuple(self._refresh_diagnostics)
+        self._refresh_diagnostics.clear()
+        return values
 
     def combined(self, tools: Iterable[ToolDefinition]) -> "ToolCatalog":
         return ToolCatalog(
@@ -147,6 +172,91 @@ class ToolCatalog:
             for _, name in sorted(scored, key=lambda item: (-item[0], item[1]))[:limit]
         )
         return self.discover(selected)
+
+    def candidates(
+        self,
+        query: str,
+        limit: int = 3,
+        *,
+        deferred_only: bool = False,
+        plan_visible_only: bool = False,
+    ) -> tuple[str, ...]:
+        normalized = query.casefold().strip()
+        terms = tuple(item for item in normalized.replace("__", " ").split() if item)
+        scored: list[tuple[float, str]] = []
+        for name, tool in self._tools.items():
+            if deferred_only and not tool.contract.deferred:
+                continue
+            if (
+                plan_visible_only
+                and tool.contract.plan_visibility is not PlanToolVisibility.LOCAL_READ
+            ):
+                continue
+            metadata = (
+                name,
+                *tool.contract.aliases,
+                *tool.contract.intent_tags,
+                tool.contract.tool_group or "",
+                tool.contract.search_hint or "",
+                tool.contract.description,
+                *(
+                    str(item)
+                    for item in tool.contract.input_schema.get("properties", {})
+                ),
+            )
+            haystack = " ".join(metadata).casefold()
+            lexical = sum(
+                6 if term in name.casefold() else 2
+                for term in terms
+                if term in haystack
+            )
+            similarity = max(
+                (
+                    SequenceMatcher(None, normalized, item.casefold()).ratio()
+                    for item in metadata
+                    if item
+                ),
+                default=0.0,
+            )
+            score = float(lexical) + similarity
+            if lexical or similarity >= 0.35:
+                scored.append((score, name))
+        return tuple(
+            name
+            for _, name in sorted(scored, key=lambda item: (-item[0], item[1]))[
+                : max(1, limit)
+            ]
+        )
+
+    def selected_names(
+        self,
+        query: str,
+        *,
+        limit: int = 12,
+        planning: bool = False,
+    ) -> tuple[str, ...]:
+        always = {"search_tools", "ask_user"}
+        if planning:
+            always.update({"get_plan", "update_plan", "submit_plan"})
+        ranked = self.candidates(
+            query,
+            max(limit, 1),
+            plan_visible_only=planning,
+        )
+        selected = [name for name in sorted(always) if name in self._tools]
+        for name in ranked:
+            if name not in selected:
+                selected.append(name)
+            if len(selected) >= limit:
+                break
+        return tuple(selected)
+
+    def schemas_for(
+        self, names: Iterable[str], *, planning: bool = False
+    ) -> list[dict[str, object]]:
+        allowed = set(names)
+        source = self.plan_schemas if planning else self.schemas
+        return [item for item in source if item["function"]["name"] in allowed]
 
     def snapshot(self) -> ToolCatalogSnapshot:
         selected: list[ToolDefinition] = []

@@ -15,6 +15,7 @@ from .contracts import (
     ToolDefinition,
     ToolEvent,
     ToolEventKind,
+    ToolExecutionState,
     ToolExecution,
     ToolInvocationResult,
     ToolMiddleware,
@@ -22,9 +23,10 @@ from .contracts import (
     ToolOutcomeStatus,
     ToolPause,
     ToolReporter,
+    ToolSelectionMode,
     null_reporter,
 )
-from .schema import SchemaValidationError, compile_json_schema
+from .schema import SchemaValidationError, compile_json_schema, strip_optional_nulls
 
 
 class ToolExecutor:
@@ -42,9 +44,11 @@ class ToolExecutor:
         tool = self.catalog._tools.get(name)
         if tool is None:
             raise SchemaValidationError(f"unsupported tool: {name}")
-        compile_json_schema(tool.contract.input_schema).validate(arguments)
-        await tool.validate(arguments, context)
-        return await tool.resolve_policy(arguments, context)
+        normalized = strip_optional_nulls(arguments, tool.contract.input_schema)
+        assert isinstance(normalized, dict)
+        compile_json_schema(tool.contract.input_schema).validate(normalized)
+        await tool.validate(normalized, context)
+        return await tool.resolve_policy(normalized, context)
 
     async def invoke(
         self,
@@ -55,9 +59,19 @@ class ToolExecutor:
     ) -> ToolInvocationResult:
         tool = self.catalog._tools.get(name)
         if tool is None:
+            suggestions = list(self.catalog.candidates(name, 3))
             return ToolInvocationResult(
                 ToolOutcome.failure(
-                    f"unsupported tool: {name}", code="unsupported_tool"
+                    f"unsupported tool: {name}",
+                    code="unsupported_tool",
+                    data={
+                        "path": "$.name",
+                        "expected": "registered tool name",
+                        "received_type": "string",
+                        "retryable": bool(suggestions),
+                        "suggested_tools": suggestions,
+                        "repair_attempt": 0,
+                    },
                 ),
                 arguments,
                 ResolvedToolPolicy(),
@@ -66,11 +80,15 @@ class ToolExecutor:
         normalized = dict(arguments)
         timings: dict[str, int] = {}
         policy = ResolvedToolPolicy()
+        execution_started = False
         context.event("tool_started", name=name)
         started = time.monotonic()
         try:
             phase = time.monotonic()
             await reporter(ToolEvent(ToolEventKind.PHASE, {"phase": "validating"}))
+            stripped = strip_optional_nulls(normalized, tool.contract.input_schema)
+            assert isinstance(stripped, dict)
+            normalized = stripped
             for item in self.middleware:
                 normalized = await item.normalize(tool, normalized, context)
             compile_json_schema(tool.contract.input_schema).validate(normalized)
@@ -101,6 +119,8 @@ class ToolExecutor:
                 phase = time.monotonic()
                 await reporter(ToolEvent(ToolEventKind.PHASE, {"phase": "running"}))
                 import asyncio
+
+                execution_started = True
 
                 async def execute_tool() -> ToolExecution:
                     invocation = tool.execute(context, normalized, reporter)
@@ -153,15 +173,57 @@ class ToolExecutor:
             for item in reversed(self.middleware):
                 outcome = await item.after(tool, normalized, policy, outcome, context)
         except TimeoutError:
+            uncertain = execution_started and (
+                policy.external_side_effects
+                or policy.destructive
+                or policy.context_mutation
+            )
             outcome = ToolOutcome.failure(
-                "tool execution timed out", code="tool_timeout", executed=False
+                "tool execution timed out",
+                code="unknown_execution" if uncertain else "tool_timeout",
+                executed=False,
+                execution_state=(
+                    ToolExecutionState.UNKNOWN
+                    if uncertain
+                    else ToolExecutionState.NOT_STARTED
+                ),
+                data={
+                    "path": "$",
+                    "expected": "tool completion before timeout",
+                    "received_type": "timeout",
+                    "retryable": False,
+                    "suggested_tools": [],
+                    "repair_attempt": 0,
+                },
             )
         except SchemaValidationError as exc:
-            outcome = ToolOutcome.failure(str(exc), code=exc.code)
+            outcome = ToolOutcome.failure(str(exc), code=exc.code, data=exc.detail())
         except Exception as exc:
+            uncertain = execution_started and (
+                policy.external_side_effects
+                or policy.destructive
+                or policy.context_mutation
+            )
             outcome = ToolOutcome.failure(
                 str(exc) or type(exc).__name__,
-                code=getattr(exc, "code", type(exc).__name__),
+                code=(
+                    "unknown_execution"
+                    if uncertain
+                    else getattr(exc, "code", type(exc).__name__)
+                ),
+                execution_state=(
+                    ToolExecutionState.UNKNOWN
+                    if uncertain
+                    else ToolExecutionState.NOT_STARTED
+                ),
+                data={
+                    "path": "$",
+                    "expected": "successful tool execution",
+                    "received_type": type(exc).__name__,
+                    "retryable": False,
+                    "suggested_tools": [],
+                    "repair_attempt": 0,
+                },
             )
         duration = round((time.monotonic() - started) * 1000)
         timings["total"] = duration
@@ -199,6 +261,9 @@ class ToolExecutor:
             )
         started = time.monotonic()
         normalized = dict(arguments)
+        stripped = strip_optional_nulls(normalized, tool.contract.input_schema)
+        assert isinstance(stripped, dict)
+        normalized = stripped
         for item in self.middleware:
             normalized = await item.normalize(tool, normalized, context)
         compile_json_schema(tool.contract.input_schema).validate(normalized)
@@ -223,9 +288,7 @@ class ToolExecutor:
                     {"resume": round((time.monotonic() - started) * 1000)},
                 )
         policy = await tool.resolve_policy(normalized, context)
-        execution = await tool.resume(
-            context, normalized, pause, response, reporter
-        )
+        execution = await tool.resume(context, normalized, pause, response, reporter)
         return ToolInvocationResult(
             execution,
             normalized,
@@ -243,9 +306,13 @@ class ToolRuntime:
         *,
         schema_budget_tokens: int = 8_000,
         middleware: Iterable[ToolMiddleware] = (),
+        selection_mode: ToolSelectionMode | str = ToolSelectionMode.SHADOW,
+        selection_limit: int = 12,
     ) -> None:
         self.catalog = ToolCatalog(tools, schema_budget_tokens=schema_budget_tokens)
         self.executor = ToolExecutor(self.catalog, middleware)
+        self.selection_mode = ToolSelectionMode(selection_mode)
+        self.selection_limit = max(3, selection_limit)
 
     @classmethod
     def from_catalog(
@@ -254,6 +321,8 @@ class ToolRuntime:
         runtime = cls.__new__(cls)
         runtime.catalog = catalog
         runtime.executor = ToolExecutor(catalog, middleware)
+        runtime.selection_mode = ToolSelectionMode.SHADOW
+        runtime.selection_limit = 12
         return runtime
 
     @property
@@ -287,9 +356,23 @@ class ToolRuntime:
     def search(
         self, query: str, limit: int = 5, *, plan_visible_only: bool = False
     ) -> tuple[str, ...]:
-        return self.catalog.search(
-            query, limit, plan_visible_only=plan_visible_only
+        return self.catalog.search(query, limit, plan_visible_only=plan_visible_only)
+
+    def candidates(self, query: str, limit: int = 3) -> tuple[str, ...]:
+        return self.catalog.candidates(query, limit)
+
+    def model_schemas(
+        self, query: str, *, planning: bool = False
+    ) -> tuple[list[dict[str, object]], tuple[str, ...]]:
+        selected = self.catalog.selected_names(
+            query,
+            limit=self.selection_limit,
+            planning=planning,
         )
+        all_schemas = self.plan_schemas if planning else self.schemas
+        if self.selection_mode is ToolSelectionMode.FILTERED:
+            return self.catalog.schemas_for(selected, planning=planning), selected
+        return all_schemas, selected
 
     def configure_dynamic(
         self, provider, initial: Iterable[ToolDefinition] = ()
@@ -299,11 +382,16 @@ class ToolRuntime:
     async def refresh_dynamic(self) -> ToolCatalogSnapshot:
         return await self.catalog.refresh_dynamic()
 
+    def pop_refresh_diagnostics(self) -> tuple[dict[str, str], ...]:
+        return self.catalog.pop_refresh_diagnostics()
+
     def combined(self, tools: Iterable[ToolDefinition]) -> "ToolRuntime":
         return ToolRuntime(
             [*self.catalog._tools.values(), *tools],
             schema_budget_tokens=self.catalog.schema_budget_tokens,
             middleware=self.middleware,
+            selection_mode=self.selection_mode,
+            selection_limit=self.selection_limit,
         )
 
     def filtered(self, names: set[str]) -> "ToolRuntime":
@@ -311,6 +399,8 @@ class ToolRuntime:
             [tool for name, tool in self.catalog._tools.items() if name in names],
             schema_budget_tokens=self.catalog.schema_budget_tokens,
             middleware=self.middleware,
+            selection_mode=self.selection_mode,
+            selection_limit=self.selection_limit,
         )
 
     async def resolve(

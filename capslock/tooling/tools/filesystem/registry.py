@@ -32,14 +32,14 @@ def filesystem_tools():
         ),
         define_tool(
             "list_files",
-            "List readable workspace files.",
+            "List entries under one workspace directory. Use for directory browsing; do not use for filename patterns or text search. `path` is workspace-relative.",
             _schema({"path": _str(), "pattern": _str()}, ["path"]),
             list_files,
             policy=safe_read,
         ),
         define_tool(
             "glob_files",
-            "Find workspace files by path glob with stable ordering and truncation metadata.",
+            "Find workspace paths by glob pattern. Use for filename/path patterns; do not use to search file contents.",
             _schema(
                 {
                     "pattern": _str(),
@@ -54,7 +54,7 @@ def filesystem_tools():
         ),
         define_tool(
             "read_file",
-            "Read a UTF-8 workspace file with evidence.",
+            "Read one known UTF-8 workspace file with evidence. Use after locating a path; do not use for discovery or binary images.",
             _schema(
                 {"path": _str(), "start_line": _int(), "end_line": _int()}, ["path"]
             ),
@@ -76,7 +76,10 @@ def filesystem_tools():
                     "query": _str(),
                     "kinds": {
                         "type": "array",
-                        "items": {"type": "string", "enum": ["message", "tool_result", "artifact"]},
+                        "items": {
+                            "type": "string",
+                            "enum": ["message", "tool_result", "artifact"],
+                        },
                         "uniqueItems": True,
                     },
                     "limit": {"type": "integer", "minimum": 1, "maximum": 20},
@@ -103,7 +106,7 @@ def filesystem_tools():
         ),
         define_tool(
             "search_files",
-            "Search readable workspace text and return evidence.",
+            "Search text inside readable workspace files and return evidence. Use for content queries; use glob_files for path patterns.",
             _schema(
                 {
                     "path": _str(),
@@ -119,7 +122,7 @@ def filesystem_tools():
         ),
         define_tool(
             "edit_file",
-            "Apply an exact text replacement through the durable approval workflow.",
+            "Replace one exact, unique text fragment through durable approval. Use for focused edits after read_file; do not use for whole-file rewrites.",
             _schema(
                 {
                     "path": _str(),
@@ -133,7 +136,7 @@ def filesystem_tools():
         ),
         define_tool(
             "create_file",
-            "Create a text file through the durable approval workflow.",
+            "Create a new text file through durable approval. Use only when the path does not exist; use edit_file or write_file for existing files.",
             _schema(
                 {"path": _str(), "content": _str(), "summary": _str()},
                 ["path", "content"],
@@ -142,7 +145,7 @@ def filesystem_tools():
         ),
         define_tool(
             "write_file",
-            "Write complete text content with a required read hash precondition through the durable Action workflow.",
+            "Replace complete file content using a read SHA-256 precondition. Use only for intentional whole-file rewrites after read_file; prefer edit_file for focused changes.",
             _schema(
                 {
                     "path": _str(),

@@ -4,7 +4,7 @@
 
 ## 稳定契约
 
-CapsLock 2.7.4 支持 Linux/macOS 与 Python 3.12。当前开发协议为 `permissions_version = 2`、`config_version = 9`、workspace schema 16、memory schema 5、portable archive 6、session export 6、JSONL schema 3、IDE Bridge protocol 1 和插件 manifest/protocol/grant 4。config v3-v8、workspace schema v6-v15 与 memory schema v3-v4 使用 backup-first 自动迁移。
+CapsLock 2.7.5 支持 Linux/macOS 与 Python 3.12。当前开发协议为 `permissions_version = 2`、`config_version = 10`、workspace schema 16、memory schema 5、portable archive 6、session export 6、JSONL schema 3、IDE Bridge protocol 1 和插件 manifest/protocol/grant 4。config v3-v9、workspace schema v6-v15 与 memory schema v3-v4 使用 backup-first 自动迁移。
 
 公开运行入口为 `AgentSession.run_stream(RunRequest)`。CLI 通过应用查询面读取状态，不应依赖 repository 聚合对象。
 
@@ -67,7 +67,9 @@ Markdown 镜像位于 `.capslock/state/plans/<session-id>/<plan-id>.md`。数据
 
 ## 工具契约与 artifact
 
-`ToolContract`、`ToolDefinition` 和 `ResolvedToolPolicy` 声明输入/输出 JSON Schema、参数级只读/并发/破坏性属性、取消行为、capability 与结果限制。`ToolCatalog` 只负责稳定 schema、动态发现和 fingerprint；`ToolExecutor` 固定执行 normalize、validate、authorize、execute、输出校验和 middleware。连续的只读且并发安全调用使用有界并发执行，checkpoint 仍按模型 tool-call 顺序写入。
+`ToolContract`、`ToolDefinition` 和 `ResolvedToolPolicy` 声明输入/输出 JSON Schema、参数级只读/并发/破坏性属性、取消行为、capability、alias、intent tag、工具组与结果限制。`ToolCatalog` 保留动态发现的 last-known-good snapshot，单个无效 schema 只隔离对应工具；`ToolExecutor` 固定执行 normalize、validate、authorize、execute、输出校验和 middleware。连续的只读且并发安全调用使用有界并发执行，额度 reservation 与计数原子完成，checkpoint 仍按模型 tool-call 顺序写入。
+
+`ToolOutcome.execution_state` 为 `not_started | committed | unknown`，旧 `executed` 保持兼容。只有确定未执行的名称或参数错误可进行一次模型修复；运行时不改写路径、命令、URL或业务值，第二次失败返回 `argument_repair_exhausted`。默认 `selection_mode=shadow` 仍发送完整工具集合并记录候选召回；`full` 可回滚，`filtered` 需通过评测门槛后启用。provider 只有显式设置 `strict_tool_calls=true` 才接收 strict schema。
 
 超过 16 KiB 的结果写入 `.capslock/state/artifacts/sha256/`，单项最多 5 MiB。模型只收到脱敏预览和 artifact ID；`read_tool_artifact` 只能分块读取当前 session 的 artifact，session 删除会级联清理记录与文件。消息、Tool Result 与文本 Artifact 同时写入 session-scoped episodic FTS；每轮自动回填最多 5 条/4 KiB，`search_session_history` 可显式检索最多 20 条。隔离的可疑 Artifact 不索引正文。
 
@@ -79,7 +81,7 @@ Composer 的 `@path[:line[-line]]` 仅在用户显式引用时读取工作区文
 
 ## 远程 MCP 与本地追踪
 
-MCP server 的 `transport` 可为 `stdio`、`streamable_http` 或 `sse`。远程 transport 必须使用解析到公开地址的 HTTPS URL，并受 `mcp.remote_enabled` 总开关控制；项目 `.capslock/mcp.json` 不允许 `env`/`headers`，私有 `.capslock/local/mcp.json` 中的 Authorization/Proxy-Authorization 只能写 `env:NAME` 或 `keyring:NAME` 引用。远程 tool call 发生不确定失败时不自动重放，避免重复副作用。
+MCP server 的 `transport` 可为 `stdio`、`streamable_http` 或 `sse`。远程 transport 必须使用解析到公开地址的 HTTPS URL，并受 `mcp.remote_enabled` 总开关控制；项目 `.capslock/mcp.json` 不允许 `env`/`headers`，私有 `.capslock/local/mcp.json` 中的 Authorization/Proxy-Authorization 只能写 `env:NAME` 或 `keyring:NAME` 引用。只有 `readOnlyHint=true` 的 stdio 调用可在断线后重连重试一次；写调用和远程调用发生不确定失败时返回 `unknown`，不自动重放。
 
 本地 observability 只记录 category、name、status、duration 和经过脱敏的标量属性，不记录 prompt、工具参数或结果正文。`capslock trace list` 查看近期 span，`trace show <trace-id>` 查看单次 run，`trace summary` 聚合均值/最大值，`trace prune --days N` 清理；启动时还按 `[observability]` 的天数和总量上限裁剪。
 

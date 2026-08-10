@@ -232,6 +232,11 @@ class WorkspaceApplication:
                         for profile in (settings.models or {}).values()
                         if profile.provider == name
                     },
+                    strict_tools=(
+                        (settings.providers or {})[name].strict_tool_calls
+                        if name in (settings.providers or {})
+                        else False
+                    ),
                 )
                 for name, item in raw_clients.items()
             }
@@ -345,6 +350,9 @@ class WorkspaceApplication:
                 process_manager=process_manager,
                 max_read_concurrency=settings.tools.max_read_concurrency,
                 aggregate_result_bytes=settings.tools.aggregate_result_bytes,
+                max_argument_repair_attempts=(
+                    settings.tools.max_argument_repair_attempts
+                ),
                 core_instructions=core_instructions or INSTRUCTIONS,
                 runtime_controls=runtime_controls,
                 shell_classifier_factory=(

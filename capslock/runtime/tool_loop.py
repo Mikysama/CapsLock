@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import asyncio
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from ..domain import (
@@ -25,6 +25,7 @@ from ..tooling.contracts import (
     ToolOutcome,
     ToolOutcomeStatus,
     ToolPause,
+    ToolExecutionState,
 )
 from ..tooling.executor import ToolRuntime
 from ..tooling.schema import SchemaValidationError
@@ -99,6 +100,25 @@ class ToolCallOutcome:
     run_id: str | None = None
     step_finalized: bool = False
     interrupt_after: bool = False
+
+
+@dataclass(frozen=True)
+class ToolRepairDirective:
+    candidates: tuple[str, ...]
+    failures: tuple[dict[str, object], ...]
+
+    def prompt(self) -> dict[str, object]:
+        return {
+            "role": "system",
+            "content": (
+                "The previous tool invocation was rejected before execution. "
+                "Correct it once using only the advertised repair tools. Do not "
+                "change user intent, paths, commands, URLs, or business values by "
+                "guessing. If a safe correction is impossible, answer without a tool. "
+                "Failures: "
+                + json.dumps(self.failures, ensure_ascii=False, default=str)
+            ),
+        }
 
 
 class ModelStepExecutor:
@@ -310,7 +330,7 @@ class ToolCallExecutor:
         evidence: dict[str, Evidence],
         source_ids: set[str],
         memories: dict[str, object],
-    ) -> None:
+    ) -> ToolCallOutcome:
         outcome = await self.prepare(
             call,
             messages=messages,
@@ -345,6 +365,7 @@ class ToolCallExecutor:
             await commit()
         if outcome.interrupt_after:
             raise asyncio.CancelledError
+        return outcome
 
     async def execute_batch(
         self,
@@ -357,7 +378,7 @@ class ToolCallExecutor:
         evidence: dict[str, Evidence],
         source_ids: set[str],
         memories: dict[str, object],
-    ) -> None:
+    ) -> list[ToolCallOutcome]:
         async def prepare(call):
             return await self.prepare(
                 call,
@@ -379,7 +400,7 @@ class ToolCallExecutor:
                 memories=memories,
             )
 
-        await self.batch_scheduler.run(calls, prepare=prepare, commit=commit)
+        return await self.batch_scheduler.run(calls, prepare=prepare, commit=commit)
 
 
 class ToolLoop:
@@ -394,6 +415,7 @@ class ToolLoop:
         context_factory: Callable[[str], ExecutionContext],
         max_read_concurrency: int = 4,
         aggregate_result_bytes: int = 65_536,
+        max_argument_repair_attempts: int = 1,
     ) -> None:
         self.chat_model = chat_model
         self.model = model
@@ -402,6 +424,7 @@ class ToolLoop:
         self.max_tool_rounds = max_tool_rounds
         self.context_factory = context_factory
         self.max_read_concurrency = max(1, max_read_concurrency)
+        self.max_argument_repair_attempts = max(0, min(1, max_argument_repair_attempts))
         self.model_steps = ModelStepExecutor(journal=journal, model=model, tools=tools)
         self.tool_calls = ToolCallExecutor(
             journal=journal,
@@ -432,11 +455,33 @@ class ToolLoop:
         evidence, source_ids, memories = {}, set(), {}
         input_tokens = output_tokens = 0
         turn = 0
+        pending_repair: ToolRepairDirective | None = None
         while True:
             await self.tools.refresh_dynamic()
+            for diagnostic in self.tools.pop_refresh_diagnostics():
+                self.context_factory(run_id).event(
+                    "tool_catalog_refresh_failed", **diagnostic
+                )
             if compact_context is not None:
                 messages[:] = await compact_context(messages)
             planning_active = await self._refresh_plan_attachment(messages, run_id)
+            selection_query = self._selection_query(messages)
+            selected_schemas, selected_names = self.tools.model_schemas(
+                selection_query, planning=planning_active
+            )
+            active_repair = pending_repair
+            if active_repair is not None:
+                self.tools.discover(active_repair.candidates)
+                selected_schemas = self.tools.catalog.schemas_for(
+                    active_repair.candidates, planning=planning_active
+                )
+            self.context_factory(run_id).event(
+                "tool_selection_shadow",
+                mode=self.tools.selection_mode.value,
+                candidates=list(selected_names),
+                advertised_count=len(selected_schemas),
+                repair=active_repair is not None,
+            )
             if governor is not None:
                 try:
                     await governor.before_model()
@@ -485,15 +530,18 @@ class ToolLoop:
                         )
                     raise
             await emit(AgentEventKind.THINKING, {})
+            model_messages = (
+                [*messages, active_repair.prompt()]
+                if active_repair is not None
+                else messages
+            )
             model_step, message, usage = await self.model_steps.invoke(
                 chat_model=active_model,
-                messages=messages,
+                messages=model_messages,
                 run_id=run_id,
                 emit=emit,
                 governor=governor,
-                tool_schemas=(
-                    self.tools.plan_schemas if planning_active else self.tools.schemas
-                ),
+                tool_schemas=selected_schemas,
                 usage_observer=usage_observer,
             )
             input_tokens += usage.input_tokens
@@ -502,6 +550,14 @@ class ToolLoop:
                 await governor.record_model_usage(
                     usage.input_tokens, usage.output_tokens
                 )
+            actual_tools = [call.name for call in message.tool_calls]
+            self.context_factory(run_id).event(
+                "tool_selection_observed",
+                mode=self.tools.selection_mode.value,
+                candidates=list(selected_names),
+                actual=actual_tools,
+                recalled=all(name in selected_names for name in actual_tools),
+            )
             if not message.tool_calls:
                 text = (message.content or "").strip()
                 if not text:
@@ -547,6 +603,12 @@ class ToolLoop:
                     AgentEventKind.BUDGET_UPDATED,
                     {"status": "running", "budget": snapshot.as_dict()},
                 )
+            calls = (
+                tuple(replace(call, repair_attempt=1) for call in message.tool_calls)
+                if active_repair is not None
+                else message.tool_calls
+            )
+            pending_repair = None
             assistant_message: dict[str, object] = {
                 "role": "assistant",
                 "content": message.content,
@@ -559,7 +621,7 @@ class ToolLoop:
                             "arguments": call.arguments,
                         },
                     }
-                    for call in message.tool_calls
+                    for call in calls
                 ],
             }
             if message.reasoning:
@@ -571,29 +633,34 @@ class ToolLoop:
                 checkpoint={"messages": messages},
             )
             self.tool_calls.reset_aggregate_budget()
+            round_outcomes: list[ToolCallOutcome] = []
             try:
-                for batch in await self._execution_batches(message.tool_calls, run_id):
+                for batch in await self._execution_batches(calls, run_id):
                     if len(batch) == 1:
-                        await self.tool_calls.execute(
-                            batch[0],
-                            messages=messages,
-                            run_id=run_id,
-                            emit=emit,
-                            governor=governor,
-                            evidence=evidence,
-                            source_ids=source_ids,
-                            memories=memories,
+                        round_outcomes.append(
+                            await self.tool_calls.execute(
+                                batch[0],
+                                messages=messages,
+                                run_id=run_id,
+                                emit=emit,
+                                governor=governor,
+                                evidence=evidence,
+                                source_ids=source_ids,
+                                memories=memories,
+                            )
                         )
                     else:
-                        await self.tool_calls.execute_batch(
-                            batch,
-                            messages=messages,
-                            run_id=run_id,
-                            emit=emit,
-                            governor=governor,
-                            evidence=evidence,
-                            source_ids=source_ids,
-                            memories=memories,
+                        round_outcomes.extend(
+                            await self.tool_calls.execute_batch(
+                                batch,
+                                messages=messages,
+                                run_id=run_id,
+                                emit=emit,
+                                governor=governor,
+                                evidence=evidence,
+                                source_ids=source_ids,
+                                memories=memories,
+                            )
                         )
             except ToolLoopPaused as paused:
                 call_ids = [call.id for call in message.tool_calls]
@@ -611,12 +678,63 @@ class ToolLoop:
                 paused.input_tokens = input_tokens
                 paused.output_tokens = output_tokens
                 raise
+            if self.max_argument_repair_attempts:
+                pending_repair = self._repair_directive(round_outcomes)
             turn += 1
         raise ToolLoopError(
             "agent exceeded the maximum number of tool-call rounds",
             input_tokens=input_tokens,
             output_tokens=output_tokens,
         )
+
+    @staticmethod
+    def _selection_query(messages: list[dict[str, object]]) -> str:
+        for item in reversed(messages):
+            if item.get("role") == "user":
+                return str(item.get("content", ""))[-8_192:]
+        return ""
+
+    def _repair_directive(
+        self, outcomes: list[ToolCallOutcome]
+    ) -> ToolRepairDirective | None:
+        candidates: list[str] = []
+        failures: list[dict[str, object]] = []
+        for item in outcomes:
+            outcome = item.outcome
+            if (
+                item.call.repair_attempt != 0
+                or outcome.error_code
+                not in {"invalid_tool_arguments", "unsupported_tool"}
+                or outcome.effective_execution_state
+                is not ToolExecutionState.NOT_STARTED
+                or not isinstance(outcome.data, dict)
+                or outcome.data.get("retryable") is not True
+            ):
+                continue
+            suggested = outcome.data.get("suggested_tools", [])
+            if not isinstance(suggested, list):
+                continue
+            valid = [
+                str(name)
+                for name in suggested
+                if isinstance(name, str) and self.tools.get(name) is not None
+            ]
+            if not valid:
+                continue
+            for name in valid:
+                if name not in candidates:
+                    candidates.append(name)
+            failures.append(
+                {
+                    "tool_call_id": item.call.id,
+                    "tool": item.call.name,
+                    "error_code": outcome.error_code,
+                    "detail": outcome.data,
+                }
+            )
+        if not failures:
+            return None
+        return ToolRepairDirective(tuple(candidates[:3]), tuple(failures))
 
     async def _refresh_plan_attachment(
         self, messages: list[dict[str, object]], run_id: str

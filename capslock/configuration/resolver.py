@@ -118,6 +118,10 @@ def resolve_settings(
             aggregate_result_bytes=int(
                 group("tools").get("aggregate_result_bytes", 65_536)
             ),
+            selection_mode=str(group("tools").get("selection_mode", "shadow")),
+            max_argument_repair_attempts=int(
+                group("tools").get("max_argument_repair_attempts", 1)
+            ),
         ),
         shell=ShellSettings(
             enabled=boolean(group("shell").get("enabled", True)),
@@ -148,9 +152,7 @@ def resolve_settings(
             episodic_recall_enabled=boolean(
                 group("context").get("episodic_recall_enabled", True)
             ),
-            episodic_recall_limit=int(
-                group("context").get("episodic_recall_limit", 5)
-            ),
+            episodic_recall_limit=int(group("context").get("episodic_recall_limit", 5)),
             episodic_recall_bytes=int(
                 group("context").get("episodic_recall_bytes", 4_096)
             ),
@@ -232,9 +234,7 @@ def resolve_settings(
         loop_detection=loop_detection_settings(group("loop_detection")),
         bridge=BridgeSettings(
             enabled=boolean(group("bridge").get("enabled", False)),
-            max_selection_bytes=int(
-                group("bridge").get("max_selection_bytes", 65_536)
-            ),
+            max_selection_bytes=int(group("bridge").get("max_selection_bytes", 65_536)),
             max_diagnostics=int(group("bridge").get("max_diagnostics", 500)),
         ),
         observability=ObservabilitySettings(

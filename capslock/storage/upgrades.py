@@ -697,7 +697,12 @@ CREATE TABLE work_items (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 ) STRICT;
-INSERT INTO work_items SELECT * FROM work_items_v14;
+INSERT INTO work_items(
+  id,session_id,question,kind,status,position,parent_work_item_id,error,created_at,updated_at
+)
+SELECT
+  id,session_id,question,kind,status,position,parent_work_item_id,error,created_at,updated_at
+FROM work_items_v14;
 DROP TABLE work_items_v14;
 CREATE INDEX idx_work_items_session_position ON work_items(session_id,status,position);
 
@@ -721,7 +726,16 @@ CREATE TABLE runs (
   resume_from_step_id TEXT,
   stop_reason TEXT CHECK(stop_reason IS NULL OR stop_reason IN ('max_tool_rounds','max_tool_calls','max_duration','max_tokens','max_budget_usd','repeated_tool_call'))
 ) STRICT;
-INSERT INTO runs SELECT * FROM runs_v14;
+INSERT INTO runs(
+  id,session_id,work_item_id,question,kind,status,started_at,finished_at,duration_ms,
+  input_tokens,output_tokens,cost_usd,error_code,error_message,parent_run_id,
+  resume_from_step_id,stop_reason
+)
+SELECT
+  id,session_id,work_item_id,question,kind,status,started_at,finished_at,duration_ms,
+  input_tokens,output_tokens,cost_usd,error_code,error_message,parent_run_id,
+  resume_from_step_id,stop_reason
+FROM runs_v14;
 DROP TABLE runs_v14;
 CREATE INDEX idx_runs_session_started ON runs(session_id,started_at);
 CREATE INDEX idx_runs_work_item ON runs(work_item_id,started_at);

@@ -12,7 +12,15 @@ import pytest
 from capslock.cli.context import CliContext
 from capslock.cli.exec import run_exec
 from capslock.configuration import Settings
-from capslock.domain import AgentEvent, AgentEventKind, RunLimits, RunMode
+from capslock.domain import (
+    AgentEvent,
+    AgentEventKind,
+    LoopDetectionSettings,
+    RunLimits,
+    RunMode,
+    RunStopped,
+)
+from capslock.runtime.governance import RunGovernor
 from capslock.runtime import RunRequest
 from capslock.runtime.model import ModelMessage, ModelResponse, ModelToolCall
 from capslock.storage.repositories import WorkspaceRepositories
@@ -184,6 +192,43 @@ def test_concurrent_tool_attempts_receive_unique_sequences(tmp_path: Path) -> No
     asyncio.run(scenario())
 
 
+def test_governor_concurrent_attempts_keep_status_and_limit_atomic(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        repositories = await WorkspaceRepositories.open(
+            tmp_path / "state.sqlite3", workspace=tmp_path
+        )
+        try:
+            session = await repositories.sessions.create("test-model")
+            prepared = await workflow_service(repositories).prepare(session.id, "tools")
+            governor = await RunGovernor.create(
+                repositories.governance,
+                repositories.models,
+                prepared.run.id,
+                parent_run_id=None,
+                mode=RunMode.EXEC,
+                limits=RunLimits(max_tool_calls=2),
+                loop_settings=LoopDetectionSettings(),
+            )
+            first, second = await asyncio.gather(
+                governor.before_tool("first", {}),
+                governor.before_tool("second", {}),
+            )
+            await asyncio.gather(
+                governor.finish_tool(second[0], ok=False, duration_ms=2),
+                governor.finish_tool(first[0], ok=True, duration_ms=1),
+            )
+            status = {int(item["attempt_id"]): item["ok"] for item in governor.history}
+            assert status == {first[0]: True, second[0]: False}
+            with pytest.raises(RunStopped):
+                await governor.before_tool("third", {})
+        finally:
+            await repositories.close()
+
+    asyncio.run(scenario())
+
+
 def test_parallel_read_batch_records_attempts_without_sequence_collision(
     tmp_path: Path,
 ) -> None:
@@ -225,9 +270,7 @@ def test_parallel_read_batch_records_attempts_without_sequence_collision(
                 ),
                 answer("Plan ready."),
             )
-            agent = make_agent(
-                tmp_path, repositories, session.id, model, tools=tools
-            )
+            agent = make_agent(tmp_path, repositories, session.id, model, tools=tools)
             events = [
                 item
                 async for item in agent.run_stream(

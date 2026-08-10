@@ -25,6 +25,7 @@ class ProviderSettings:
     timeout_seconds: float
     data_policy: str
     credential_ref: str | None = None
+    strict_tool_calls: bool = False
 
 
 @dataclass(frozen=True)
@@ -63,6 +64,8 @@ class ToolSettings:
     schema_budget_tokens: int = 8_000
     max_read_concurrency: int = 4
     aggregate_result_bytes: int = 65_536
+    selection_mode: str = "shadow"
+    max_argument_repair_attempts: int = 1
 
 
 @dataclass(frozen=True)

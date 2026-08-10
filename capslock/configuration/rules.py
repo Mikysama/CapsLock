@@ -82,6 +82,7 @@ def model_routes(
             timeout,
             data_policy,
             credential_ref,
+            boolean(value.get("strict_tool_calls", False)),
         )
     models: dict[str, ModelProfileSettings] = {}
     for name, value in raw_models.items():

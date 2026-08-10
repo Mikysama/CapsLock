@@ -71,6 +71,9 @@ def plugin_tools(registry: PluginRegistry) -> list[ToolDefinition]:
                     output_schema=spec.output_schema,
                     search_hint=spec.search_hint,
                     deferred=spec.deferred,
+                    aliases=(f"{entry.manifest.name} {spec.name}",),
+                    intent_tags=("plugin", entry.manifest.name, spec.name),
+                    tool_group=f"plugin:{entry.manifest.name}",
                     policy=ResolvedToolPolicy(
                         read_only=pure_read,
                         concurrency_safe=pure_read,

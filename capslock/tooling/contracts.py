@@ -40,6 +40,12 @@ class ToolOutcomeStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
+class ToolExecutionState(StrEnum):
+    NOT_STARTED = "not_started"
+    COMMITTED = "committed"
+    UNKNOWN = "unknown"
+
+
 class DeliveryStatus(StrEnum):
     INLINE = "inline"
     ARTIFACT = "artifact"
@@ -57,6 +63,12 @@ class PlanToolVisibility(StrEnum):
     HIDDEN = "hidden"
     LOCAL_READ = "local_read"
     CONTROL = "control"
+
+
+class ToolSelectionMode(StrEnum):
+    FULL = "full"
+    SHADOW = "shadow"
+    FILTERED = "filtered"
 
 
 @dataclass(frozen=True)
@@ -181,6 +193,9 @@ class ToolContract:
     inline_result_bytes: int = 16_384
     max_capture_bytes: int = 5 * 1024 * 1024
     plan_visibility: PlanToolVisibility = PlanToolVisibility.HIDDEN
+    aliases: tuple[str, ...] = ()
+    intent_tags: tuple[str, ...] = ()
+    tool_group: str | None = None
 
     def __post_init__(self) -> None:
         if not self.name or not self.version or not self.description.strip():
@@ -215,6 +230,9 @@ class ToolContract:
             "inline_result_bytes": self.inline_result_bytes,
             "max_capture_bytes": self.max_capture_bytes,
             "plan_visibility": self.plan_visibility.value,
+            "aliases": list(self.aliases),
+            "intent_tags": list(self.intent_tags),
+            "tool_group": self.tool_group,
         }
 
 
@@ -238,10 +256,21 @@ class ToolOutcome:
     content_source: str | None = None
     suspicious: bool = False
     risk_signals: tuple[str, ...] = ()
+    execution_state: ToolExecutionState | None = None
 
     @property
     def ok(self) -> bool:
         return self.status is ToolOutcomeStatus.SUCCEEDED
+
+    @property
+    def effective_execution_state(self) -> ToolExecutionState:
+        if self.execution_state is not None:
+            return self.execution_state
+        return (
+            ToolExecutionState.COMMITTED
+            if self.executed
+            else ToolExecutionState.NOT_STARTED
+        )
 
     @classmethod
     def success(cls, data: object, **values: Any) -> "ToolOutcome":
@@ -255,6 +284,7 @@ class ToolOutcome:
         code: str = "tool_failed",
         executed: bool = False,
         data: object | None = None,
+        execution_state: ToolExecutionState | None = None,
     ) -> "ToolOutcome":
         return cls(
             ToolOutcomeStatus.FAILED,
@@ -262,6 +292,7 @@ class ToolOutcome:
             {} if data is None else data,
             error=error,
             error_code=code,
+            execution_state=execution_state,
         )
 
     def with_delivery(
@@ -275,6 +306,7 @@ class ToolOutcome:
                 "status": self.status.value,
                 "ok": self.ok,
                 "executed": self.executed,
+                "execution_state": self.effective_execution_state.value,
                 "delivery_status": self.delivery_status.value,
                 "data": self.data,
                 "content": [item.summary_dict() for item in self.content],
@@ -295,6 +327,7 @@ class ToolOutcome:
             {
                 "status": self.status.value,
                 "executed": self.executed,
+                "execution_state": self.effective_execution_state.value,
                 "data": data,
                 "error": self.error,
                 "error_code": self.error_code,
@@ -477,6 +510,9 @@ def define_tool(
     resume: ToolResumer | None = None,
     presenter: ToolPresenter | None = None,
     plan_visibility: PlanToolVisibility = PlanToolVisibility.HIDDEN,
+    aliases: tuple[str, ...] = (),
+    intent_tags: tuple[str, ...] = (),
+    tool_group: str | None = None,
 ) -> ToolDefinition:
     if isinstance(policy, ResolvedToolPolicy):
         resolved = policy
@@ -501,6 +537,9 @@ def define_tool(
             inline_result_bytes,
             max_capture_bytes,
             plan_visibility,
+            aliases,
+            intent_tags,
+            tool_group,
         ),
         adapt_executor(executor),
         validate,

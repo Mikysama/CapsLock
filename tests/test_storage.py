@@ -285,7 +285,7 @@ def test_current_state_reopens_without_mutation(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
-def test_v15_workspace_and_v4_memory_migrations_are_backup_first(
+def test_workspace_and_memory_migrations_are_backup_first(
     tmp_path: Path,
 ) -> None:
     workspace_path = tmp_path / "workspace.sqlite3"

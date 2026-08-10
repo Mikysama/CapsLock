@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import time
@@ -43,6 +44,7 @@ class RunGovernor:
         self.base_cost_usd = snapshot.cost_usd
         self.observed_input_tokens = 0
         self.observed_output_tokens = 0
+        self._tool_attempt_lock = asyncio.Lock()
 
     @classmethod
     async def create(
@@ -118,43 +120,59 @@ class RunGovernor:
     async def before_tool(
         self, name: str, arguments: dict[str, Any]
     ) -> tuple[int, dict[str, Any], str]:
-        await self._check_common()
-        limit = self.snapshot.limits.max_tool_calls
-        if limit is not None and self.snapshot.tool_calls >= limit:
-            await self.stop(StopReason.MAX_TOOL_CALLS)
-        safe_arguments = redact(arguments)
-        assert isinstance(safe_arguments, dict)
-        normalized_name = name.strip().casefold()
-        payload = json.dumps(
-            safe_arguments,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            default=str,
-        )
-        fingerprint = hashlib.sha256(
-            f"{normalized_name}\n{payload}".encode("utf-8")
-        ).hexdigest()
-        detail = self._loop_detail(fingerprint)
-        if detail is not None:
-            await self.stop(StopReason.REPEATED_TOOL_CALL, detail=detail)
-        attempt_id = await self.governance.reserve_attempt(
-            self.run_id,
-            round_index=max(1, self.snapshot.tool_rounds),
-            name=normalized_name,
-            arguments=safe_arguments,
-            fingerprint=fingerprint,
-        )
-        self.history.append({"fingerprint": fingerprint, "ok": None})
-        self.snapshot = replace(self.snapshot, tool_calls=self.snapshot.tool_calls + 1)
-        await self._save()
-        return attempt_id, safe_arguments, fingerprint
+        async with self._tool_attempt_lock:
+            await self._check_common()
+            limit = self.snapshot.limits.max_tool_calls
+            if limit is not None and self.snapshot.tool_calls >= limit:
+                await self.stop(StopReason.MAX_TOOL_CALLS)
+            safe_arguments = redact(arguments)
+            assert isinstance(safe_arguments, dict)
+            normalized_name = name.strip().casefold()
+            payload = json.dumps(
+                safe_arguments,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
+            fingerprint = hashlib.sha256(
+                f"{normalized_name}\n{payload}".encode("utf-8")
+            ).hexdigest()
+            detail = self._loop_detail(fingerprint)
+            if detail is not None:
+                await self.stop(StopReason.REPEATED_TOOL_CALL, detail=detail)
+            attempt_id = await self.governance.reserve_attempt(
+                self.run_id,
+                round_index=max(1, self.snapshot.tool_rounds),
+                name=normalized_name,
+                arguments=safe_arguments,
+                fingerprint=fingerprint,
+            )
+            self.history.append(
+                {"attempt_id": attempt_id, "fingerprint": fingerprint, "ok": None}
+            )
+            self.snapshot = replace(
+                self.snapshot, tool_calls=self.snapshot.tool_calls + 1
+            )
+            await self._save()
+            return attempt_id, safe_arguments, fingerprint
 
     async def finish_tool(self, attempt_id: int, *, ok: bool, duration_ms: int) -> None:
-        await self.governance.finish_attempt(attempt_id, ok=ok, duration_ms=duration_ms)
-        if self.history:
-            self.history[-1]["ok"] = ok
-        await self.current()
+        async with self._tool_attempt_lock:
+            await self.governance.finish_attempt(
+                attempt_id, ok=ok, duration_ms=duration_ms
+            )
+            record = next(
+                (
+                    item
+                    for item in reversed(self.history)
+                    if item.get("attempt_id") == attempt_id
+                ),
+                None,
+            )
+            if record is not None:
+                record["ok"] = ok
+            await self.current()
 
     async def extend_tool_rounds(self, increment: int = 32) -> BudgetSnapshot:
         self.snapshot = replace(

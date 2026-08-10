@@ -105,7 +105,7 @@ class BatchScheduler:
         *,
         prepare: Callable[[Any], Awaitable[Any]],
         commit: Callable[[Any], Awaitable[None]],
-    ) -> None:
+    ) -> list[Any]:
         tasks = [asyncio.create_task(prepare(call)) for call in calls]
         pending = set(tasks)
         try:
@@ -131,6 +131,7 @@ class BatchScheduler:
         for task in tasks:
             if not task.cancelled():
                 await commit(task.result())
+        return [task.result() for task in tasks if not task.cancelled()]
 
 
 __all__ = ["BatchScheduler", "ResultDelivery"]

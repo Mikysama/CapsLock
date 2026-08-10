@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from capslock.configuration.loader import load_config_document
 from capslock.permissions import PermissionMode
+from capslock.mcp.manager import McpManager
+from capslock.ports.mcp import ManagedMcpTool
 from capslock.policy import WorkspacePolicy
 from capslock.runtime.model import ModelMessage, ModelResponse, ModelUsage
 from capslock.shell import ModelShellClassifier, assess_shell
@@ -19,9 +22,12 @@ from capslock.tooling.contracts import (
     ToolOutcome,
     ToolOutcomeStatus,
     InterruptBehavior,
+    ToolExecutionState,
     define_tool,
 )
 from capslock.tooling.executor import ToolRuntime
+from capslock.tooling.schema import validate_json_schema
+from capslock.tooling.tools import workspace_tools
 from capslock.tooling.tools.filesystem.search import search_files
 from capslock.tooling.permission_policy.engine import PermissionEngine
 from capslock.tooling.permission_policy.middleware import PermissionMiddleware
@@ -181,6 +187,126 @@ def test_catalog_fingerprint_and_deferred_discovery_are_stable() -> None:
     discovered = catalog.snapshot()
     assert [item.name for item in discovered.tools] == ["core", "plugin__demo__lookup"]
     assert discovered.fingerprint != initial.fingerprint
+
+
+def test_dynamic_catalog_refresh_keeps_last_known_good_snapshot() -> None:
+    async def execute(context, arguments):
+        return ToolOutcome.success(arguments)
+
+    core = define_tool("core", "Core tool.", {"type": "object"}, execute)
+    runtime = ToolRuntime([core])
+
+    async def broken_provider():
+        raise RuntimeError("metadata unavailable")
+
+    runtime.configure_dynamic(broken_provider)
+    before = runtime.snapshot()
+    after = asyncio.run(runtime.refresh_dynamic())
+    assert after.fingerprint == before.fingerprint
+    assert runtime.pop_refresh_diagnostics() == (
+        {
+            "code": "catalog_refresh_failed",
+            "error": "metadata unavailable",
+            "error_type": "RuntimeError",
+        },
+    )
+
+
+def test_side_effect_timeout_reports_unknown_execution(tmp_path: Path) -> None:
+    async def execute(context, arguments):
+        await asyncio.sleep(0.05)
+        return ToolOutcome.success({"changed": True})
+
+    tool = define_tool(
+        "mutate",
+        "Mutate slowly.",
+        {"type": "object"},
+        execute,
+        policy=ResolvedToolPolicy(
+            external_side_effects=True,
+            timeout_seconds=0.001,
+        ),
+    )
+    result = asyncio.run(ToolRuntime([tool]).invoke("mutate", _context(tmp_path), {}))
+    assert result.outcome.error_code == "unknown_execution"
+    assert result.outcome.effective_execution_state is ToolExecutionState.UNKNOWN
+    assert result.outcome.executed is False
+
+
+def test_mcp_stdio_reconnect_retries_only_read_only_tools(tmp_path: Path) -> None:
+    class Session:
+        def __init__(self, result):
+            self.result = result
+
+        async def call_tool(self, name, arguments):
+            if isinstance(self.result, Exception):
+                raise self.result
+            return self.result
+
+    async def scenario(read_only: bool):
+        manager = McpManager(
+            WorkspacePolicy(tmp_path),
+            SimpleNamespace(),
+            timeout_seconds=1,
+        )
+        spec = ManagedMcpTool(
+            "demo",
+            "tool",
+            "tool",
+            {"type": "object"},
+            None,
+            {"readOnlyHint": read_only},
+        )
+        first = SimpleNamespace(
+            tools=(spec,),
+            lock=asyncio.Lock(),
+            server=SimpleNamespace(transport="stdio"),
+            session=Session(ConnectionError("lost response")),
+        )
+        second = SimpleNamespace(
+            tools=(spec,),
+            lock=asyncio.Lock(),
+            server=SimpleNamespace(transport="stdio"),
+            session=Session({"ok": True}),
+        )
+        manager._sessions["demo"] = first
+        reconnects = 0
+
+        async def reconnect(name):
+            nonlocal reconnects
+            reconnects += 1
+            return second
+
+        manager._reconnect = reconnect
+        if read_only:
+            assert await manager.call("demo", "tool", {}) == {"ok": True}
+            assert reconnects == 1
+        else:
+            with pytest.raises(ConnectionError, match="lost response"):
+                await manager.call("demo", "tool", {})
+            assert reconnects == 0
+
+    asyncio.run(scenario(True))
+    asyncio.run(scenario(False))
+
+
+def test_all_builtin_tools_have_output_contracts_and_selection_metadata() -> None:
+    runtime = workspace_tools()
+    assert len(runtime.names) == 44
+    for tool in runtime.catalog._tools.values():
+        assert tool.contract.output_schema is not None
+        assert tool.contract.intent_tags
+        assert tool.contract.tool_group
+        validate_json_schema({}, tool.contract.output_schema)
+
+
+def test_filtered_tool_selection_keeps_control_fallbacks() -> None:
+    runtime = workspace_tools(selection_mode="filtered")
+    schemas, candidates = runtime.model_schemas("search source text in files")
+    names = [item["function"]["name"] for item in schemas]
+    assert names == [name for name in sorted(runtime.names) if name in candidates]
+    assert {"ask_user", "search_tools", "search_files"}.issubset(names)
+    assert len(names) <= 12
 
 
 def test_permission_precedence_ask_beats_allow(tmp_path: Path) -> None:
@@ -583,8 +709,11 @@ reasoning = ["main"]
         encoding="utf-8",
     )
     document = load_config_document(path)
-    assert document["config_version"] == 9
+    assert document["config_version"] == 10
     assert document["tools"]["schema_budget_tokens"] == 8000
+    assert document["tools"]["selection_mode"] == "shadow"
+    assert document["tools"]["max_argument_repair_attempts"] == 1
+    assert document["providers"]["main"]["strict_tool_calls"] is False
     assert document["shell"]["classifier_threshold"] == 0.95
     backups = list(tmp_path.glob("config.toml.*.bak"))
     assert len(backups) == 1

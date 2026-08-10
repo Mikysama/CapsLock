@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -722,6 +723,119 @@ def test_tool_loop_handles_invalid_arguments_and_continues(tmp_path: Path) -> No
     asyncio.run(scenario())
 
 
+def test_tool_loop_repairs_invalid_arguments_once(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        repositories = await WorkspaceRepositories.open(
+            tmp_path / "state.sqlite3", workspace=tmp_path
+        )
+        try:
+            session, prepared = await workspace_run(repositories)
+
+            async def execute(context, arguments):
+                return ToolResult(True, arguments)
+
+            model = FakeChatModel(
+                ModelResponse(
+                    ModelMessage(None, (ModelToolCall("bad", "echo", "[invalid]"),))
+                ),
+                ModelResponse(
+                    ModelMessage(None, (ModelToolCall("fixed", "echo", '{"x":1}'),))
+                ),
+                answer("repaired"),
+            )
+            loop = ToolLoop(
+                chat_model=model,
+                model="test",
+                tools=ToolRegistry(
+                    [
+                        Tool(
+                            "echo",
+                            "echo",
+                            {
+                                "type": "object",
+                                "properties": {"x": {"type": "integer"}},
+                                "required": ["x"],
+                                "additionalProperties": False,
+                            },
+                            execute,
+                        )
+                    ]
+                ),
+                journal=repositories.run_journal,
+                max_tool_rounds=3,
+                context_factory=context_factory(repositories, session.id),
+            )
+            result = await loop.run(
+                [], prepared.run.id, emit=lambda kind, data: asyncio.sleep(0)
+            )
+            assert result.text == "repaired"
+            assert [
+                item["tools"][0]["function"]["name"] for item in model.requests
+            ] == [
+                "echo",
+                "echo",
+                "echo",
+            ]
+            calls = await repositories.database.fetch_all(
+                "SELECT name,ok FROM tool_calls ORDER BY id"
+            )
+            assert [(row["name"], row["ok"]) for row in calls] == [
+                ("echo", 0),
+                ("echo", 1),
+            ]
+        finally:
+            await repositories.close()
+
+    asyncio.run(scenario())
+
+
+def test_tool_loop_does_not_retry_a_failed_repair(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        repositories = await WorkspaceRepositories.open(
+            tmp_path / "state.sqlite3", workspace=tmp_path
+        )
+        try:
+            session, prepared = await workspace_run(repositories)
+
+            async def execute(context, arguments):
+                return ToolResult(True, arguments)
+
+            model = FakeChatModel(
+                ModelResponse(
+                    ModelMessage(None, (ModelToolCall("bad", "echo", "[invalid]"),))
+                ),
+                ModelResponse(
+                    ModelMessage(
+                        None, (ModelToolCall("still_bad", "echo", "[invalid]"),)
+                    )
+                ),
+                answer("stopped repairing"),
+            )
+            loop = ToolLoop(
+                chat_model=model,
+                model="test",
+                tools=ToolRegistry([Tool("echo", "echo", {"type": "object"}, execute)]),
+                journal=repositories.run_journal,
+                max_tool_rounds=3,
+                context_factory=context_factory(repositories, session.id),
+            )
+            result = await loop.run(
+                [], prepared.run.id, emit=lambda kind, data: asyncio.sleep(0)
+            )
+            assert result.text == "stopped repairing"
+            calls = await repositories.database.fetch_all(
+                "SELECT result_summary FROM tool_calls ORDER BY id"
+            )
+            assert len(calls) == 2
+            assert json.loads(calls[1]["result_summary"])["error_code"] == (
+                "argument_repair_exhausted"
+            )
+        finally:
+            await repositories.close()
+
+    asyncio.run(scenario())
+
+
 def test_async_openai_stream_exposes_reasoning_and_answer_separately() -> None:
     async def scenario() -> None:
         chunks = [
@@ -776,6 +890,57 @@ def test_async_openai_stream_exposes_reasoning_and_answer_separately() -> None:
             "",
         ]
         assert [item.content for item in deltas] == ["", "final answer"]
+
+    asyncio.run(scenario())
+
+
+def test_async_openai_strict_tools_require_nullable_optional_fields() -> None:
+    async def scenario() -> None:
+        captured = {}
+
+        class Completions:
+            async def create(self, **kwargs):
+                captured.update(kwargs)
+                message = SimpleNamespace(
+                    content="done",
+                    tool_calls=(),
+                    reasoning_content=None,
+                    reasoning=None,
+                )
+                return SimpleNamespace(
+                    choices=[SimpleNamespace(message=message)], usage=None
+                )
+
+        client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
+        await AsyncOpenAIChatModel(client, strict_tools=True).complete(
+            model="test",
+            messages=[],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "read",
+                        "description": "read",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "path": {"type": "string"},
+                                "limit": {"type": "integer"},
+                            },
+                            "required": ["path"],
+                        },
+                    },
+                }
+            ],
+        )
+        function = captured["tools"][0]["function"]
+        assert function["strict"] is True
+        assert function["parameters"]["additionalProperties"] is False
+        assert function["parameters"]["required"] == ["path", "limit"]
+        assert function["parameters"]["properties"]["limit"]["type"] == [
+            "integer",
+            "null",
+        ]
 
     asyncio.run(scenario())
 

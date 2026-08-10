@@ -19,7 +19,9 @@ BASELINE = ROOT / "tests" / "fixtures" / "agent_eval_baseline.json"
 
 
 def deterministic(output: Path | None) -> int:
-    scenarios = json.loads(FIXTURE.read_text(encoding="utf-8"))["scenarios"]
+    fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    scenarios = fixture["scenarios"]
+    expected_case_count = int(fixture.get("expected_case_count", len(scenarios)))
     with tempfile.TemporaryDirectory(prefix="capslock-eval-") as temporary:
         report_path = Path(temporary) / "junit.xml"
         command = [
@@ -60,6 +62,32 @@ def deterministic(output: Path | None) -> int:
             return 1
         root = ET.parse(report_path).getroot()
         cases = list(root.iter("testcase"))
+        if completed.returncode or len(cases) != expected_case_count:
+            report = {
+                "schema_version": 2,
+                "mode": "deterministic",
+                "status": "failed",
+                "scenario_count": len(scenarios),
+                "expected_case_count": expected_case_count,
+                "collected": len(cases),
+                "passed": 0,
+                "quality": 0,
+                "duration_seconds": round(duration, 4),
+                "cost_usd": 0,
+                "categories": [item["category"] for item in scenarios],
+                "regressions": ["test_runner"],
+                "error": (
+                    "deterministic evaluation did not collect exactly the configured "
+                    f"cases; expected {expected_case_count}, collected {len(cases)}, "
+                    f"pytest exited with {completed.returncode}: "
+                    f"{(completed.stderr or completed.stdout).strip()[-1000:]}"
+                ),
+            }
+            serialized = json.dumps(report, ensure_ascii=False, indent=2) + "\n"
+            if output:
+                output.write_text(serialized, encoding="utf-8")
+            print(serialized, end="")
+            return 1
         failures = sum(
             any(child.tag in {"failure", "error"} for child in case) for case in cases
         )
@@ -96,7 +124,7 @@ def deterministic(output: Path | None) -> int:
     if output:
         output.write_text(serialized, encoding="utf-8")
     print(serialized, end="")
-    return 1 if completed.returncode or regressions else 0
+    return 1 if regressions else 0
 
 
 async def live(
@@ -129,27 +157,111 @@ async def live(
         return 0
     client = AsyncOpenAI(api_key=api_key, base_url=base_url)
     fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    from capslock.tooling.tools import workspace_tools
+
+    runtime = workspace_tools(include_collaboration=False)
+    schemas = runtime.schemas
     samples = []
     try:
         for item in fixture["live_samples"]:
             started = time.monotonic()
+            messages = [
+                {
+                    "role": "system",
+                    "content": "Use the provided workspace tools before answering.",
+                },
+                {"role": "user", "content": item["prompt"]},
+            ]
             response = await client.chat.completions.create(
                 model=model,
-                messages=[{"role": "user", "content": item["prompt"]}],
+                messages=messages,
+                tools=schemas,
                 max_tokens=128,
             )
-            text = response.choices[0].message.content or ""
-            usage = response.usage
+            assistant = response.choices[0].message
+            calls = list(assistant.tool_calls or ())
+            first = calls[0] if calls else None
+            selected = first.function.name if first is not None else None
+            arguments: dict[str, object] = {}
+            schema_valid = False
+            if first is not None:
+                try:
+                    decoded = json.loads(first.function.arguments)
+                    if isinstance(decoded, dict):
+                        arguments = decoded
+                        contract = runtime.contract(selected)
+                        if contract is not None:
+                            from capslock.tooling.schema import validate_json_schema
+
+                            validate_json_schema(arguments, contract.input_schema)
+                            schema_valid = True
+                except (ValueError, json.JSONDecodeError):
+                    pass
+            tool_selected = selected == item.get("expected_tool")
+            required_arguments = item.get("required_arguments", [])
+            arguments_present = all(key in arguments for key in required_arguments)
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": assistant.content,
+                    "tool_calls": [
+                        {
+                            "id": call.id,
+                            "type": "function",
+                            "function": {
+                                "name": call.function.name,
+                                "arguments": call.function.arguments,
+                            },
+                        }
+                        for call in calls
+                    ],
+                }
+            )
+            for call in calls:
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "content": json.dumps(
+                            {
+                                "status": "succeeded",
+                                "executed": True,
+                                "data": {"summary": "synthetic evaluation result"},
+                            }
+                        ),
+                    }
+                )
+            final = await client.chat.completions.create(
+                model=model,
+                messages=messages,
+                tools=schemas,
+                max_tokens=128,
+            )
+            text = final.choices[0].message.content or ""
+            first_usage, final_usage = response.usage, final.usage
             samples.append(
                 {
                     "category": item["category"],
-                    "passed": all(
+                    "expected_tool": item.get("expected_tool"),
+                    "selected_tool": selected,
+                    "tool_selected": tool_selected,
+                    "schema_valid": schema_valid and arguments_present,
+                    "passed": tool_selected
+                    and schema_valid
+                    and arguments_present
+                    and all(
                         token.casefold() in text.casefold()
                         for token in item.get("required", [])
                     ),
                     "latency_seconds": round(time.monotonic() - started, 4),
-                    "input_tokens": int(usage.prompt_tokens if usage else 0),
-                    "output_tokens": int(usage.completion_tokens if usage else 0),
+                    "input_tokens": int(
+                        (first_usage.prompt_tokens if first_usage else 0)
+                        + (final_usage.prompt_tokens if final_usage else 0)
+                    ),
+                    "output_tokens": int(
+                        (first_usage.completion_tokens if first_usage else 0)
+                        + (final_usage.completion_tokens if final_usage else 0)
+                    ),
                 }
             )
     finally:
@@ -161,6 +273,10 @@ async def live(
         "model": model,
         "status": "sampled",
         "quality": sum(item["passed"] for item in samples) / len(samples),
+        "tool_selection_accuracy": sum(item["tool_selected"] for item in samples)
+        / len(samples),
+        "first_pass_schema_accuracy": sum(item["schema_valid"] for item in samples)
+        / len(samples),
         "cost_usd": sum(
             item["input_tokens"] * input_cost_per_million
             + item["output_tokens"] * output_cost_per_million

@@ -58,7 +58,9 @@ def test_prompt_bundle_keeps_untrusted_text_out_of_system_role() -> None:
         "trusted core",
         "trusted stop control",
     ]
-    user = "\n".join(str(item["content"]) for item in messages if item["role"] == "user")
+    user = "\n".join(
+        str(item["content"]) for item in messages if item["role"] == "user"
+    )
     assert malicious not in user
     assert "\\u003c/system\\u003e" in user
 
@@ -163,7 +165,9 @@ def test_init_kind_is_persisted_from_work_item_to_run(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
-def test_workspace_schema_fourteen_migrates_to_init_kind(tmp_path: Path) -> None:
+def test_workspace_schema_fourteen_preserves_rows_and_migrates_to_init_kind(
+    tmp_path: Path,
+) -> None:
     path = tmp_path / "v14.sqlite3"
     previous_schema = WORKSPACE_SCHEMA.replace(
         "('agent','init','local_command','side_question','session_seed')",
@@ -171,6 +175,105 @@ def test_workspace_schema_fourteen_migrates_to_init_kind(tmp_path: Path) -> None
     )
     with sqlite3.connect(path) as connection:
         connection.executescript(previous_schema)
+        connection.executescript(
+            """
+            PRAGMA foreign_keys=OFF;
+            PRAGMA legacy_alter_table=ON;
+            INSERT INTO sessions(
+              id,model,created_at,updated_at,title,title_source
+            ) VALUES('session-1','test-model','created','updated','Title','manual');
+            INSERT INTO work_items(
+              id,session_id,question,kind,status,position,parent_work_item_id,error,
+              created_at,updated_at
+            ) VALUES(
+              'work-1','session-1','question','side_question','completed',7,NULL,
+              'preserved work error','work-created','work-updated'
+            );
+            INSERT INTO runs(
+              id,session_id,work_item_id,question,kind,status,started_at,finished_at,
+              duration_ms,input_tokens,output_tokens,cost_usd,error_code,error_message,
+              parent_run_id,resume_from_step_id,stop_reason
+            ) VALUES(
+              'run-1','session-1','work-1','question','local_command','completed',
+              'run-started','run-finished',12,3,4,0.5,'kept-code','kept message',
+              NULL,'step-1','max_tokens'
+            );
+
+            ALTER TABLE work_items RENAME TO work_items_current;
+            CREATE TABLE work_items (
+              id TEXT PRIMARY KEY,
+              session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+              question TEXT NOT NULL,
+              status TEXT NOT NULL CHECK(status IN (
+                'queued','running','waiting_approval','waiting_input','completed',
+                'failed','cancelled','interrupted','stopped'
+              )),
+              position INTEGER NOT NULL CHECK(position>=0),
+              parent_work_item_id TEXT REFERENCES work_items(id) ON DELETE SET NULL,
+              error TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              kind TEXT NOT NULL DEFAULT 'agent' CHECK(kind IN (
+                'agent','local_command','side_question','session_seed'
+              ))
+            ) STRICT;
+            INSERT INTO work_items(
+              id,session_id,question,status,position,parent_work_item_id,error,
+              created_at,updated_at,kind
+            )
+            SELECT
+              id,session_id,question,status,position,parent_work_item_id,error,
+              created_at,updated_at,kind
+            FROM work_items_current;
+            DROP TABLE work_items_current;
+            CREATE INDEX idx_work_items_session_position
+              ON work_items(session_id,status,position);
+
+            ALTER TABLE runs RENAME TO runs_current;
+            CREATE TABLE runs (
+              id TEXT PRIMARY KEY,
+              session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+              work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE,
+              question TEXT NOT NULL,
+              status TEXT NOT NULL CHECK(status IN (
+                'running','waiting_approval','waiting_input','completed','failed',
+                'cancelled','interrupted','stopped'
+              )),
+              started_at TEXT NOT NULL,
+              finished_at TEXT,
+              duration_ms INTEGER CHECK(duration_ms IS NULL OR duration_ms>=0),
+              input_tokens INTEGER NOT NULL DEFAULT 0 CHECK(input_tokens>=0),
+              output_tokens INTEGER NOT NULL DEFAULT 0 CHECK(output_tokens>=0),
+              cost_usd REAL NOT NULL DEFAULT 0 CHECK(cost_usd>=0),
+              error_code TEXT,
+              error_message TEXT,
+              parent_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+              resume_from_step_id TEXT,
+              stop_reason TEXT CHECK(stop_reason IS NULL OR stop_reason IN (
+                'max_tool_rounds','max_tool_calls','max_duration','max_tokens',
+                'max_budget_usd','repeated_tool_call'
+              )),
+              kind TEXT NOT NULL DEFAULT 'agent' CHECK(kind IN (
+                'agent','local_command','side_question','session_seed'
+              ))
+            ) STRICT;
+            INSERT INTO runs(
+              id,session_id,work_item_id,question,status,started_at,finished_at,
+              duration_ms,input_tokens,output_tokens,cost_usd,error_code,error_message,
+              parent_run_id,resume_from_step_id,stop_reason,kind
+            )
+            SELECT
+              id,session_id,work_item_id,question,status,started_at,finished_at,
+              duration_ms,input_tokens,output_tokens,cost_usd,error_code,error_message,
+              parent_run_id,resume_from_step_id,stop_reason,kind
+            FROM runs_current;
+            DROP TABLE runs_current;
+            CREATE INDEX idx_runs_session_started ON runs(session_id,started_at);
+            CREATE INDEX idx_runs_work_item ON runs(work_item_id,started_at);
+            PRAGMA legacy_alter_table=OFF;
+            PRAGMA foreign_keys=ON;
+            """
+        )
         connection.execute(f"PRAGMA application_id={WORKSPACE_APPLICATION_ID}")
         connection.execute("PRAGMA user_version=14")
 
@@ -185,6 +288,44 @@ def test_workspace_schema_fourteen_migrates_to_init_kind(tmp_path: Path) -> None
                 )
             )
             assert "'init'" in definitions
+            work_item = await database.fetch_one(
+                """SELECT question,kind,status,position,parent_work_item_id,error,
+                          created_at,updated_at
+                   FROM work_items WHERE id='work-1'"""
+            )
+            assert tuple(work_item) == (
+                "question",
+                "side_question",
+                "completed",
+                7,
+                None,
+                "preserved work error",
+                "work-created",
+                "work-updated",
+            )
+            run = await database.fetch_one(
+                """SELECT question,kind,status,started_at,finished_at,duration_ms,
+                          input_tokens,output_tokens,cost_usd,error_code,error_message,
+                          parent_run_id,resume_from_step_id,stop_reason
+                   FROM runs WHERE id='run-1'"""
+            )
+            assert tuple(run) == (
+                "question",
+                "local_command",
+                "completed",
+                "run-started",
+                "run-finished",
+                12,
+                3,
+                4,
+                0.5,
+                "kept-code",
+                "kept message",
+                None,
+                "step-1",
+                "max_tokens",
+            )
+            assert not await database.fetch_all("PRAGMA foreign_key_check")
         finally:
             await database.close()
 

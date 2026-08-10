@@ -55,6 +55,7 @@ class PluginActionExecutor:
             action.request["arguments"],
             trusted_native=entry.trusted_native,
             broker=broker,
+            invocation_id=action.id,
         )
         response = broker.sanitize(response)
         result: dict[str, object] = {

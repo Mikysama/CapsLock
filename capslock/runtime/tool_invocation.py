@@ -18,6 +18,7 @@ from ..tooling.contracts import (
     ToolContent,
     ToolEvent,
     ToolEventKind,
+    ToolExecutionState,
     ToolOutcome,
     ToolOutcomeStatus,
     ToolPause,
@@ -114,10 +115,28 @@ class InvocationPreparer:
                 outcome = ToolOutcome.failure(
                     f"invalid tool arguments: {parse_error}",
                     code="invalid_tool_arguments",
+                    data={
+                        "path": "$",
+                        "expected": "valid JSON object",
+                        "received_type": "invalid_json",
+                        "retryable": call.repair_attempt == 0,
+                        "suggested_tools": [call.name] if contract is not None else [],
+                        "repair_attempt": call.repair_attempt,
+                    },
                 )
             elif contract is None:
+                suggestions = list(self.tools.candidates(call.name, 3))
                 outcome = ToolOutcome.failure(
-                    f"unsupported tool: {call.name}", code="unsupported_tool"
+                    f"unsupported tool: {call.name}",
+                    code="unsupported_tool",
+                    data={
+                        "path": "$.name",
+                        "expected": "registered tool name",
+                        "received_type": "string",
+                        "retryable": call.repair_attempt == 0 and bool(suggestions),
+                        "suggested_tools": suggestions,
+                        "repair_attempt": call.repair_attempt,
+                    },
                 )
             else:
                 if governor is not None:
@@ -209,6 +228,38 @@ class InvocationPreparer:
                         tool_call_id=call.id,
                     )
                 outcome = invocation_result.execution
+
+            if outcome.error_code == "invalid_tool_arguments":
+                detail = dict(outcome.data) if isinstance(outcome.data, dict) else {}
+                detail.update(
+                    {
+                        "retryable": call.repair_attempt == 0,
+                        "suggested_tools": [call.name],
+                        "repair_attempt": call.repair_attempt,
+                    }
+                )
+                outcome = replace(
+                    outcome,
+                    data=detail,
+                    execution_state=ToolExecutionState.NOT_STARTED,
+                )
+            if call.repair_attempt > 0 and outcome.error_code in {
+                "invalid_tool_arguments",
+                "unsupported_tool",
+            }:
+                detail = dict(outcome.data) if isinstance(outcome.data, dict) else {}
+                detail.update(
+                    {
+                        "original_error_code": outcome.error_code,
+                        "retryable": False,
+                        "repair_attempt": call.repair_attempt,
+                    }
+                )
+                outcome = replace(
+                    outcome,
+                    data=detail,
+                    error_code="argument_repair_exhausted",
+                )
 
             if governor is not None and outcome.external_usage:
                 await governor.record_external_usage(**outcome.external_usage)

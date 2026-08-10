@@ -1,6 +1,6 @@
 # 当前运行内核与安全边界
 
-本文描述 CapsLock 2.7.4 的开发边界。产品在本机运行，支持直接能力工具、类型化斜杠命令、可审批 Action、AST 分析与沙箱保护的通用 Shell、session 隔离后台进程、受管理的本地/远程 MCP、LSP、IDE 上下文桥、受控仓库指令和单层子 Agent；不提供远程控制、后台 daemon 或第三方可执行 Hook。
+本文描述 CapsLock 2.7.5 的开发边界。产品在本机运行，支持直接能力工具、类型化斜杠命令、可审批 Action、AST 分析与沙箱保护的通用 Shell、session 隔离后台进程、受管理的本地/远程 MCP、LSP、IDE 上下文桥、受控仓库指令和单层子 Agent；不提供远程控制、后台 daemon 或第三方可执行 Hook。
 
 ## 模块边界
 
@@ -13,9 +13,13 @@
 
 ## Tool Runtime v2
 
-`ToolContract`、`ToolDefinition`、`ResolvedToolPolicy`、`ToolOutcome` 和 `ToolPause` 描述输入/输出 schema、参数级策略、取消行为、富结果及可恢复暂停。`ToolCatalog` 只负责稳定排序、schema fingerprint、deferred discovery 和动态刷新；`ToolExecutor` 固定执行 normalize、validate、authorize、execute、output validation 和 middleware；`ToolRuntime` 是 Agent/ToolLoop 使用的聚合接口。
+`ToolContract`、`ToolDefinition`、`ResolvedToolPolicy`、`ToolOutcome` 和 `ToolPause` 描述输入/输出 schema、参数级策略、取消行为、富结果及可恢复暂停。contract 可选提供 `aliases`、`intent_tags` 和 `tool_group`，全部内置工具必须声明成功输出 schema。`ToolCatalog` 负责稳定排序、schema fingerprint、deferred discovery、动态刷新和 last-known-good snapshot；单个动态工具 schema 无效时只隔离该工具。`ToolExecutor` 固定执行 normalize、validate、authorize、execute、output validation 和 middleware；`ToolRuntime` 是 Agent/ToolLoop 使用的聚合接口。
 
-只允许只读、并发安全且不改变上下文的调用并发，提交顺序保持模型 tool-call 顺序。审批和用户输入可跨进程恢复；副作用执行状态与结果 delivery 状态独立。单项超过 16 KiB 时使用 content-addressed artifact，批次结果受聚合预算限制。旧大型 Tool Result 只有在 Artifact 持久化成功后才能从模型上下文替换；失败必须保留原文并返回 `context_budget_exceeded`。
+只允许只读、并发安全且不改变上下文的调用并发，提交顺序保持模型 tool-call 顺序。额度检查、attempt reservation、历史追加与计数位于同一个异步临界区，完成状态按持久 `attempt_id` 回填；并发批次不能突破 `max_tool_calls`。审批和用户输入可跨进程恢复；副作用执行状态与结果 delivery 状态独立。`ToolOutcome.execution_state` 使用 `not_started | committed | unknown`，旧 `executed` 保持兼容；输出校验失败不得抹除真实执行状态。
+
+只有确定 `not_started` 的 `invalid_tool_arguments` 与 `unsupported_tool` 可进入一次修复轮。已知工具只暴露原工具，未知名称按名称、别名、描述和参数字段提供最多三个候选；运行时不静默重写路径、命令、URL或业务参数。修复轮正常消耗 token、tool round 和 tool call 预算，第二次失败返回 `argument_repair_exhausted` 并解除工具限制。`unknown`、`committed`、权限拒绝和业务执行失败禁止参数修复。
+
+工具选择默认处于 `shadow`：模型仍看到完整目录，runtime 记录候选集合、实际调用召回和混淆信息；`filtered` 只有在评测门槛满足后才用于真实裁剪，`full` 是回滚开关。声明 `strict_tool_calls=true` 的 provider 接收 required+nullable 的 strict schema，调用执行前移除表示未提供可选字段的 `null`；未声明支持的 provider 保持宽松 schema。单项超过 16 KiB 时使用 content-addressed artifact，批次结果受聚合预算限制。旧大型 Tool Result 只有在 Artifact 持久化成功后才能从模型上下文替换；失败必须保留原文并返回 `context_budget_exceeded`。
 
 ## 上下文、摘要与 episodic retrieval
 
@@ -27,7 +31,7 @@
 
 Shell 在 Linux Bubblewrap 或 macOS sandbox-exec 中执行，系统只读、默认断网；沙箱不可用时 fail closed。`approve_for_me` 仅自动批准 `pwd`、受限 Git 查询及只消费标准输入的安全管道过滤器，并将工作区只读挂载。模型分类器只记录风险提示，不能将白名单外命令升级为 allow；显式批准或明确权限规则仍可使用可写工作区。后台任务由 session-scoped process manager 管理并支持有界输出、TERM→KILL 取消和统一临时目录清理。
 
-MCP 使用唯一的受管理长连接路径，负责 stdio/Streamable HTTP/SSE、tools/resources discovery、list-changed、重连、取消和 workspace 切换；远程只接受公开 HTTPS，凭据只从私有配置引用解析，mutating call 不自动重放。LSP 使用已安装或显式配置的 server，在只读、禁网沙箱中运行，支持请求取消、didOpen/didChange、崩溃恢复和空闲回收。
+MCP 使用唯一的受管理长连接路径，负责 stdio/Streamable HTTP/SSE、tools/resources discovery、list-changed、重连、取消和 workspace 切换；远程只接受公开 HTTPS，凭据只从私有配置引用解析。只有 `readOnlyHint=true` 的 stdio 调用可在断线后重连并重试一次；写调用返回 `unknown`，不得自动重放。插件 envelope 携带稳定 invocation ID，支持的插件可将其作为幂等键。LSP 使用已安装或显式配置的 server，在只读、禁网沙箱中运行，支持请求取消、didOpen/didChange、崩溃恢复和空闲回收。
 
 ## 权限与插件
 
@@ -57,8 +61,8 @@ consolidation 只自动合并完全重复的 automatic memory、遗忘来源已�
 
 ## 当前数据协议
 
-当前格式为 config 9、workspace schema 16、memory schema 5、portable archive 6、session export 6、JSONL schema 3、IDE Bridge protocol 1 和 plugin protocol 4。workspace 启动支持 backup-first 的 v6-v15→v16 升级；memory schema v3-v4 与 config v3-v8 自动备份并升级。迁移失败保留原库和备份，不继续部分升级。
+当前格式为 config 10、workspace schema 16、memory schema 5、portable archive 6、session export 6、JSONL schema 3、IDE Bridge protocol 1 和 plugin protocol 4。workspace 启动支持 backup-first 的 v6-v15→v16 升级；重建表的迁移必须显式列出源、目标字段，禁止依赖物理列顺序。memory schema v3-v4 与 config v3-v9 自动备份并升级。迁移失败保留原库和备份，不继续部分升级。
 
 ## 发布门禁
 
-合并前运行 compileall、Ruff、全量 pytest、真实迁移 fixture、位置敏感 context 评测、memory calibration 评测、依赖审计和 wheel/sdist 冒烟。context 确定性评测要求 transcript、compaction、Tool Result、Artifact 在 front/middle/tail 全部找回；memory 自动采纳要求 precision ≥98%、跨轮 recall ≥90%、ECE ≤0.05，否则相应 profile 保持 review-only。边界测试必须验证 runtime/tooling 不依赖具体 LSP/MCP manager、旧 `*_runtime.py` 模块不存在、Shell 分类规则只有一个实现，并确保轻量 CLI 不导入 MCP SDK或启动集成进程。
+合并前运行 compileall、Ruff、全量 pytest、真实迁移 fixture、确定性/live Agent 工具评测、位置敏感 context 评测、memory calibration 评测、依赖审计和 wheel/sdist 冒烟。Agent eval 必须校验 pytest 退出码、收集数量和场景数，并统计首次工具选择、首次 schema 通过、一次修复成功、最终成功和重复副作用；零收集或少收集是 `test_runner` 失败。filtered 上线要求 deterministic 候选召回 100%、任务成功率不低于 full，且 live 召回至少 99%。context 确定性评测要求 transcript、compaction、Tool Result、Artifact 在 front/middle/tail 全部找回；memory 自动采纳要求 precision ≥98%、跨轮 recall ≥90%、ECE ≤0.05，否则相应 profile 保持 review-only。边界测试必须验证 runtime/tooling 不依赖具体 LSP/MCP manager、旧 `*_runtime.py` 模块不存在、Shell 分类规则只有一个实现，并确保轻量 CLI 不导入 MCP SDK或启动集成进程。

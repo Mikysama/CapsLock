@@ -20,12 +20,21 @@ from ..contracts import (
     ToolOutcome,
     define_tool,
 )
+from ..schema import SchemaValidationError
 
 
 def mcp_tools(manager: McpClientPort) -> list[ToolDefinition]:
     result: list[ToolDefinition] = []
+    names: set[str] = set()
     for spec in manager.tools():
         public_name = f"mcp__{_name(spec.server)}__{_name(spec.name)}"
+        if public_name in names:
+            errors = getattr(manager, "errors", None)
+            if isinstance(errors, dict):
+                errors[f"{spec.server}.{spec.name}"] = (
+                    f"duplicate public tool name: {public_name}"
+                )
+            continue
 
         async def execute(
             context: ExecutionContext,
@@ -70,8 +79,8 @@ def mcp_tools(manager: McpClientPort) -> list[ToolDefinition]:
             )
         )
 
-        result.append(
-            define_tool(
+        try:
+            definition = define_tool(
                 public_name,
                 spec.description,
                 spec.input_schema,
@@ -79,6 +88,9 @@ def mcp_tools(manager: McpClientPort) -> list[ToolDefinition]:
                 output_schema=spec.output_schema,
                 search_hint=f"MCP {spec.server} {spec.name}",
                 deferred=True,
+                aliases=(f"{spec.server} {spec.name}",),
+                intent_tags=("mcp", spec.server, spec.name),
+                tool_group=f"mcp:{spec.server}",
                 policy=ResolvedToolPolicy(
                     read_only=read_only and not destructive,
                     destructive=destructive,
@@ -88,7 +100,15 @@ def mcp_tools(manager: McpClientPort) -> list[ToolDefinition]:
                     required_capabilities=frozenset({f"mcp:{spec.server}:{spec.name}"}),
                 ),
             )
-        )
+        except (SchemaValidationError, ValueError) as exc:
+            errors = getattr(manager, "errors", None)
+            if isinstance(errors, dict):
+                errors[f"{spec.server}.{spec.name}"] = "invalid tool schema: " + (
+                    str(exc) or type(exc).__name__
+                )
+            continue
+        names.add(public_name)
+        result.append(definition)
     return result
 
 

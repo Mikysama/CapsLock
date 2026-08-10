@@ -76,6 +76,7 @@ class PluginProcessClient:
         trusted_native: bool = False,
         broker: Any = None,
         progress: Any = None,
+        invocation_id: str | None = None,
     ) -> dict[str, Any]:
         if tool_name not in {item.name for item in manifest.tools}:
             raise PluginValidationError(f"plugin tool is not declared: {tool_name}")
@@ -87,6 +88,7 @@ class PluginProcessClient:
                 trusted_native=trusted_native,
                 broker=broker,
                 progress=progress,
+                invocation_id=invocation_id,
             )
         else:
             response = await self._exchange(
@@ -96,6 +98,7 @@ class PluginProcessClient:
                 trusted_native=trusted_native,
                 broker=broker,
                 progress=progress,
+                invocation_id=invocation_id,
             )
         if not isinstance(response.get("ok"), bool):
             raise PluginProtocolError("plugin tool response is invalid")
@@ -110,6 +113,7 @@ class PluginProcessClient:
         trusted_native: bool,
         broker: Any,
         progress: Any,
+        invocation_id: str | None,
     ) -> dict[str, Any]:
         session = await self._get_session(manifest, trusted_native=trusted_native)
         async with session.lock:
@@ -128,7 +132,11 @@ class PluginProcessClient:
                 "protocol_version": PROTOCOL_VERSION,
                 "id": request_id,
                 "method": "call_tool",
-                "params": {"name": tool_name, "arguments": arguments},
+                "params": {
+                    "name": tool_name,
+                    "arguments": arguments,
+                    **({"invocation_id": invocation_id} if invocation_id else {}),
+                },
             }
             try:
                 process.stdin.write(
@@ -271,6 +279,7 @@ class PluginProcessClient:
         trusted_native: bool = False,
         broker: Any = None,
         progress: Any = None,
+        invocation_id: str | None = None,
     ) -> dict[str, Any]:
         if trusted_native:
             command = native_command(manifest)
@@ -316,7 +325,10 @@ class PluginProcessClient:
                 "protocol_version": PROTOCOL_VERSION,
                 "id": "request",
                 "method": method,
-                "params": params,
+                "params": {
+                    **params,
+                    **({"invocation_id": invocation_id} if invocation_id else {}),
+                },
             },
         ]
         try:

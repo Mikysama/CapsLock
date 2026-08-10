@@ -14,10 +14,16 @@ from .rules import (
 from .types import ConfigIssue
 
 
-CONFIG_VERSION = 9
+CONFIG_VERSION = 10
 _GROUP_FIELDS = {
     "runtime": {"max_tool_rounds", "permission_mode"},
-    "tools": {"schema_budget_tokens", "max_read_concurrency", "aggregate_result_bytes"},
+    "tools": {
+        "schema_budget_tokens",
+        "max_read_concurrency",
+        "aggregate_result_bytes",
+        "selection_mode",
+        "max_argument_repair_attempts",
+    },
     "shell": {
         "enabled",
         "default_timeout_seconds",
@@ -100,6 +106,7 @@ _PROVIDER_FIELDS = {
     "credential",
     "timeout_seconds",
     "data_policy",
+    "strict_tool_calls",
 }
 _MODEL_FIELDS = {
     "provider",
@@ -274,6 +281,15 @@ def validate_semantics(document: dict[str, object]) -> None:
             raise ValueError("tools.max_read_concurrency must be between 1 and 32")
         if int(tools.get("aggregate_result_bytes", 65_536)) < 1024:
             raise ValueError("tools.aggregate_result_bytes must be at least 1024")
+        if str(tools.get("selection_mode", "shadow")) not in {
+            "full",
+            "shadow",
+            "filtered",
+        }:
+            raise ValueError("tools.selection_mode must be full, shadow, or filtered")
+        repairs = int(tools.get("max_argument_repair_attempts", 1))
+        if repairs not in {0, 1}:
+            raise ValueError("tools.max_argument_repair_attempts must be 0 or 1")
     shell = document.get("shell", {})
     if isinstance(shell, dict):
         default_timeout = float(shell.get("default_timeout_seconds", 120))
@@ -334,8 +350,14 @@ def validate_semantics(document: dict[str, object]) -> None:
         if int(context.get("episodic_recall_limit", 5)) > 20:
             raise ValueError("context.episodic_recall_limit must not exceed 20")
         tokenizer = str(context.get("tokenizer", "adaptive"))
-        if tokenizer != "adaptive" and not tokenizer.startswith("tiktoken:") and tokenizer != "heuristic":
-            raise ValueError("context.tokenizer must be adaptive, heuristic, or tiktoken:<encoding>")
+        if (
+            tokenizer != "adaptive"
+            and not tokenizer.startswith("tiktoken:")
+            and tokenizer != "heuristic"
+        ):
+            raise ValueError(
+                "context.tokenizer must be adaptive, heuristic, or tiktoken:<encoding>"
+            )
     bridge = document.get("bridge", {})
     if isinstance(bridge, dict):
         boolean(bridge.get("enabled", False))

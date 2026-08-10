@@ -111,6 +111,12 @@ class McpManager:
             connection = await self._connect(server_name)
         if tool_name not in {item.name for item in connection.tools}:
             raise PermissionError(f"MCP tool is not allowed: {server_name}.{tool_name}")
+        metadata = next(item for item in connection.tools if item.name == tool_name)
+        read_only = bool(
+            metadata.annotations.get(
+                "readOnlyHint", metadata.annotations.get("read_only", False)
+            )
+        )
         async with connection.lock:
             try:
                 async with asyncio.timeout(self.timeout_seconds):
@@ -118,7 +124,7 @@ class McpManager:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                if connection.server.transport != "stdio":
+                if connection.server.transport != "stdio" or not read_only:
                     raise
                 connection = await self._reconnect(server_name)
                 async with connection.lock:

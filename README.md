@@ -2,7 +2,7 @@
 
 CapsLock 是一个本机工作区 Agent，用于读取和修改代码、检索证据、运行受沙箱保护的 Shell、查询代码语义，以及按审批策略访问 Web、MCP 和本地插件。Tool Runtime v2 将工具契约、参数级策略、可恢复暂停、调度、富结果与审计统一到异步执行链。
 
-当前源码版本为 `2.7.4`。本版本新增可追溯的 session episodic retrieval、无损 Tool Result 外部化与分层摘要，并重构记忆验证、校准和 durability 生命周期。当前协议为 workspace schema 16、memory schema 5、portable archive 6、session export 6 和 config 9。完整边界见 [2.7.4 发布说明](docs/releases/v2.7.4.md)。
+当前源码版本为 `2.7.5`。本版本为 Tool Runtime 增加受控参数修复、显式副作用状态、可靠并发额度、动态目录兜底和 shadow 工具选择评估，并修复已有数据的 workspace v14 升级失败。当前协议为 workspace schema 16、memory schema 5、portable archive 6、session export 6 和 config 10。完整边界见 [2.7.5 发布说明](docs/releases/v2.7.5.md)。
 
 正式支持矩阵：Linux/macOS，Python 3.12。发布 CI 会在两个操作系统组合中执行测试、构建、依赖审计和安装冒烟。
 
@@ -299,10 +299,10 @@ Inspect relevant files and return an evidence-backed summary.
 
 ## 配置
 
-配置根必须包含 `config_version = 9`。config v3-v8 会在原子备份后自动迁移；其他非当前格式拒绝加载。多模型使用 provider、credential reference、profile 和角色路由：
+配置根必须包含 `config_version = 10`。config v3-v9 会在原子备份后自动迁移；其他非当前格式拒绝加载。多模型使用 provider、credential reference、profile 和角色路由：
 
 ```toml
-config_version = 9
+config_version = 10
 
 [providers.primary]
 kind = "openai_compatible"
@@ -310,6 +310,7 @@ base_url = "https://api.deepseek.com"
 credential = "env:CAPSLOCK_API_KEY"
 timeout_seconds = 60
 data_policy = "primary-provider"
+strict_tool_calls = false
 
 [providers.backup]
 kind = "openai_compatible"
@@ -352,6 +353,8 @@ permission_mode = "approve_for_me"
 schema_budget_tokens = 8000
 max_read_concurrency = 4
 aggregate_result_bytes = 65536
+selection_mode = "shadow" # full | shadow | filtered
+max_argument_repair_attempts = 1
 
 [shell]
 enabled = true

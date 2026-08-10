@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
@@ -15,6 +16,7 @@ class ModelToolCall:
     id: str
     name: str
     arguments: str
+    repair_attempt: int = 0
 
 
 @dataclass(frozen=True)
@@ -136,10 +138,15 @@ def open_model_session(model: ChatModel, context: ModelRunContext) -> ModelRunSe
 
 class AsyncOpenAIChatModel:
     def __init__(
-        self, client: Any, *, max_output_tokens: dict[str, int] | None = None
+        self,
+        client: Any,
+        *,
+        max_output_tokens: dict[str, int] | None = None,
+        strict_tools: bool = False,
     ) -> None:
         self.client = client
         self.max_output_tokens = max_output_tokens or {}
+        self.strict_tools = strict_tools
 
     async def complete(
         self,
@@ -153,7 +160,7 @@ class AsyncOpenAIChatModel:
             "messages": _openai_messages(messages),
         }
         if tools:
-            arguments["tools"] = tools
+            arguments["tools"] = _strict_tools(tools) if self.strict_tools else tools
         if model in self.max_output_tokens:
             arguments["max_tokens"] = self.max_output_tokens[model]
         response = await self.client.chat.completions.create(**arguments)
@@ -173,7 +180,7 @@ class AsyncOpenAIChatModel:
             "stream_options": {"include_usage": True},
         }
         if tools:
-            arguments["tools"] = tools
+            arguments["tools"] = _strict_tools(tools) if self.strict_tools else tools
         if model in self.max_output_tokens:
             arguments["max_tokens"] = self.max_output_tokens[model]
         stream = await self.client.chat.completions.create(**arguments)
@@ -272,6 +279,54 @@ def _usage(raw: Any) -> ModelUsage:
         int(getattr(raw, "prompt_tokens", 0) or 0),
         int(getattr(raw, "completion_tokens", 0) or 0),
     )
+
+
+def _strict_tools(tools: list[dict[str, object]]) -> list[dict[str, object]]:
+    output = deepcopy(tools)
+    for item in output:
+        function = item.get("function")
+        if not isinstance(function, dict):
+            continue
+        parameters = function.get("parameters")
+        if isinstance(parameters, dict):
+            _strict_schema(parameters)
+        function["strict"] = True
+    return output
+
+
+def _strict_schema(schema: dict[str, object]) -> None:
+    raw_type = schema.get("type")
+    if raw_type == "object":
+        schema["additionalProperties"] = False
+        properties = schema.get("properties", {})
+        if isinstance(properties, dict):
+            originally_required = set(schema.get("required", ()))
+            schema["required"] = list(properties)
+            for name, child in properties.items():
+                if not isinstance(child, dict):
+                    continue
+                _strict_schema(child)
+                if name not in originally_required:
+                    _make_nullable(child)
+    items = schema.get("items")
+    if isinstance(items, dict):
+        _strict_schema(items)
+    for keyword in ("anyOf", "oneOf", "allOf"):
+        variants = schema.get(keyword)
+        if isinstance(variants, list):
+            for child in variants:
+                if isinstance(child, dict):
+                    _strict_schema(child)
+
+
+def _make_nullable(schema: dict[str, object]) -> None:
+    raw_type = schema.get("type")
+    if isinstance(raw_type, str):
+        schema["type"] = [raw_type, "null"]
+    elif isinstance(raw_type, list) and "null" not in raw_type:
+        schema["type"] = [*raw_type, "null"]
+    elif "anyOf" in schema and isinstance(schema["anyOf"], list):
+        schema["anyOf"] = [*schema["anyOf"], {"type": "null"}]
 
 
 def _openai_messages(

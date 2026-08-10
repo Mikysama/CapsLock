@@ -37,6 +37,7 @@ async def build_tool_runtime(
         include_shell=settings.shell.enabled,
         include_worktree=settings.worktree.enabled and not child_mode,
         schema_budget_tokens=settings.tools.schema_budget_tokens,
+        selection_mode=settings.tools.selection_mode,
         middleware=(
             PlanningBoundaryMiddleware(),
             PermissionMiddleware(permission_engine),

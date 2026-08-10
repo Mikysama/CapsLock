@@ -17,7 +17,7 @@ def read_config_document(path: Path) -> dict[str, object]:
 
 def load_config_document(path: Path) -> dict[str, object]:
     document = read_config_document(path)
-    if document.get("config_version") in {3, 4, 5, 6, 7, 8}:
+    if document.get("config_version") in {3, 4, 5, 6, 7, 8, 9}:
         _upgrade_config(path)
         document = read_config_document(path)
     errors = [
@@ -30,18 +30,18 @@ def load_config_document(path: Path) -> dict[str, object]:
 
 
 def _upgrade_config(path: Path) -> None:
-    """Backup and atomically upgrade a v3-v8 document without losing comments."""
+    """Backup and atomically upgrade a v3-v9 document without losing comments."""
     import tomlkit
 
     source = path.read_text(encoding="utf-8")
     document = tomlkit.parse(source)
     source_version = document.get("config_version")
-    if source_version not in {3, 4, 5, 6, 7, 8}:
+    if source_version not in {3, 4, 5, 6, 7, 8, 9}:
         return
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     backup = path.with_name(f"{path.name}.v{source_version}-{timestamp}.bak")
     backup.write_text(source, encoding="utf-8")
-    document["config_version"] = 9
+    document["config_version"] = 10
     memory = document.setdefault("memory", {})
     if isinstance(memory, dict):
         old_enabled = bool(memory.pop("enabled", True))
@@ -58,6 +58,15 @@ def _upgrade_config(path: Path) -> None:
             "aggregate_result_bytes": 65536,
         },
     )
+    tools = document.setdefault("tools", {})
+    if isinstance(tools, dict):
+        tools.setdefault("selection_mode", "shadow")
+        tools.setdefault("max_argument_repair_attempts", 1)
+    providers = document.get("providers", {})
+    if isinstance(providers, dict):
+        for provider in providers.values():
+            if isinstance(provider, dict):
+                provider.setdefault("strict_tool_calls", False)
     document.setdefault(
         "shell",
         {
@@ -112,7 +121,7 @@ def _upgrade_config(path: Path) -> None:
     temporary: str | None = None
     try:
         with tempfile.NamedTemporaryFile(
-            "w", encoding="utf-8", dir=path.parent, prefix=".config-v9-", delete=False
+            "w", encoding="utf-8", dir=path.parent, prefix=".config-v10-", delete=False
         ) as handle:
             temporary = handle.name
             handle.write(tomlkit.dumps(document))
