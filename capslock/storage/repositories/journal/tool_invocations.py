@@ -179,7 +179,7 @@ class ToolInvocationJournalRepository:
         artifact_id: str | None = None,
         error_code: str | None = None,
     ) -> None:
-        await self.execute(
+        updated = await self.execute(
             """UPDATE tool_invocations
                SET status=?,execution_status=?,delivery_status=?,result_preview=?,artifact_id=?,error_code=?,finished_at=?,duration_ms=?
                WHERE id=? AND status IN ('received','validating','authorizing','queued','running')""",
@@ -195,6 +195,20 @@ class ToolInvocationJournalRepository:
                 identifier,
             ),
         )
+        if updated and self.episodic is not None and result_preview:
+            row = await self.one(
+                "SELECT session_id,run_id FROM tool_invocations WHERE id=?",
+                (identifier,),
+            )
+            if row is not None:
+                await self.episodic.index(
+                    session_id=str(row["session_id"]),
+                    run_id=str(row["run_id"]),
+                    source_kind="tool_result",
+                    source_id=identifier,
+                    content=result_preview,
+                    artifact_id=artifact_id,
+                )
 
     async def update_tool_invocation(
         self,

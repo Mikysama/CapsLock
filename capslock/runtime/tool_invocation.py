@@ -272,6 +272,7 @@ class InvocationPreparer:
                                 run_id=run_id,
                                 invocation_id=invocation_id,
                                 content=raw_payload,
+                                index_content=False,
                             )
                         except Exception:
                             outcome = ToolOutcome.failure(

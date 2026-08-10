@@ -177,7 +177,7 @@ def test_workspace_schema_fourteen_migrates_to_init_kind(tmp_path: Path) -> None
     async def scenario() -> None:
         database = await WorkspaceDatabase.open(path)
         try:
-            assert (await database.fetch_one("PRAGMA user_version"))[0] == 15
+            assert (await database.fetch_one("PRAGMA user_version"))[0] == 16
             definitions = "\n".join(
                 str(row[0])
                 for row in await database.fetch_all(

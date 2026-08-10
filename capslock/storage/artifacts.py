@@ -30,12 +30,14 @@ class ToolArtifact:
     size_bytes: int
     media_type: str
     preview: str
+    index_content: bool = True
 
 
 class ToolArtifactStore:
-    def __init__(self, root: Path, database) -> None:
+    def __init__(self, root: Path, database, episodic=None) -> None:
         self.root = root.resolve()
         self.database = database
+        self.episodic = episodic
 
     async def put(
         self,
@@ -45,6 +47,7 @@ class ToolArtifactStore:
         content: bytes,
         invocation_id: str | None = None,
         media_type: str = "application/json",
+        index_content: bool = True,
     ) -> ToolArtifact:
         if len(content) > MAX_ARTIFACT_BYTES:
             raise ValueError(
@@ -58,8 +61,8 @@ class ToolArtifactStore:
         identifier = f"artifact_{uuid.uuid4().hex}"
         try:
             await self.database.execute(
-                """INSERT INTO tool_artifacts(id,session_id,run_id,invocation_id,sha256,size_bytes,media_type,relative_path,preview,created_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                """INSERT INTO tool_artifacts(id,session_id,run_id,invocation_id,sha256,size_bytes,media_type,relative_path,preview,index_content,created_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     identifier,
                     session_id,
@@ -70,6 +73,7 @@ class ToolArtifactStore:
                     media_type,
                     relative.as_posix(),
                     preview,
+                    int(index_content),
                     now(),
                 ),
             )
@@ -80,9 +84,41 @@ class ToolArtifactStore:
             )
             if row is None:
                 raise
-            return _record(row)
-        return ToolArtifact(
-            identifier, session_id, run_id, digest, len(content), media_type, preview
+            if not index_content and bool(row["index_content"]):
+                await self.database.execute(
+                    "UPDATE tool_artifacts SET index_content=0 WHERE id=?",
+                    (str(row["id"]),),
+                )
+                row = await self.database.fetch_one(
+                    "SELECT * FROM tool_artifacts WHERE id=?", (str(row["id"]),)
+                )
+                assert row is not None
+            record = _record(row)
+            await self._index(record, content)
+            return record
+        record = ToolArtifact(
+            identifier,
+            session_id,
+            run_id,
+            digest,
+            len(content),
+            media_type,
+            preview,
+            index_content,
+        )
+        await self._index(record, content)
+        return record
+
+    async def _index(self, record: ToolArtifact, content: bytes) -> None:
+        if self.episodic is None:
+            return
+        await self.episodic.index(
+            session_id=record.session_id,
+            run_id=record.run_id,
+            source_kind="artifact",
+            source_id=record.id,
+            content=_episodic_content(record, content),
+            artifact_id=record.id,
         )
 
     async def read(
@@ -168,4 +204,30 @@ def _record(row) -> ToolArtifact:
         int(row["size_bytes"]),
         str(row["media_type"]),
         str(row["preview"]),
+        bool(row["index_content"]) if "index_content" in row.keys() else True,
     )
+
+
+def _episodic_content(record: ToolArtifact, content: bytes) -> str:
+    descriptor = (
+        f"artifact metadata: media_type={record.media_type}; "
+        f"size_bytes={record.size_bytes}; sha256={record.sha256}"
+    )
+    if not record.index_content:
+        return "quarantined " + descriptor + "; content omitted"
+    if not _textual_media_type(record.media_type):
+        return "binary " + descriptor + "; content omitted"
+    return content.decode("utf-8", errors="replace")
+
+
+def _textual_media_type(media_type: str) -> bool:
+    normalized = media_type.partition(";")[0].strip().lower()
+    return normalized.startswith("text/") or normalized in {
+        "application/json",
+        "application/ld+json",
+        "application/xml",
+        "application/javascript",
+        "application/x-javascript",
+        "application/yaml",
+        "application/x-yaml",
+    } or normalized.endswith(("+json", "+xml"))

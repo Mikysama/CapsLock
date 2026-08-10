@@ -2,8 +2,8 @@
 
 WORKSPACE_APPLICATION_ID = 0x434C4B32  # CLK2
 MEMORY_APPLICATION_ID = 0x434C4D32  # CLM2
-WORKSPACE_SCHEMA_VERSION = 15
-MEMORY_SCHEMA_VERSION = 4
+WORKSPACE_SCHEMA_VERSION = 16
+MEMORY_SCHEMA_VERSION = 5
 
 WORKSPACE_SCHEMA = """
 CREATE TABLE database_metadata (
@@ -235,6 +235,7 @@ CREATE TABLE tool_artifacts (
   media_type TEXT NOT NULL,
   relative_path TEXT NOT NULL,
   preview TEXT NOT NULL,
+  index_content INTEGER NOT NULL DEFAULT 1 CHECK(index_content IN (0,1)),
   created_at TEXT NOT NULL,
   UNIQUE(session_id,sha256)
 ) STRICT;
@@ -385,6 +386,81 @@ CREATE TABLE context_compactions (
   CHECK(first_message_id IS NULL OR last_message_id IS NULL OR first_message_id<=last_message_id)
 ) STRICT;
 CREATE INDEX idx_context_compactions_session ON context_compactions(session_id,created_at);
+CREATE TABLE context_summary_segments (
+  id TEXT PRIMARY KEY,
+  source_digest TEXT NOT NULL,
+  model_profile TEXT NOT NULL,
+  summary_json TEXT NOT NULL CHECK(json_valid(summary_json)),
+  source_refs_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(source_refs_json)),
+  input_tokens INTEGER NOT NULL DEFAULT 0 CHECK(input_tokens>=0),
+  output_tokens INTEGER NOT NULL DEFAULT 0 CHECK(output_tokens>=0),
+  created_at TEXT NOT NULL,
+  UNIQUE(source_digest,model_profile)
+) STRICT;
+CREATE TABLE episodic_documents (
+  id INTEGER PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  run_id TEXT REFERENCES runs(id) ON DELETE CASCADE,
+  source_kind TEXT NOT NULL CHECK(source_kind IN ('message','tool_result','artifact')),
+  source_id TEXT NOT NULL,
+  chunk_ordinal INTEGER NOT NULL CHECK(chunk_ordinal>=0),
+  content TEXT NOT NULL,
+  artifact_id TEXT REFERENCES tool_artifacts(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL,
+  UNIQUE(session_id,source_kind,source_id,chunk_ordinal)
+) STRICT;
+CREATE INDEX idx_episodic_documents_session ON episodic_documents(session_id,created_at);
+CREATE VIRTUAL TABLE episodic_fts USING fts5(
+  content,
+  content='episodic_documents',
+  content_rowid='id',
+  tokenize='unicode61'
+);
+CREATE TRIGGER episodic_documents_ai AFTER INSERT ON episodic_documents BEGIN
+  INSERT INTO episodic_fts(rowid,content) VALUES(new.id,new.content);
+END;
+CREATE TRIGGER episodic_documents_ad AFTER DELETE ON episodic_documents BEGIN
+  INSERT INTO episodic_fts(episodic_fts,rowid,content) VALUES('delete',old.id,old.content);
+END;
+CREATE TRIGGER episodic_documents_au AFTER UPDATE ON episodic_documents BEGIN
+  INSERT INTO episodic_fts(episodic_fts,rowid,content) VALUES('delete',old.id,old.content);
+  INSERT INTO episodic_fts(rowid,content) VALUES(new.id,new.content);
+END;
+CREATE TRIGGER episodic_messages_ai AFTER INSERT ON messages BEGIN
+  INSERT OR IGNORE INTO episodic_documents(
+    session_id,run_id,source_kind,source_id,chunk_ordinal,content,created_at
+  ) VALUES(new.session_id,new.run_id,'message',cast(new.id AS TEXT),0,new.content,new.created_at);
+END;
+CREATE TRIGGER episodic_tool_invocations_ai AFTER INSERT ON tool_invocations
+WHEN new.result_preview IS NOT NULL BEGIN
+  INSERT OR IGNORE INTO episodic_documents(
+    session_id,run_id,source_kind,source_id,chunk_ordinal,content,artifact_id,created_at
+  ) VALUES(new.session_id,new.run_id,'tool_result',new.id,0,new.result_preview,new.artifact_id,new.started_at);
+END;
+CREATE TRIGGER episodic_tool_artifacts_ai AFTER INSERT ON tool_artifacts BEGIN
+  INSERT OR IGNORE INTO episodic_documents(
+    session_id,run_id,source_kind,source_id,chunk_ordinal,content,artifact_id,created_at
+  ) VALUES(
+    new.session_id,new.run_id,'artifact',new.id,0,
+    CASE
+      WHEN new.index_content=0 THEN
+        'quarantined artifact metadata: media_type=' || new.media_type ||
+        '; size_bytes=' || new.size_bytes || '; sha256=' || new.sha256 ||
+        '; content omitted'
+      WHEN lower(new.media_type) LIKE 'text/%'
+        OR lower(new.media_type) LIKE 'application/%json%'
+        OR lower(new.media_type) LIKE 'application/%xml%'
+        OR lower(new.media_type) IN (
+          'application/javascript','application/x-javascript',
+          'application/yaml','application/x-yaml'
+        ) THEN new.preview
+      ELSE 'binary artifact metadata: media_type=' || new.media_type ||
+        '; size_bytes=' || new.size_bytes || '; sha256=' || new.sha256 ||
+        '; content omitted'
+    END,
+    new.id,new.created_at
+  );
+END;
 CREATE TABLE session_context_state (
   session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
   active_compaction_id TEXT REFERENCES context_compactions(id) ON DELETE SET NULL,
@@ -635,6 +711,8 @@ CREATE TABLE memories (
   workspace_key TEXT,
   session_id TEXT,
   namespace TEXT,
+  owner_session_id TEXT,
+  project_instance_id TEXT,
   status TEXT NOT NULL CHECK(status IN ('active','forgotten','purged')),
   current_revision INTEGER,
   origin TEXT NOT NULL CHECK(origin IN ('manual','imported','reviewed','automatic')),
@@ -683,6 +761,7 @@ CREATE TABLE memory_workspace_settings (
   embedding_provider TEXT,
   embedding_data_policy TEXT,
   embedding_consent_id INTEGER
+  ,temporary_ttl_days INTEGER NOT NULL DEFAULT 7 CHECK(temporary_ttl_days BETWEEN 1 AND 365)
 ) STRICT;
 CREATE TABLE memory_extractions (
   id TEXT PRIMARY KEY,
@@ -701,6 +780,18 @@ CREATE TABLE memory_extractions (
   created_at TEXT NOT NULL,
   completed_at TEXT
 ) STRICT;
+CREATE TABLE memory_extraction_segments (
+  id TEXT PRIMARY KEY,
+  source_digest TEXT NOT NULL,
+  model TEXT NOT NULL,
+  prompt_version TEXT NOT NULL,
+  response_json TEXT NOT NULL CHECK(json_valid(response_json)),
+  source_refs_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(source_refs_json)),
+  input_tokens INTEGER NOT NULL DEFAULT 0 CHECK(input_tokens>=0),
+  output_tokens INTEGER NOT NULL DEFAULT 0 CHECK(output_tokens>=0),
+  created_at TEXT NOT NULL,
+  UNIQUE(source_digest,model,prompt_version)
+) STRICT;
 CREATE TABLE memory_candidates (
   id TEXT PRIMARY KEY,
   extraction_id TEXT NOT NULL REFERENCES memory_extractions(id) ON DELETE CASCADE,
@@ -716,6 +807,11 @@ CREATE TABLE memory_candidates (
   session_id TEXT NOT NULL,
   source_run_id TEXT NOT NULL,
   confidence REAL NOT NULL CHECK(confidence>=0 AND confidence<=1),
+  extractor_confidence REAL NOT NULL DEFAULT 0 CHECK(extractor_confidence>=0 AND extractor_confidence<=1),
+  verifier_confidence REAL CHECK(verifier_confidence IS NULL OR (verifier_confidence>=0 AND verifier_confidence<=1)),
+  verification_status TEXT NOT NULL DEFAULT 'unverified' CHECK(verification_status IN ('unverified','supported','unsupported','failed')),
+  instruction_like INTEGER NOT NULL DEFAULT 0 CHECK(instruction_like IN (0,1)),
+  calibration_version TEXT,
   status TEXT NOT NULL CHECK(status IN ('pending','accepted','rejected','duplicate','conflict','purged')),
   relation TEXT NOT NULL CHECK(relation IN ('new','duplicate','conflict')),
   related_memory_id TEXT REFERENCES memories(id) ON DELETE SET NULL,

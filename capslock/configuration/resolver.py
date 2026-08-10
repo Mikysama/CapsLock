@@ -145,6 +145,15 @@ def resolve_settings(
                 group("context").get("max_compaction_failures", 3)
             ),
             tokenizer=str(group("context").get("tokenizer", "adaptive")),
+            episodic_recall_enabled=boolean(
+                group("context").get("episodic_recall_enabled", True)
+            ),
+            episodic_recall_limit=int(
+                group("context").get("episodic_recall_limit", 5)
+            ),
+            episodic_recall_bytes=int(
+                group("context").get("episodic_recall_bytes", 4_096)
+            ),
         ),
         agents=agent_settings(group("agents")),
         lsp=LspSettings(
@@ -214,6 +223,7 @@ def resolve_settings(
             ),
             policy=str(group("memory").get("policy", "automatic")),
             database=layout.user.memory,
+            temporary_ttl_days=int(group("memory").get("temporary_ttl_days", 7)),
         ),
         providers=providers,
         models=models,

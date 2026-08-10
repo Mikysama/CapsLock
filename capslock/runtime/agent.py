@@ -192,6 +192,7 @@ class AgentSession:
         self.skill_service = skill_service
         self.events = events
         self.memory = memory
+        self.episodic = getattr(sessions, "episodic", None)
         self.interaction = interaction or RunInteraction(
             permission_mode=permission_mode
         )
@@ -232,6 +233,9 @@ class AgentSession:
             model_name=model_name,
             tool_schemas=self.tools.schemas,
             memory=memory,
+            episodic=self.episodic,
+            artifacts=artifacts,
+            journal=journal,
             attachment_resolver=LocalAttachmentResolver(policy, bridge=ide_bridge),
             settings_store=settings_store,
         )
@@ -1094,6 +1098,7 @@ class AgentSession:
                         run_id=run_id,
                         invocation_id=str(invocation["id"]),
                         content=encoded,
+                        index_content=False,
                     )
                 except Exception:
                     descriptor["content_available"] = False
@@ -1151,6 +1156,8 @@ class AgentSession:
             ),
         )
         context.runtime_state["document_settings"] = self.document_settings
+        if self.episodic is not None:
+            context.runtime_state["episodic"] = self.episodic
         if self._active_init_run_id == run_id:
             context.runtime_state["init_run"] = True
             context.runtime_state["force_manual_approval"] = True

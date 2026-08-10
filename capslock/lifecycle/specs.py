@@ -77,6 +77,7 @@ MEMORY_PRIMARY = {item.name: item.primary_key for item in MEMORY_IMPORT_SPECS}
 
 REFERENCE_FIELDS = {
     "session_id": "sessions",
+    "owner_session_id": "sessions",
     "run_id": "runs",
     "work_item_id": "work_items",
     "parent_work_item_id": "work_items",

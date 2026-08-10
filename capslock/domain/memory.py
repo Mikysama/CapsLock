@@ -109,6 +109,17 @@ class MemoryInfo:
     why: str | None = None
     how_to_apply: str | None = None
     last_verified_at: str | None = None
+    owner_session_id: str | None = None
+    project_instance_id: str | None = None
+
+
+@dataclass(frozen=True)
+class MemoryCandidateSourceInfo:
+    message_id: str | None
+    evidence_id: str | None
+    quote: str
+    direct: bool
+    verified: bool
 
 
 @dataclass(frozen=True)
@@ -139,6 +150,12 @@ class MemoryCandidateInfo:
     durability: MemoryDurability = MemoryDurability.DURABLE
     why: str | None = None
     how_to_apply: str | None = None
+    extractor_confidence: float = 0.0
+    verifier_confidence: float | None = None
+    verification_status: str = "unverified"
+    instruction_like: bool = False
+    calibration_version: str | None = None
+    sources: tuple[MemoryCandidateSourceInfo, ...] = ()
 
 
 @dataclass(frozen=True)

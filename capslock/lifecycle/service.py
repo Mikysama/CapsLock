@@ -24,9 +24,10 @@ from .archive import (
     write_json as _write_json,
     write_zip as _write_zip,
 )
-from .errors import LifecycleError
-from .coordinator import ImportCoordinator
 from .backup import BackupService
+from .coordinator import ImportCoordinator
+from .errors import LifecycleError
+from .import_merge import rebuild_episodic_search
 from .io import LifecycleIO
 from .sanitization import (
     redact_portable as _redact_portable,
@@ -164,9 +165,29 @@ class PortableArchiveService:
                 shutil.copytree(
                     stage / "artifacts", self.layout.artifacts, dirs_exist_ok=True
                 )
+            self._rebuild_episodic(report)
             self._merge_mcp(_read_json(stage / "mcp.json"), archive_id, report)
             self._persist_import_report(archive_id, report)
             return report
+
+    def _rebuild_episodic(self, report: dict[str, Any]) -> None:
+        mappings = report.get("mappings", {})
+        session_mapping = (
+            mappings.get("sessions", {}) if isinstance(mappings, dict) else {}
+        )
+        if not isinstance(session_mapping, dict) or not session_mapping:
+            return
+        connection = sqlite3.connect(self.layout.database)
+        connection.row_factory = sqlite3.Row
+        try:
+            rebuild_episodic_search(
+                connection,
+                set(map(str, session_mapping.values())),
+                artifact_root=self.layout.artifacts,
+            )
+            connection.commit()
+        finally:
+            connection.close()
 
     def _rebuild_plan_mirrors(self, report: dict[str, Any]) -> int:
         mappings = report.get("mappings", {})

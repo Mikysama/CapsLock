@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -122,6 +124,15 @@ def test_adaptive_token_calibration_and_micro_compaction() -> None:
     before = estimator.estimate({"text": "中文 code " * 20})
     asyncio.run(estimator.observe({"text": "中文 code " * 20}, before * 2))
     assert estimator.samples == 1 and estimator.ratio > 1
+    class Artifacts:
+        async def put(self, **values):
+            content = values["content"]
+            return SimpleNamespace(
+                id="artifact-test",
+                sha256=hashlib.sha256(content).hexdigest(),
+                preview=content[:32].decode(),
+            )
+
     manager = ContextBudgetManager(
         sessions=Sessions(),
         compactions=_NoCompactions(),
@@ -131,16 +142,19 @@ def test_adaptive_token_calibration_and_micro_compaction() -> None:
         model_profile="p",
         model_name="m",
         tool_schemas=[],
+        artifacts=Artifacts(),
     )
     messages = [
         {"role": "system", "content": "system"},
         {"role": "tool", "tool_call_id": "x", "content": "x" * 10_000},
         *({"role": "user", "content": str(i)} for i in range(20)),
     ]
-    compacted, saved = manager.micro_compact(messages)
+    compacted, saved = asyncio.run(
+        manager.micro_compact(messages, session_id="session", run_id="run")
+    )
     assert saved > 0
     assert compacted[1]["tool_call_id"] == "x"
-    assert "sha256=" in str(compacted[1]["content"])
+    assert "artifact-test" in str(compacted[1]["content"])
 
 
 def test_performance_spans_and_mailbox_are_digest_checked(tmp_path: Path) -> None:

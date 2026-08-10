@@ -7,6 +7,7 @@ import json
 import sqlite3
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from .errors import LifecycleError
@@ -261,6 +262,146 @@ def rebuild_session_search(
         )
 
 
+def rebuild_episodic_search(
+    connection: sqlite3.Connection,
+    session_ids: set[str],
+    *,
+    artifact_root: Path | None = None,
+) -> None:
+    """Idempotently recreate derived session-history documents after import."""
+
+    for session_id in session_ids:
+        connection.execute(
+            "DELETE FROM episodic_documents WHERE session_id=?", (session_id,)
+        )
+        for row in connection.execute(
+            "SELECT id,run_id,content,created_at FROM messages WHERE session_id=? ORDER BY id",
+            (session_id,),
+        ):
+            _insert_episodic_chunks(
+                connection,
+                session_id=session_id,
+                run_id=row["run_id"],
+                source_kind="message",
+                source_id=str(row["id"]),
+                content=str(row["content"]),
+                artifact_id=None,
+                created_at=str(row["created_at"]),
+            )
+        for row in connection.execute(
+            """SELECT id,run_id,result_preview,artifact_id,started_at
+               FROM tool_invocations WHERE session_id=? AND result_preview IS NOT NULL
+               ORDER BY started_at""",
+            (session_id,),
+        ):
+            _insert_episodic_chunks(
+                connection,
+                session_id=session_id,
+                run_id=row["run_id"],
+                source_kind="tool_result",
+                source_id=str(row["id"]),
+                content=str(row["result_preview"]),
+                artifact_id=(
+                    str(row["artifact_id"])
+                    if row["artifact_id"] is not None
+                    else None
+                ),
+                created_at=str(row["started_at"]),
+            )
+        for row in connection.execute(
+            "SELECT * FROM tool_artifacts WHERE session_id=? ORDER BY created_at",
+            (session_id,),
+        ):
+            content = _imported_artifact_content(row, artifact_root)
+            _insert_episodic_chunks(
+                connection,
+                session_id=session_id,
+                run_id=row["run_id"],
+                source_kind="artifact",
+                source_id=str(row["id"]),
+                content=content,
+                artifact_id=str(row["id"]),
+                created_at=str(row["created_at"]),
+            )
+
+
+def _insert_episodic_chunks(
+    connection: sqlite3.Connection,
+    *,
+    session_id: str,
+    run_id: object,
+    source_kind: str,
+    source_id: str,
+    content: str,
+    artifact_id: str | None,
+    created_at: str,
+) -> None:
+    for ordinal, chunk in enumerate(_utf8_chunks(content)):
+        connection.execute(
+            """INSERT INTO episodic_documents(
+               session_id,run_id,source_kind,source_id,chunk_ordinal,content,artifact_id,created_at
+               ) VALUES(?,?,?,?,?,?,?,?)""",
+            (
+                session_id,
+                run_id,
+                source_kind,
+                source_id,
+                ordinal,
+                chunk,
+                artifact_id,
+                created_at,
+            ),
+        )
+
+
+def _utf8_chunks(content: str, maximum: int = 8 * 1024) -> list[str]:
+    encoded = content.encode("utf-8")
+    chunks: list[str] = []
+    offset = 0
+    while offset < len(encoded):
+        end = min(len(encoded), offset + maximum)
+        chunk = encoded[offset:end].decode("utf-8", "ignore")
+        if not chunk and end < len(encoded):
+            end += 1
+            chunk = encoded[offset:end].decode("utf-8", "ignore")
+        if not chunk:
+            break
+        chunks.append(chunk)
+        offset += len(chunk.encode("utf-8"))
+    return chunks
+
+
+def _imported_artifact_content(row: sqlite3.Row, root: Path | None) -> str:
+    media_type = str(row["media_type"])
+    descriptor = (
+        f"artifact metadata: media_type={media_type}; size_bytes={row['size_bytes']}; "
+        f"sha256={row['sha256']}"
+    )
+    if not bool(row["index_content"]):
+        return "quarantined " + descriptor + "; content omitted"
+    if not _textual_media_type(media_type):
+        return "binary " + descriptor + "; content omitted"
+    if root is not None:
+        resolved_root = root.resolve()
+        target = (resolved_root / str(row["relative_path"])).resolve()
+        if target.is_relative_to(resolved_root) and target.is_file():
+            return target.read_bytes().decode("utf-8", errors="replace")
+    return str(row["preview"])
+
+
+def _textual_media_type(media_type: str) -> bool:
+    normalized = media_type.partition(";")[0].strip().lower()
+    return normalized.startswith("text/") or normalized in {
+        "application/json",
+        "application/ld+json",
+        "application/xml",
+        "application/javascript",
+        "application/x-javascript",
+        "application/yaml",
+        "application/x-yaml",
+    } or normalized.endswith(("+json", "+xml"))
+
+
 def rebuild_memory_fts(connection: sqlite3.Connection, memory_ids: set[str]) -> None:
     for memory_id in memory_ids:
         connection.execute("DELETE FROM memory_fts WHERE memory_id=?", (memory_id,))
@@ -275,6 +416,25 @@ def rebuild_memory_fts(connection: sqlite3.Connection, memory_ids: set[str]) -> 
                 "INSERT INTO memory_fts(memory_id,revision,content) VALUES(?,?,?)",
                 (memory_id, row[0], row[1]),
             )
+
+
+def rebind_imported_project_memories(
+    connection: sqlite3.Connection,
+    memory_ids: set[str],
+    project_instance_id: str,
+) -> None:
+    if not memory_ids:
+        return
+    marks = ",".join("?" for _ in memory_ids)
+    connection.execute(
+        f"""UPDATE memories SET project_instance_id=? WHERE id IN ({marks})
+            AND id IN (
+              SELECT m.id FROM memories m JOIN memory_revisions r
+              ON r.memory_id=m.id AND r.revision=m.current_revision
+              WHERE r.durability='project'
+            )""",
+        (project_instance_id, *sorted(memory_ids)),
+    )
 
 
 def insert_record(

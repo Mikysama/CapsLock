@@ -132,7 +132,9 @@ class WorkspaceApplication:
                     days=settings.observability.retention_days,
                     maximum=settings.observability.max_spans,
                 )
-            artifacts = ToolArtifactStore(layout.artifacts, repositories.database)
+            artifacts = ToolArtifactStore(
+                layout.artifacts, repositories.database, repositories.episodic
+            )
             if session_id is None:
                 session = await repositories.sessions.create(
                     settings.model_config.model
@@ -265,11 +267,16 @@ class WorkspaceApplication:
                 recall_enabled=settings.memory.recall_enabled,
                 maintenance_enabled=settings.memory.maintenance_enabled,
                 capture_policy=settings.memory.policy,
+                temporary_ttl_days=settings.memory.temporary_ttl_days,
+                project_instance_id=repositories.project_instance_id,
+                conversation_source=repositories.sessions,
+                model_profile=primary_profile.name,
                 event=events.emit,
                 source_validator=repositories.runs.completed,
                 task_repository=repositories.tasks,
                 external_embedding_profiles=external_embedding_profiles,
             )
+            await memory.reconcile_lifecycle()
             await memory.recover_jobs()
 
             actions = build_action_factory(

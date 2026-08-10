@@ -11,6 +11,7 @@ import pytest
 from capslock.domain import (
     EmbeddingBackend,
     MemoryCandidateStatus,
+    MemoryDurability,
     MemoryOrigin,
     MemoryPolicy,
     MemoryScope,
@@ -364,6 +365,66 @@ def test_version_three_memory_export_imports_with_safe_defaults(
             )
             assert imported[0].subject is None
             assert imported[0].durability.value == "durable"
+        finally:
+            await repositories.close()
+
+    asyncio.run(scenario())
+
+
+def test_memory_import_rebinds_lifecycle_owners_and_defaults_temporary_ttl(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        monkeypatch.setenv("CAPSLOCK_HOME", str(tmp_path / "home"))
+        repositories = await MemoryRepositories.open(tmp_path / "memory.sqlite3")
+        try:
+            service = MemoryService(
+                repositories,
+                workspace=tmp_path,
+                session_id="target-session",
+                project_instance_id="target-project",
+            )
+            records = [
+                {
+                    "type": "temporary" if durability == "temporary" else "fact",
+                    "content": f"imported {durability}",
+                    "confidence": 1,
+                    "expires_at": None,
+                    "origin": "manual",
+                    "sources": [],
+                    "durability": durability,
+                }
+                for durability in ("temporary", "session", "project")
+            ]
+            export_dir = tmp_path / "exports"
+            export_dir.mkdir()
+            path = export_dir / "lifecycles.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "format": EXPORT_FORMAT,
+                        "version": EXPORT_VERSION,
+                        "scope": "workspace",
+                        "records": records,
+                        "candidates": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            imported, _ = await service.import_json(
+                MemoryScope.WORKSPACE, "exports/lifecycles.json"
+            )
+            by_durability = {item.durability: item for item in imported}
+            temporary = by_durability[MemoryDurability.TEMPORARY]
+            assert temporary.expires_at is not None
+            assert (
+                by_durability[MemoryDurability.SESSION].owner_session_id
+                == "target-session"
+            )
+            assert (
+                by_durability[MemoryDurability.PROJECT].project_instance_id
+                == "target-project"
+            )
         finally:
             await repositories.close()
 

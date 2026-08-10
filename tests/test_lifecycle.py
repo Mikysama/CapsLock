@@ -138,8 +138,8 @@ def test_backup_verification_and_tamper_rejection(tmp_path: Path, monkeypatch) -
             '{"servers":{"demo":{"env":{"TOKEN":"mcp-secret"}}}}',
             encoding="utf-8",
         )
-        assert _version(layout.database) == WORKSPACE_SCHEMA_VERSION == 15
-        assert _version(layout.user.memory) == MEMORY_SCHEMA_VERSION == 4
+        assert _version(layout.database) == WORKSPACE_SCHEMA_VERSION == 16
+        assert _version(layout.user.memory) == MEMORY_SCHEMA_VERSION == 5
         service = LifecycleService(layout)
         backup = service.backup_create(tmp_path / "state.clbackup")
         assert service.verify(backup)["format"] == "capslock-backup"
@@ -212,6 +212,12 @@ def test_portable_import_is_idempotent_and_resets_approval(
         memory = await MemoryRepositories.open(source_layout.user.memory)
         session = await repositories.sessions.create("model")
         prepared = await workflow_service(repositories).prepare(session.id, "question")
+        await repositories.sessions.append_message(
+            session.id,
+            prepared.run.id,
+            "user",
+            "portable history canary question",
+        )
         action = await repositories.actions.create(
             session_id=session.id,
             run_id=prepared.run.id,
@@ -334,6 +340,10 @@ def test_portable_import_is_idempotent_and_resets_approval(
         assert actions[0].status is ActionStatus.PENDING
         assert actions[0].requires_reapproval
         assert not actions[0].historical_only
+        history_hits = await repositories.episodic.search(
+            "portable history canary", session_id=imported_session
+        )
+        assert any(item.source_kind == "message" for item in history_hits)
         imports = await repositories.database.fetch_one(
             "SELECT count(*) FROM lifecycle_imports WHERE status='completed'"
         )

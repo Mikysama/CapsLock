@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import uuid
 
 from ..async_database import WorkspaceDatabase
 from .actions import ActionRepository
@@ -19,6 +20,7 @@ from .governance import GovernanceRepository
 from .models import ModelRepository
 from .plans import PlanRepository
 from .performance import PerformanceRepository
+from .episodic import EpisodicRepository
 from .journal.repository import RunJournalRepository
 from .runs import RunRepository
 from .sessions import SessionRepository
@@ -45,6 +47,8 @@ class WorkspaceRepositories:
     compactions: ContextCompactionRepository
     plans: PlanRepository
     performance: PerformanceRepository
+    episodic: EpisodicRepository
+    project_instance_id: str
 
     @classmethod
     async def open(
@@ -55,14 +59,23 @@ class WorkspaceRepositories:
             "INSERT OR IGNORE INTO database_metadata(key,value) VALUES('workspace',?)",
             (str(workspace.resolve()),),
         )
+        await database.execute(
+            "INSERT OR IGNORE INTO database_metadata(key,value) VALUES('project_instance_id',?)",
+            (uuid.uuid4().hex,),
+        )
+        project_row = await database.fetch_one(
+            "SELECT value FROM database_metadata WHERE key='project_instance_id'"
+        )
+        assert project_row is not None
         collaboration = CollaborationRepository(database)
         await collaboration.interrupt_active()
-        journal = RunJournalRepository(database)
+        episodic = EpisodicRepository(database)
+        journal = RunJournalRepository(database, episodic=episodic)
         await journal.interrupt_active()
         runs = RunRepository(database, journal)
         return cls(
             database,
-            SessionRepository(database, workspace),
+            SessionRepository(database, workspace, episodic=episodic),
             WorkItemRepository(database),
             runs,
             journal,
@@ -78,6 +91,8 @@ class WorkspaceRepositories:
             ContextCompactionRepository(database),
             PlanRepository(database),
             PerformanceRepository(database),
+            episodic,
+            str(project_row["value"]),
         )
 
     async def close(self) -> None:
@@ -90,6 +105,7 @@ __all__ = [
     "ModelRepository",
     "PlanRepository",
     "PerformanceRepository",
+    "EpisodicRepository",
     "GovernanceRepository",
     "CollaborationRepository",
     "ContextCompactionRepository",

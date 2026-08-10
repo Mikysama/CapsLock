@@ -1,0 +1,6 @@
+{
+  "canary": "CAPSLOCK-CANARY-7319",
+  "question": "What is the exact CapsLock canary?",
+  "positions": ["front", "middle", "tail"],
+  "kinds": ["transcript", "compaction", "tool_result", "artifact"]
+}

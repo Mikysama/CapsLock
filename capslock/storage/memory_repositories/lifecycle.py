@@ -52,18 +52,22 @@ class MemoryLifecycleRepository(Repository):
         source_quote: str | None = None,
         source_direct: bool = False,
         source_verified: bool = False,
+        owner_session_id: str | None = None,
+        project_instance_id: str | None = None,
     ) -> MemoryInfo:
         identifier, created = f"mem_{uuid.uuid4().hex}", timestamp()
         async with self.database.transaction() as connection:
             await connection.execute(
-                """INSERT INTO memories(id,scope,workspace_key,session_id,namespace,status,current_revision,origin,created_at,updated_at)
-                   VALUES(?,?,?,?,?,'active',1,?,?,?)""",
+                """INSERT INTO memories(id,scope,workspace_key,session_id,namespace,owner_session_id,project_instance_id,status,current_revision,origin,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?,'active',1,?,?,?)""",
                 (
                     identifier,
                     scope.value,
                     workspace,
                     session_id,
                     namespace,
+                    owner_session_id,
+                    project_instance_id,
                     origin.value,
                     created,
                     created,
@@ -192,8 +196,10 @@ class MemoryLifecycleRepository(Repository):
         value = content if content is not None else current.content or ""
         async with self.database.transaction() as connection:
             await connection.execute(
-                """INSERT INTO memory_revisions(memory_id,revision,operation,content,memory_type,source_kind,source_ref,confidence,expires_at,created_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                """INSERT INTO memory_revisions(memory_id,revision,operation,content,memory_type,
+                   source_kind,source_ref,confidence,expires_at,subject,durability,why,
+                   how_to_apply,last_verified_at,created_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     current.id,
                     revision,
@@ -204,6 +210,11 @@ class MemoryLifecycleRepository(Repository):
                     current.source_ref if source_ref is None else source_ref,
                     current.confidence if confidence is None else confidence,
                     current.expires_at if expires_at is _UNCHANGED else expires_at,
+                    current.subject,
+                    current.durability.value,
+                    current.why,
+                    current.how_to_apply,
+                    current.last_verified_at,
                     created,
                 ),
             )
@@ -283,8 +294,48 @@ class MemoryLifecycleRepository(Repository):
 
     async def purge_session(self, *, workspace: str, session_id: str) -> int:
         rows = await self.all(
-            "SELECT id FROM memories WHERE scope='session' AND workspace_key=? AND session_id=?",
+            """SELECT m.id FROM memories m JOIN memory_revisions r
+               ON r.memory_id=m.id AND r.revision=m.current_revision
+               WHERE m.workspace_key=? AND m.owner_session_id=?
+               AND r.durability='session'""",
             (workspace, session_id),
+        )
+        for row in rows:
+            await self.purge(str(row[0]))
+        return len(rows)
+
+    async def purge_expired(self, *, workspace: str, at: str | None = None) -> int:
+        from .core import timestamp
+
+        rows = await self.all(
+            """SELECT m.id FROM memories m JOIN memory_revisions r
+               ON r.memory_id=m.id AND r.revision=m.current_revision
+               WHERE m.workspace_key=? AND m.status='active'
+               AND r.durability='temporary' AND r.expires_at IS NOT NULL AND r.expires_at<=?""",
+            (workspace, at or timestamp()),
+        )
+        for row in rows:
+            await self.purge(str(row[0]))
+        return len(rows)
+
+    async def purge_stale_projects(
+        self, *, workspace: str, project_instance_id: str
+    ) -> int:
+        await self.execute(
+            """UPDATE memories SET project_instance_id=? WHERE workspace_key=?
+               AND project_instance_id IS NULL AND id IN (
+                 SELECT m.id FROM memories m JOIN memory_revisions r
+                 ON r.memory_id=m.id AND r.revision=m.current_revision
+                 WHERE r.durability='project'
+               )""",
+            (project_instance_id, workspace),
+        )
+        rows = await self.all(
+            """SELECT m.id FROM memories m JOIN memory_revisions r
+               ON r.memory_id=m.id AND r.revision=m.current_revision
+               WHERE m.workspace_key=? AND r.durability='project'
+               AND m.project_instance_id<>?""",
+            (workspace, project_instance_id),
         )
         for row in rows:
             await self.purge(str(row[0]))

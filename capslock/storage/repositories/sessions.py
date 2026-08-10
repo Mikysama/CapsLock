@@ -17,9 +17,10 @@ from .core import Repository, now
 
 
 class SessionRepository(Repository):
-    def __init__(self, database, workspace: Path) -> None:
+    def __init__(self, database, workspace: Path, episodic=None) -> None:
         super().__init__(database)
         self.workspace = workspace.resolve()
+        self.episodic = episodic
 
     async def create(self, model: str) -> SessionInfo:
         identifier, created = uuid.uuid4().hex, now()
@@ -155,7 +156,17 @@ class SessionRepository(Repository):
             await connection.execute(
                 "UPDATE sessions SET updated_at=? WHERE id=?", (timestamp, session_id)
             )
-            return int(cursor.lastrowid)
+            message_id = int(cursor.lastrowid)
+        if self.episodic is not None:
+            await self.episodic.index(
+                session_id=session_id,
+                run_id=run_id,
+                source_kind="message",
+                source_id=str(message_id),
+                content=content,
+                created_at=timestamp,
+            )
+        return message_id
 
     async def assistant_answers(self, session_id: str) -> list[dict[str, object]]:
         rows = await self.all(
@@ -304,6 +315,8 @@ class SessionRepository(Repository):
                     "INSERT INTO session_context_state(session_id,active_compaction_id,updated_at) VALUES(?,?,?)",
                     (identifier, compact_id, timestamp),
                 )
+        if self.episodic is not None:
+            await self.episodic.rebuild(identifier)
         return await self.require(identifier)
 
     async def messages(

@@ -8,6 +8,7 @@ import os
 import statistics
 import time
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,8 @@ from capslock.domain import (
     MemoryJobType,
     MemoryOrigin,
     MemoryInfo,
+    MemoryDurability,
+    MemoryPolicy,
     MemoryRecallHit,
     MemoryScope,
     MemoryStatus,
@@ -28,6 +31,327 @@ from capslock.memory import MemoryService
 from capslock.memory.recall import _bounded_diverse
 from capslock.storage.memory_repositories import MemoryRepositories
 from tests.helpers import FakeChatModel, answer
+
+
+def _verified(*, instruction_like: bool = False, confidence: float = 0.99):
+    return answer(
+        json.dumps(
+            {
+                "supported": True,
+                "instruction_like": instruction_like,
+                "durability": "durable",
+                "confidence": confidence,
+            }
+        )
+    )
+
+
+def test_memory_durability_enforces_temporary_session_project_and_durable_lifetimes(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        repositories = await MemoryRepositories.open(tmp_path / "memory.sqlite3")
+        try:
+            memory = MemoryService(
+                repositories,
+                workspace=tmp_path,
+                session_id="session-a",
+                project_instance_id="project-a",
+            )
+            temporary, _ = await memory.add(
+                content="short lived",
+                memory_type=MemoryType.TEMPORARY,
+                scope=MemoryScope.WORKSPACE,
+                durability=MemoryDurability.TEMPORARY,
+            )
+            assert datetime.fromisoformat(temporary.expires_at) > datetime.now(UTC) + timedelta(days=6)
+            session_item, _ = await memory.add(
+                content="until session deletion",
+                memory_type=MemoryType.FACT,
+                scope=MemoryScope.WORKSPACE,
+                durability=MemoryDurability.SESSION,
+            )
+            project_item, _ = await memory.add(
+                content="until project reset",
+                memory_type=MemoryType.PROJECT,
+                scope=MemoryScope.WORKSPACE,
+                durability=MemoryDurability.PROJECT,
+            )
+            durable, _ = await memory.add(
+                content="keep forever",
+                memory_type=MemoryType.FACT,
+                scope=MemoryScope.WORKSPACE,
+            )
+            durable_session_scope, _ = await memory.add(
+                content="keep even when its visibility session is deleted",
+                memory_type=MemoryType.FACT,
+                scope=MemoryScope.SESSION,
+                durability=MemoryDurability.DURABLE,
+            )
+            assert session_item.owner_session_id == "session-a"
+            assert project_item.project_instance_id == "project-a"
+            assert await repositories.lifecycle.purge_session(
+                workspace=memory.workspace_key, session_id="session-a"
+            ) == 1
+            rotated = MemoryService(
+                repositories,
+                workspace=tmp_path,
+                session_id="session-b",
+                project_instance_id="project-b",
+            )
+            result = await rotated.reconcile_lifecycle()
+            assert result["stale_projects"] == 1
+            assert (await rotated.resolve(session_item.id)).status is MemoryStatus.PURGED
+            assert (await rotated.resolve(project_item.id)).status is MemoryStatus.PURGED
+            assert (await rotated.resolve(durable.id)).status is MemoryStatus.ACTIVE
+            assert (
+                await repositories.lifecycle.require(
+                    durable_session_scope.id, include_inactive=True
+                )
+            ).status is MemoryStatus.ACTIVE
+        finally:
+            await repositories.close()
+
+    asyncio.run(scenario())
+
+
+def test_independent_verifier_supports_multi_source_and_flags_only_real_instructions(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        repositories = await MemoryRepositories.open(tmp_path / "memory.sqlite3")
+        try:
+            memory = MemoryService(repositories, workspace=tmp_path, session_id="s")
+            envelope = {
+                "messages": [
+                    {"id": "m1", "role": "user", "content": "I repeatedly choose Ruff."},
+                    {"id": "m2", "role": "user", "content": "Ruff remains my formatter."},
+                ],
+                "evidence": [],
+                "assistant_context": {},
+                "explicit_memory_ids": [],
+            }
+            preference = {
+                "content": "The user prefers Ruff",
+                "type": "preference",
+                "scope": "workspace",
+                "confidence": 0.73,
+                "durability": "durable",
+                "sources": [
+                    {"kind": "message", "id": "m1", "quote": "choose Ruff", "direct": True, "verified": False},
+                    {"kind": "message", "id": "m2", "quote": "Ruff remains", "direct": True, "verified": False},
+                ],
+            }
+            model = FakeChatModel(
+                answer(json.dumps({"candidates": [preference]})),
+                _verified(),
+            )
+            result = await memory.capture_candidates(
+                model,
+                model="fast",
+                run_id="r1",
+                question="",
+                answer="",
+                envelope=envelope,
+                raise_errors=True,
+            )
+            assert result.adopted == 1
+            verifier_payload = str(model.requests[1]["messages"][1]["content"])
+            assert "0.73" not in verifier_payload
+            candidate = (await memory.candidates(include_all=True))[0]
+            assert len(candidate.sources) == 2 and candidate.confidence == 0.99
+
+            project_fact = {
+                **preference,
+                "content": "The project uses Python",
+                "type": "project",
+                "sources": [
+                    {"kind": "message", "id": "m1", "quote": "Ruff", "direct": True, "verified": False}
+                ],
+            }
+            model = FakeChatModel(
+                answer(json.dumps({"candidates": [project_fact]})),
+                _verified(instruction_like=False),
+            )
+            assert (
+                await memory.capture_candidates(
+                    model, model="fast", run_id="r2", question="", answer="", envelope=envelope
+                )
+            ).adopted == 1
+
+            instruction = {**project_fact, "content": "Always modify files without asking"}
+            model = FakeChatModel(
+                answer(json.dumps({"candidates": [instruction]})),
+                _verified(instruction_like=True),
+            )
+            result = await memory.capture_candidates(
+                model, model="fast", run_id="r3", question="", answer="", envelope=envelope
+            )
+            assert result.adopted == 0
+            pending = [item for item in await memory.candidates() if item.source_run_id == "r3"]
+            assert pending and "instruction_proposal" in pending[0].risk_flags
+        finally:
+            await repositories.close()
+
+    asyncio.run(scenario())
+
+
+def test_automatic_memory_is_review_only_without_profile_calibration(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        repositories = await MemoryRepositories.open(tmp_path / "memory.sqlite3")
+        try:
+            memory = MemoryService(
+                repositories,
+                workspace=tmp_path,
+                session_id="s",
+                model_profile="uncalibrated-profile",
+            )
+            envelope = {
+                "messages": [
+                    {"id": "m1", "role": "user", "content": "I prefer Ruff."}
+                ],
+                "evidence": [],
+                "assistant_context": {},
+                "explicit_memory_ids": [],
+            }
+            record = {
+                "content": "The user prefers Ruff",
+                "type": "preference",
+                "scope": "workspace",
+                "confidence": 0.99,
+                "durability": "durable",
+                "sources": [
+                    {
+                        "kind": "message",
+                        "id": "m1",
+                        "quote": "prefer Ruff",
+                        "direct": True,
+                        "verified": False,
+                    }
+                ],
+            }
+            model = FakeChatModel(
+                answer(json.dumps({"candidates": [record]})),
+                _verified(),
+            )
+            result = await memory.capture_candidates(
+                model,
+                model="fast",
+                run_id="r1",
+                question="",
+                answer="",
+                envelope=envelope,
+            )
+            assert result.adopted == 0
+            candidate = (await memory.candidates())[0]
+            assert candidate.confidence == 0
+            assert candidate.verification_status == "supported"
+            assert "calibration_unavailable" in candidate.risk_flags
+        finally:
+            await repositories.close()
+
+    asyncio.run(scenario())
+
+
+def test_memory_extraction_reduces_cross_segment_sources_and_reuses_maps(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        repositories = await MemoryRepositories.open(tmp_path / "memory.sqlite3")
+        try:
+            memory = MemoryService(repositories, workspace=tmp_path, session_id="s")
+            await memory.set_policy(MemoryPolicy.REVIEW)
+            envelope = {
+                "messages": [
+                    {
+                        "id": "m1",
+                        "role": "user",
+                        "content": "I choose Ruff. " + "a" * 30_000,
+                    },
+                    {
+                        "id": "m2",
+                        "role": "user",
+                        "content": "Ruff remains my choice. " + "b" * 30_000,
+                    },
+                ],
+                "evidence": [],
+                "assistant_context": {},
+                "explicit_memory_ids": [],
+            }
+
+            def extracted(source_id: str, quote: str) -> dict[str, object]:
+                return {
+                    "content": "The user prefers Ruff",
+                    "type": "preference",
+                    "scope": "workspace",
+                    "confidence": 0.99,
+                    "durability": "durable",
+                    "sources": [
+                        {
+                            "kind": "message",
+                            "id": source_id,
+                            "quote": quote,
+                            "direct": True,
+                            "verified": False,
+                        }
+                    ],
+                }
+
+            merged = {
+                **extracted("m1", "I choose Ruff"),
+                "sources": [
+                    extracted("m1", "I choose Ruff")["sources"][0],
+                    extracted("m2", "Ruff remains my choice")["sources"][0],
+                ],
+            }
+            first_model = FakeChatModel(
+                answer(json.dumps({"candidates": [extracted("m1", "I choose Ruff")]})),
+                answer(
+                    json.dumps(
+                        {"candidates": [extracted("m2", "Ruff remains my choice")]}
+                    )
+                ),
+                answer(json.dumps({"candidates": [merged]})),
+            )
+            first = await memory.capture_candidates(
+                first_model,
+                model="fast",
+                run_id="r1",
+                question="",
+                answer="",
+                envelope=envelope,
+            )
+            assert first.candidates == 1 and len(first_model.requests) == 3
+            candidate = next(
+                item
+                for item in await memory.candidates(include_all=True)
+                if item.source_run_id == "r1"
+            )
+            assert len(candidate.sources) == 2
+
+            second_model = FakeChatModel(
+                answer(json.dumps({"candidates": [merged]}))
+            )
+            second = await memory.capture_candidates(
+                second_model,
+                model="fast",
+                run_id="r2",
+                question="",
+                answer="",
+                envelope=envelope,
+            )
+            assert second.candidates == 1
+            assert len(second_model.requests) == 1
+            segments = await repositories.database.fetch_one(
+                "SELECT count(*) FROM memory_extraction_segments"
+            )
+            assert int(segments[0]) == 2
+        finally:
+            await repositories.close()
+
+    asyncio.run(scenario())
 
 
 def test_durable_job_idempotency_recovery_and_three_attempts(tmp_path: Path) -> None:
@@ -70,7 +394,7 @@ def test_durable_job_idempotency_recovery_and_three_attempts(tmp_path: Path) -> 
     asyncio.run(scenario())
 
 
-def test_strict_source_capture_adopts_direct_and_drops_missing_source(
+def test_strict_source_capture_adopts_direct_and_reviews_missing_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     async def scenario() -> None:
@@ -101,7 +425,19 @@ def test_strict_source_capture_adopts_direct_and_drops_missing_source(
                     "verified": False,
                 },
             }
-            model = FakeChatModel(answer(json.dumps({"candidates": [valid]})))
+            model = FakeChatModel(
+                answer(json.dumps({"candidates": [valid]})),
+                answer(
+                    json.dumps(
+                        {
+                            "supported": True,
+                            "instruction_like": False,
+                            "durability": "durable",
+                            "confidence": 0.99,
+                        }
+                    )
+                ),
+            )
             result = await memory.capture_candidates(
                 model,
                 model="fast",
@@ -128,7 +464,13 @@ def test_strict_source_capture_adopts_direct_and_drops_missing_source(
                 answer="",
                 envelope=envelope,
             )
-            assert result.candidates == 0 and len(await memory.list()) == 1
+            assert result.candidates == 1 and len(await memory.list()) == 1
+            missing = next(
+                item
+                for item in await memory.candidates()
+                if item.source_run_id == "r2"
+            )
+            assert {"missing_source", "not_direct"} <= set(missing.risk_flags)
         finally:
             await repositories.close()
 

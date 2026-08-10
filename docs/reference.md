@@ -4,7 +4,7 @@
 
 ## 稳定契约
 
-CapsLock 2.7.2 支持 Linux/macOS 与 Python 3.12。当前开发协议为 `permissions_version = 2`、`config_version = 9`、workspace schema 14、memory schema 4、portable archive 6、session export 6、JSONL schema 3、IDE Bridge protocol 1 和插件 manifest/protocol/grant 4。config v3-v8、workspace schema v6-v13 与 memory schema v3 使用 backup-first 自动迁移。
+CapsLock 2.7.4 支持 Linux/macOS 与 Python 3.12。当前开发协议为 `permissions_version = 2`、`config_version = 9`、workspace schema 16、memory schema 5、portable archive 6、session export 6、JSONL schema 3、IDE Bridge protocol 1 和插件 manifest/protocol/grant 4。config v3-v8、workspace schema v6-v15 与 memory schema v3-v4 使用 backup-first 自动迁移。
 
 公开运行入口为 `AgentSession.run_stream(RunRequest)`。CLI 通过应用查询面读取状态，不应依赖 repository 聚合对象。
 
@@ -69,11 +69,11 @@ Markdown 镜像位于 `.capslock/state/plans/<session-id>/<plan-id>.md`。数据
 
 `ToolContract`、`ToolDefinition` 和 `ResolvedToolPolicy` 声明输入/输出 JSON Schema、参数级只读/并发/破坏性属性、取消行为、capability 与结果限制。`ToolCatalog` 只负责稳定 schema、动态发现和 fingerprint；`ToolExecutor` 固定执行 normalize、validate、authorize、execute、输出校验和 middleware。连续的只读且并发安全调用使用有界并发执行，checkpoint 仍按模型 tool-call 顺序写入。
 
-超过 16 KiB 的结果写入 `.capslock/state/artifacts/sha256/`，单项最多 5 MiB。模型只收到脱敏预览和 artifact ID；`read_tool_artifact` 只能分块读取当前 session 的 artifact，session 删除会级联清理记录与文件。
+超过 16 KiB 的结果写入 `.capslock/state/artifacts/sha256/`，单项最多 5 MiB。模型只收到脱敏预览和 artifact ID；`read_tool_artifact` 只能分块读取当前 session 的 artifact，session 删除会级联清理记录与文件。消息、Tool Result 与文本 Artifact 同时写入 session-scoped episodic FTS；每轮自动回填最多 5 条/4 KiB，`search_session_history` 可显式检索最多 20 条。隔离的可疑 Artifact 不索引正文。
 
 ## 上下文预算
 
-输入预算由模型 `context_window - max_output_tokens` 计算，并计入 system prompt、memory、显式 attachment、Skill catalog、工具 schema 与 checkpoint。`context.tokenizer` 支持 `adaptive`、`heuristic` 与 `tiktoken:<encoding>`；adaptive 按模型 profile 保存 API usage 校准比率并始终保留安全余量。达到触发比例后先微压缩旧大型工具结果，再保留最近六轮并由 fast 角色生成结构化摘要。`/context` 展示 system/tools/history/attachment/memory 分类、估算器策略、样本和安全余量。摘要作为不可变 compaction artifact 保存来源边界、token、profile 与 digest；连续失败达到上限后返回 `context_budget_exceeded`。
+输入预算由模型 `context_window - max_output_tokens` 计算，并计入 system prompt、memory、episodic recall、显式 attachment、Skill catalog、工具 schema 与 checkpoint。达到触发比例后，旧 Tool Result 必须先成功写入 Artifact 才能从模型上下文替换；随后按消息/token 分块进行 map-reduce 摘要，不再对原始 JSON 做字符切片。摘要 v2 保存来源引用和检索提示，旧 v1 继续兼容；持久化或压缩失败返回 `context_budget_exceeded`，不会留下不可恢复的哈希占位。
 
 Composer 的 `@path[:line[-line]]` 仅在用户显式引用时读取工作区文本，最多四项、合计 64 KiB，并标记为不可信数据。启用 IDE Bridge 后，编辑器使用权限 `0600` 的 Unix socket descriptor 与随机 token 调用 JSON-RPC protocol 1；只有提示中的 `@selection` / `@diagnostics` 会展开最近上下文，路径仍受工作区私有文件边界限制。`CAPSLOCK_IDE=1` 可临时启用，持久配置使用 `[bridge]`。
 
@@ -265,7 +265,7 @@ ToolLoop 每个模型或工具阶段写 `run_steps`。只有 completed 且带 ch
 
 调度器按契约顺序返回结果，兄弟任务失败不会互相取消，父运行取消会传播到全部未完成子任务。子快照排除 `.git`、`.capslock`、环境文件和符号链接，并使用自己的 workspace/memory 数据库。后台任务通过独立 `agent_mailbox` 表交换 instruction/question/response/progress/artifact offer/cancel；消息先脱敏并限制为 32 KiB，读取时复验 SHA-256，状态为 queued/delivered/acknowledged/expired。`AgentOutputVerifier` 校验输出对象、allowlist 路径、必需检查、文件大小和 SHA-256；未通过的输出只返回失败诊断。
 
-workspace schema 14 使用 Agent、mailbox、performance span、Tool invocation、input request、task dependency、session lineage、active compaction、context snapshot、session worktree 与 Plan Mode 表保存可恢复状态、审计与验证结果。portable archive 默认不包含 artifact 正文。
+workspace schema 16 使用 Agent、mailbox、performance span、Tool invocation、input request、task dependency、session lineage、active compaction、context snapshot、episodic document、session worktree 与 Plan Mode 表保存可恢复状态、审计与验证结果。portable archive 默认不包含 artifact 正文，也不包含可重建的 episodic 与摘要分段索引。
 
 ## 记忆契约
 
@@ -281,15 +281,17 @@ workspace schema 14 使用 Agent、mailbox、performance span、Tool invocation�
 - `memory_audit`：包括 purge 后仍保留的操作轨迹。
 - `memory_fts`：仅索引当前 active revision。
 
-默认策略为 `automatic`。自动采用只接受用户直接陈述或带有效 evidence/source 的工具事实、置信度至少 0.90、无风险且属于 workspace/session/agent 作用域的新候选；global、冲突、推断与可从仓库重新推导的内容仍要求审核或丢弃。外部网页或 MCP 内容不会仅凭模型总结直接成为记忆。
+默认策略为 `automatic`。提取分数只保留作诊断，独立验证器在不接收该分数的情况下检查逐字来源，再使用与模型 profile、验证 Prompt 版本绑定的 `memory-verifier-v1` 校准文件；不存在精确匹配的校准时保持 review-only。直接来源自动采纳阈值为 0.95，多来源推断为 0.98 且至少需要两个独立用户来源；global、冲突、指令、验证失败与无来源内容要求审核。项目事实不会仅因类型为 `project` 被标记为指令。
+
+`temporary` 缺省在 7 天后 purge，`session` 按 lifecycle owner 清理，`project` 绑定 workspace `project_instance_id`，`durable` 长期保留。提取作业读取完整用户 transcript，按 40k 字符预算分段并保留重叠来源；未变化 map 分段按 digest 复用，并由 reduce 阶段合并跨轮偏好。
 
 记忆 context 最多 5 条、合计最多 4 KiB，并标记为不可信 JSON 数据。召回要求 lexical top-10 或 cosine ≥ 0.45 且最终分数 ≥ 0.50；超长内容按 UTF-8 截断。`purge` 删除全部 revision 正文、FTS、向量、来源和作业关联正文。导入接受 `capslock-memory-export` version 3/4。
 
 ## 数据库与布局
 
-工作区数据库使用 application ID `0x434C4B32`、schema 14，记忆数据库使用 `0x434C4D32`。两者开启 foreign keys、WAL 和 5 秒 busy timeout；记忆库额外开启 secure delete 并设置文件权限 `0600`。schema 12→13 增加脱敏本地 performance span，schema 13→14 增加 Agent mailbox；迁移均先 checkpoint 和备份。
+工作区数据库使用 application ID `0x434C4B32`、schema 16，记忆数据库使用 `0x434C4D32`、schema 5。两者开启 foreign keys、WAL 和 5 秒 busy timeout；记忆库额外开启 secure delete 并设置文件权限 `0600`。workspace v16 增加 episodic 索引，memory v5 增加验证与生命周期字段；迁移均先 checkpoint 和备份。
 
-应用先读取 application ID 和 schema version，确认是当前格式或可迁移格式后才切换 WAL。workspace schema 为 14，memory schema 为 4；其他 application ID 或 schema 只报错，不修改原数据库。portable archive 和 session export 当前为 version 6，portable archive 读取兼容 version 3/4/5；导入后按数据库 revision 重建计划镜像。
+应用先读取 application ID 和 schema version，确认是当前格式或可迁移格式后才切换 WAL。workspace schema 为 16，memory schema 为 5；其他 application ID 或 schema 只报错，不修改原数据库。episodic 索引属于派生数据，导入、branch 和 rewind 后可幂等重建。
 
 portable import 使用 archive ID 幂等记录。相同 ID 与内容跳过，同 ID 不同内容确定性重映射并重写引用。running run 转为 interrupted，approved/running action 转为 pending；导入的历史副作用不能在目标工作区执行 undo。
 

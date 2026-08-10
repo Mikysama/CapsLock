@@ -86,6 +86,9 @@ class ContextSettings:
     summary_max_tokens: int = 2_048
     max_compaction_failures: int = 3
     tokenizer: str = "adaptive"
+    episodic_recall_enabled: bool = True
+    episodic_recall_limit: int = 5
+    episodic_recall_bytes: int = 4_096
 
 
 @dataclass(frozen=True)
@@ -175,6 +178,7 @@ class MemorySettings:
     maintenance_enabled: bool = True
     policy: str = "automatic"
     database: Path | None = None
+    temporary_ttl_days: int = 7
 
 
 @dataclass(frozen=True)

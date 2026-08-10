@@ -18,6 +18,10 @@ class RunJournalRepository(
     RunEventJournalRepository,
     Repository,
 ):
+    def __init__(self, database, *, episodic=None) -> None:
+        super().__init__(database)
+        self.episodic = episodic
+
     async def interrupt_active(self) -> None:
         """Close crash-left journal records before accepting new workspace work."""
         timestamp = now()

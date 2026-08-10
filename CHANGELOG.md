@@ -4,6 +4,30 @@
 
 ## [Unreleased]
 
+## [2.7.4] - 2026-08-10
+
+### Added
+
+- 新增 session-scoped episodic FTS，统一检索 transcript、Tool Result 与文本 Artifact；每轮自动回填最多 5 条/4 KiB，并提供只读 `search_session_history`。
+- 新增位置敏感 context 评测与 memory calibration 评测，分别覆盖 front/middle/tail 和自动采纳 precision、recall、ECE。
+- Memory Candidate 新增多来源、extractor/verifier 分数、验证状态、指令属性和 profile/Prompt 绑定校准版本。
+
+### Changed
+
+- 旧 Tool Result 只有在 Artifact 持久化成功后才从上下文替换；摘要改为可缓存的分层 map-reduce，并以 summary v2 保存来源覆盖和检索提示。
+- 记忆提取读取完整用户 transcript，复用未变化分段并在 reduce 阶段识别跨轮偏好；独立验证器不再接收 extractor confidence。
+- `temporary` 默认 7 天 TTL，`session` 绑定 lifecycle owner，`project` 绑定 workspace 实例，`durable` 不自动过期或随 session/project 清理。
+
+### Security
+
+- 二进制 Artifact 与 prompt-injection quarantine 只索引安全元数据；持久化失败保留原文并返回 `context_budget_exceeded`。
+- 自动记忆采纳只接受校准概率；未知模型 profile、冲突、global、指令型、无来源或验证失败候选全部 review-only。
+
+### Compatibility
+
+- workspace schema 从 15 升至 16，memory schema 从 4 升至 5；两者均使用 backup-first 迁移。
+- portable archive 6、session export 6、config 9、permissions 2、JSONL schema 3、IDE Bridge protocol 1 和 plugin protocol 4 保持不变。
+
 ## [2.7.3] - 2026-07-29
 
 ### Added

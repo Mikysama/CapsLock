@@ -1,6 +1,12 @@
 """Filesystem tool registration."""
 
-from .read import list_files, read_file, read_image, read_tool_artifact
+from .read import (
+    list_files,
+    read_file,
+    read_image,
+    read_tool_artifact,
+    search_session_history,
+)
 from .search import glob_files, search_files, search_tools
 from .write import create_file, edit_file, write_file
 
@@ -60,6 +66,24 @@ def filesystem_tools():
             "Read a PNG, JPEG, GIF, or WebP workspace image as a rich image result.",
             _schema({"path": _str()}, ["path"]),
             read_image,
+            policy=safe_read,
+        ),
+        define_tool(
+            "search_session_history",
+            "Search original messages, historical tool results, and artifact text in this session.",
+            _schema(
+                {
+                    "query": _str(),
+                    "kinds": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": ["message", "tool_result", "artifact"]},
+                        "uniqueItems": True,
+                    },
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 20},
+                },
+                ["query"],
+            ),
+            search_session_history,
             policy=safe_read,
         ),
         define_tool(

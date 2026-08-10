@@ -14,7 +14,7 @@ from ...domain import (
     MemoryType,
 )
 
-MEMORY_COLUMNS = """m.id,m.scope,m.workspace_key,m.session_id,m.namespace,m.status,m.current_revision,m.origin,
+MEMORY_COLUMNS = """m.id,m.scope,m.workspace_key,m.session_id,m.namespace,m.owner_session_id,m.project_instance_id,m.status,m.current_revision,m.origin,
  m.source_valid,m.created_at AS memory_created_at,m.updated_at,m.purged_at,
  r.content,r.memory_type,r.source_kind,r.source_ref,r.confidence,r.expires_at,
  r.subject,r.durability,r.why,r.how_to_apply,r.last_verified_at"""
@@ -74,4 +74,6 @@ def memory_from_row(row) -> MemoryInfo:
         why=row["why"],
         how_to_apply=row["how_to_apply"],
         last_verified_at=row["last_verified_at"],
+        owner_session_id=row["owner_session_id"],
+        project_instance_id=row["project_instance_id"],
     )

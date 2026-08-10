@@ -1,0 +1,12 @@
+{
+  "calibration_version": "memory-verifier-v1-fixture",
+  "prompt_version": "memory-candidate-verification-v1",
+  "model_profiles": ["fast"],
+  "bins": [
+    {"upper_bound": 0.8, "scale": 0.5},
+    {"upper_bound": 0.9, "probability": 0.8},
+    {"upper_bound": 0.95, "probability": 0.9},
+    {"upper_bound": 0.98, "probability": 0.95},
+    {"upper_bound": 1.01, "probability": 0.99}
+  ]
+}

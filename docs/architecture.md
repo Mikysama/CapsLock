@@ -19,6 +19,12 @@ extensions.
 - Collaboration mailbox, artifact publication, and audit components are independent of
   scheduling. Memory settings are independent of catalog, recall, capture, maintenance,
   and transfer services.
+- Raw transcript and tool artifacts remain authoritative. Episodic FTS, context summary
+  segments, and memory extraction segment caches are derived indexes with explicit
+  rebuild paths; portable exports must not treat them as source records.
+- Memory extraction and verification are separate model calls. Automatic adoption may
+  depend only on a calibration bound to the verifier model profile and prompt version;
+  missing calibration is review-only.
 - Slash-command handlers live under `cli/command_handlers/`; filesystem handlers live
   under `tooling/tools/filesystem/`; external Web and MCP Actions live under
   `application/action_system/external_actions/`.

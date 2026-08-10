@@ -33,6 +33,8 @@ class MemoryTransferService:
         workspace_key: str,
         session_id: str,
         event,
+        temporary_ttl_days: int = 7,
+        project_instance_id: str | None = None,
     ) -> None:
         self.repositories, self.workspace, self.workspace_key = (
             repositories,
@@ -40,6 +42,8 @@ class MemoryTransferService:
             workspace_key,
         )
         self.session_id, self.event = session_id, event
+        self.temporary_ttl_days = temporary_ttl_days
+        self.project_instance_id = project_instance_id or workspace_key
 
     async def export_json(
         self,
@@ -161,6 +165,17 @@ class MemoryTransferService:
                 raise ValueError("agent-scope imports require a namespace")
             safe, redactions = validated_text(record.get("content"))
             rules.extend(redactions)
+            durability = MemoryDurability(record.get("durability", "durable"))
+            raw_expiry = expiry(record.get("expires_at"))
+            if durability is not MemoryDurability.TEMPORARY and raw_expiry is not None:
+                raise ValueError("expires_at is only valid for temporary memory")
+            expires_at = raw_expiry
+            if durability is MemoryDurability.TEMPORARY and expires_at is None:
+                from datetime import timedelta
+
+                expires_at = (
+                    datetime.now(UTC) + timedelta(days=self.temporary_ttl_days)
+                ).isoformat()
             output.append(
                 await self.repositories.lifecycle.create(
                     content=safe,
@@ -171,7 +186,7 @@ class MemoryTransferService:
                     source_kind="import",
                     source_ref=None,
                     confidence=confidence(record.get("confidence", 1)),
-                    expires_at=expiry(record.get("expires_at")),
+                    expires_at=expires_at,
                     origin=MemoryOrigin.IMPORTED,
                     operation="import",
                     namespace=(
@@ -180,7 +195,7 @@ class MemoryTransferService:
                         else None
                     ),
                     subject=str(record["subject"]) if record.get("subject") else None,
-                    durability=MemoryDurability(record.get("durability", "durable")),
+                    durability=durability,
                     why=str(record["why"]) if record.get("why") else None,
                     how_to_apply=(
                         str(record["how_to_apply"])
@@ -190,6 +205,16 @@ class MemoryTransferService:
                     last_verified_at=(
                         str(record["last_verified_at"])
                         if record.get("last_verified_at")
+                        else None
+                    ),
+                    owner_session_id=(
+                        self.session_id
+                        if durability is MemoryDurability.SESSION
+                        else None
+                    ),
+                    project_instance_id=(
+                        self.project_instance_id
+                        if durability is MemoryDurability.PROJECT
                         else None
                     ),
                 )

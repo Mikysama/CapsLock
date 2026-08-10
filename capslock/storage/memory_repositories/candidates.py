@@ -9,6 +9,7 @@ from ...domain import (
     MemoryCandidateInfo,
     MemoryCandidateStatus,
     MemoryDurability,
+    MemoryCandidateSourceInfo,
     MemoryPolicy,
     MemoryScope,
     MemoryType,
@@ -26,6 +27,44 @@ _SELECT_CANDIDATE = """SELECT c.*,
 
 
 class CandidateRepository(Repository):
+    async def extraction_segment(
+        self, source_digest: str, model: str, prompt_version: str
+    ) -> str | None:
+        row = await self.one(
+            """SELECT response_json FROM memory_extraction_segments
+               WHERE source_digest=? AND model=? AND prompt_version=?""",
+            (source_digest, model, prompt_version),
+        )
+        return None if row is None else str(row["response_json"])
+
+    async def store_extraction_segment(
+        self,
+        *,
+        source_digest: str,
+        model: str,
+        prompt_version: str,
+        response_json: str,
+        source_refs: list[str],
+        input_tokens: int,
+        output_tokens: int,
+    ) -> None:
+        await self.execute(
+            """INSERT OR IGNORE INTO memory_extraction_segments(
+               id,source_digest,model,prompt_version,response_json,source_refs_json,
+               input_tokens,output_tokens,created_at) VALUES(?,?,?,?,?,?,?,?,?)""",
+            (
+                f"segment_{uuid.uuid4().hex}",
+                source_digest,
+                model,
+                prompt_version,
+                response_json,
+                json.dumps(source_refs, ensure_ascii=False),
+                input_tokens,
+                output_tokens,
+                timestamp(),
+            ),
+        )
+
     async def start_extraction(
         self,
         *,
@@ -100,13 +139,21 @@ class CandidateRepository(Repository):
         why: str | None = None,
         how_to_apply: str | None = None,
         source: dict[str, object] | None = None,
+        sources: tuple[dict[str, object], ...] = (),
+        extractor_confidence: float | None = None,
+        verifier_confidence: float | None = None,
+        verification_status: str = "unverified",
+        instruction_like: bool = False,
+        calibration_version: str | None = None,
     ) -> MemoryCandidateInfo:
         identifier = f"cand_{uuid.uuid4().hex}"
         await self.execute(
             """INSERT INTO memory_candidates(id,extraction_id,content,memory_type,scope,namespace,
                subject,durability,why,how_to_apply,workspace_key,session_id,source_run_id,
-               confidence,status,relation,related_memory_id,risk_flags_json,created_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               confidence,extractor_confidence,verifier_confidence,verification_status,
+               instruction_like,calibration_version,status,relation,related_memory_id,
+               risk_flags_json,created_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 identifier,
                 extraction_id,
@@ -122,6 +169,11 @@ class CandidateRepository(Repository):
                 session_id,
                 source_run_id,
                 confidence,
+                confidence if extractor_confidence is None else extractor_confidence,
+                verifier_confidence,
+                verification_status,
+                int(instruction_like),
+                calibration_version,
                 status.value,
                 relation,
                 related_memory_id,
@@ -129,26 +181,49 @@ class CandidateRepository(Repository):
                 timestamp(),
             ),
         )
-        if source is not None:
+        all_sources = sources or ((source,) if source is not None else ())
+        for source_item in all_sources:
             await self.execute(
                 """INSERT INTO memory_candidate_sources(
                    candidate_id,message_id,evidence_id,quote,direct,verified,created_at)
                    VALUES(?,?,?,?,?,?,?)""",
                 (
                     identifier,
-                    source.get("message_id"),
-                    source.get("evidence_id"),
-                    source["quote"],
-                    int(bool(source.get("direct"))),
-                    int(bool(source.get("verified"))),
+                    source_item.get("message_id"),
+                    source_item.get("evidence_id"),
+                    source_item["quote"],
+                    int(bool(source_item.get("direct"))),
+                    int(bool(source_item.get("verified"))),
                     timestamp(),
                 ),
             )
         return await self.require(identifier)
 
+    async def sources(self, candidate_id: str) -> tuple[MemoryCandidateSourceInfo, ...]:
+        rows = await self.all(
+            """SELECT message_id,evidence_id,quote,direct,verified
+               FROM memory_candidate_sources WHERE candidate_id=? ORDER BY id""",
+            (candidate_id,),
+        )
+        return tuple(
+            MemoryCandidateSourceInfo(
+                row["message_id"],
+                row["evidence_id"],
+                str(row["quote"]),
+                bool(row["direct"]),
+                bool(row["verified"]),
+            )
+            for row in rows
+        )
+
     async def get(self, candidate_id: str) -> MemoryCandidateInfo | None:
         row = await self.one(_SELECT_CANDIDATE + " WHERE c.id=?", (candidate_id,))
-        return None if row is None else _candidate(row)
+        if row is None:
+            return None
+        item = _candidate(row)
+        from dataclasses import replace
+
+        return replace(item, sources=await self.sources(item.id))
 
     async def require(self, candidate_id: str) -> MemoryCandidateInfo:
         item = await self.get(candidate_id)
@@ -169,7 +244,10 @@ class CandidateRepository(Repository):
             raise ValueError("candidate id prefix is ambiguous")
         if not rows:
             raise ValueError("memory candidate does not exist in this session")
-        return _candidate(rows[0])
+        from dataclasses import replace
+
+        item = _candidate(rows[0])
+        return replace(item, sources=await self.sources(item.id))
 
     async def list(
         self,
@@ -185,7 +263,13 @@ class CandidateRepository(Repository):
             query += " AND c.status IN ('pending','conflict')"
         query += " ORDER BY c.created_at LIMIT ?"
         values.append(limit)
-        return [_candidate(row) for row in await self.all(query, tuple(values))]
+        output = []
+        from dataclasses import replace
+
+        for row in await self.all(query, tuple(values)):
+            item = _candidate(row)
+            output.append(replace(item, sources=await self.sources(item.id)))
+        return output
 
     async def decide(
         self,
@@ -260,4 +344,13 @@ def _candidate(row) -> MemoryCandidateInfo:
         source_quote=row["source_quote"],
         direct=bool(row["source_direct"]),
         verified=bool(row["source_verified"]),
+        extractor_confidence=float(row["extractor_confidence"] or 0),
+        verifier_confidence=(
+            float(row["verifier_confidence"])
+            if row["verifier_confidence"] is not None
+            else None
+        ),
+        verification_status=str(row["verification_status"]),
+        instruction_like=bool(row["instruction_like"]),
+        calibration_version=row["calibration_version"],
     )

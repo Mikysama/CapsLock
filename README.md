@@ -2,7 +2,7 @@
 
 CapsLock 是一个本机工作区 Agent，用于读取和修改代码、检索证据、运行受沙箱保护的 Shell、查询代码语义，以及按审批策略访问 Web、MCP 和本地插件。Tool Runtime v2 将工具契约、参数级策略、可恢复暂停、调度、富结果与审计统一到异步执行链。
 
-当前源码版本为 `2.7.3`。本版本统一提示词信任边界，强化子 Agent 与开放世界内容隔离，并新增通过审批生成项目 `CAPSLOCK.md` 的 `/init`。当前协议为 workspace schema 15、memory schema 4、portable archive 6、session export 6 和 config 9。完整边界见 [2.7.3 发布说明](docs/releases/v2.7.3.md)。
+当前源码版本为 `2.7.4`。本版本新增可追溯的 session episodic retrieval、无损 Tool Result 外部化与分层摘要，并重构记忆验证、校准和 durability 生命周期。当前协议为 workspace schema 16、memory schema 5、portable archive 6、session export 6 和 config 9。完整边界见 [2.7.4 发布说明](docs/releases/v2.7.4.md)。
 
 正式支持矩阵：Linux/macOS，Python 3.12。发布 CI 会在两个操作系统组合中执行测试、构建、依赖审计和安装冒烟。
 
@@ -274,7 +274,9 @@ capslock plugin uninstall my-plugin --yes
 /memory embeddings rebuild
 ```
 
-召回保持 4 KiB、最多 5 条的限制，使用 72% retrieval 与 scope、confidence、类型化 freshness、source validity 融合；候选必须命中 lexical top-10 或 cosine ≥ 0.45，最终分数至少 0.50。长内容按 UTF-8 边界截断。FastEmbed 和向量计算在工作线程执行；语义不可用时显式降级为词法召回。`capslock exec --no-memory` 对本轮禁用读取、引用和捕获。
+召回保持 4 KiB、最多 5 条的限制，使用 72% retrieval 与 scope、confidence、类型化 freshness、source validity 融合；候选必须命中 lexical top-10 或 cosine ≥ 0.45，最终分数至少 0.50。长内容按 UTF-8 边界截断。自动采纳使用与提取器隔离的验证调用和按模型 profile、验证 Prompt 版本绑定的保守校准，直接来源阈值为 0.95，多来源推断阈值为 0.98；未知校准、指令型、冲突或验证失败的候选进入审核。`capslock exec --no-memory` 对本轮禁用读取、引用和捕获。
+
+durability 具有实际生命周期：`temporary` 缺省 7 天 TTL，`session` 随所属 session 删除，`project` 绑定 workspace 实例，`durable` 不自动清理。后台提取读取完整用户会话并分段，Candidate 可保留多个逐字来源。
 
 记忆导入导出格式为 `capslock-memory-export` version 4；导入接受 version 3/4，v3 字段使用安全默认值。
 
@@ -369,6 +371,9 @@ preserve_recent_turns = 6
 inline_tool_result_bytes = 16384
 summary_max_tokens = 2048
 max_compaction_failures = 3
+episodic_recall_enabled = true
+episodic_recall_limit = 5
+episodic_recall_bytes = 4096
 
 [agents]
 enabled = true
@@ -433,6 +438,7 @@ recall_enabled = true
 manual_write_enabled = true
 maintenance_enabled = true
 policy = "automatic"
+temporary_ttl_days = 7
 ```
 
 `CAPSLOCK_HOME` 与 `CAPSLOCK_MEMORY_DATABASE` 必须是 shell 中的绝对路径。

@@ -1,0 +1,6 @@
+{"name":"direct preference","raw_score":0.99,"supported":true,"sources":1,"instruction_like":false}
+{"name":"verified project fact","raw_score":0.98,"supported":true,"sources":1,"instruction_like":false}
+{"name":"multi-turn preference","raw_score":0.99,"supported":true,"sources":2,"instruction_like":false}
+{"name":"unsupported inference","raw_score":0.10,"supported":false,"sources":1,"instruction_like":false}
+{"name":"assistant-only inference","raw_score":0.05,"supported":false,"sources":1,"instruction_like":false}
+{"name":"behavior instruction","raw_score":0.99,"supported":true,"sources":1,"instruction_like":true}

@@ -36,6 +36,9 @@ _GROUP_FIELDS = {
         "summary_max_tokens",
         "max_compaction_failures",
         "tokenizer",
+        "episodic_recall_enabled",
+        "episodic_recall_limit",
+        "episodic_recall_bytes",
     },
     "agents": {
         "enabled",
@@ -79,6 +82,7 @@ _GROUP_FIELDS = {
         "manual_write_enabled",
         "maintenance_enabled",
         "policy",
+        "temporary_ttl_days",
     },
     "routing": {"reasoning", "fast", "embedding", "vision"},
     "budget": {"max_run_tokens", "max_run_usd", "max_session_usd"},
@@ -305,6 +309,8 @@ def validate_semantics(document: dict[str, object]) -> None:
             "automatic",
         }:
             raise ValueError("memory.policy must be off, review, or automatic")
+        if not 1 <= int(memory.get("temporary_ttl_days", 7)) <= 365:
+            raise ValueError("memory.temporary_ttl_days must be between 1 and 365")
     context = document.get("context", {})
     if isinstance(context, dict):
         boolean(context.get("auto_compact", True))
@@ -319,9 +325,14 @@ def validate_semantics(document: dict[str, object]) -> None:
             ("inline_tool_result_bytes", 16_384),
             ("summary_max_tokens", 2_048),
             ("max_compaction_failures", 3),
+            ("episodic_recall_limit", 5),
+            ("episodic_recall_bytes", 4_096),
         ):
             if int(context.get(field, default)) <= 0:
                 raise ValueError(f"context.{field} must be positive")
+        boolean(context.get("episodic_recall_enabled", True))
+        if int(context.get("episodic_recall_limit", 5)) > 20:
+            raise ValueError("context.episodic_recall_limit must not exceed 20")
         tokenizer = str(context.get("tokenizer", "adaptive"))
         if tokenizer != "adaptive" and not tokenizer.startswith("tiktoken:") and tokenizer != "heuristic":
             raise ValueError("context.tokenizer must be adaptive, heuristic, or tiktoken:<encoding>")

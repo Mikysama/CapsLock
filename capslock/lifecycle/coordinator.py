@@ -17,6 +17,8 @@ from .errors import LifecycleError
 from .import_merge import (
     merge_tables,
     normalize_imported_workflow,
+    rebind_imported_project_memories,
+    rebuild_episodic_search,
     rebuild_memory_fts,
     rebuild_session_search,
     rewrite_deferred_references,
@@ -124,6 +126,10 @@ class ImportCoordinator:
                     workspace_connection,
                     set(workspace_maps.get("sessions", {}).values()),
                 )
+                rebuild_episodic_search(
+                    workspace_connection,
+                    set(workspace_maps.get("sessions", {}).values()),
+                )
                 memory_maps = merge_tables(
                     memory_connection,
                     memory_rows,
@@ -136,6 +142,15 @@ class ImportCoordinator:
                     external_maps=workspace_maps,
                     target_workspace_key=workspace_key(self.workspace),
                 )
+                project_row = workspace_connection.execute(
+                    "SELECT value FROM database_metadata WHERE key='project_instance_id'"
+                ).fetchone()
+                if project_row is not None:
+                    rebind_imported_project_memories(
+                        memory_connection,
+                        set(memory_maps.get("memories", {}).values()),
+                        str(project_row["value"]),
+                    )
                 rebuild_memory_fts(
                     memory_connection,
                     set(memory_maps.get("memories", {}).values()),

@@ -19,7 +19,7 @@ async def upgrade_workspace_schema(
     if source_version is None:
         row = await (await connection.execute("PRAGMA user_version")).fetchone()
         source_version = int(row[0])
-    if source_version not in {6, 7, 8, 9, 10, 11, 12, 13, 14}:
+    if source_version not in {6, 7, 8, 9, 10, 11, 12, 13, 14, 15}:
         raise ValueError(f"unsupported workspace upgrade source: {source_version}")
     checkpoint = await connection.execute("PRAGMA wal_checkpoint(FULL)")
     await checkpoint.close()
@@ -51,7 +51,21 @@ async def upgrade_workspace_schema(
             await connection.executescript(_UPGRADE_WORKSPACE_THIRTEEN)
         if source_version in {6, 7, 8, 9, 10, 11, 12, 13}:
             await connection.executescript(_UPGRADE_WORKSPACE_FOURTEEN)
-        await connection.executescript(_UPGRADE_WORKSPACE_FIFTEEN)
+        if source_version != 15:
+            await connection.executescript(_UPGRADE_WORKSPACE_FIFTEEN)
+        artifact_columns = {
+            str(row[1])
+            for row in await (
+                await connection.execute("PRAGMA table_info(tool_artifacts)")
+            ).fetchall()
+        }
+        if "index_content" not in artifact_columns:
+            await connection.execute(
+                """ALTER TABLE tool_artifacts ADD COLUMN index_content INTEGER
+                   NOT NULL DEFAULT 1 CHECK(index_content IN (0,1))"""
+            )
+            await connection.commit()
+        await connection.executescript(_UPGRADE_WORKSPACE_SIXTEEN)
     except BaseException:
         await connection.rollback()
         raise
@@ -64,11 +78,11 @@ async def upgrade_memory_schema(
     *,
     source_version: int | None = None,
 ) -> Path:
-    """Backup and transactionally migrate the user memory database to v4."""
+    """Backup and transactionally migrate the user memory database to v5."""
     if source_version is None:
         row = await (await connection.execute("PRAGMA user_version")).fetchone()
         source_version = int(row[0])
-    if source_version != 3:
+    if source_version not in {3, 4}:
         raise ValueError(f"unsupported memory upgrade source: {source_version}")
     checkpoint = await connection.execute("PRAGMA wal_checkpoint(FULL)")
     await checkpoint.close()
@@ -84,7 +98,9 @@ async def upgrade_memory_schema(
     )
     await asyncio.to_thread(_backup, path, backup)
     try:
-        await connection.executescript(_UPGRADE_MEMORY_CURRENT)
+        if source_version == 3:
+            await connection.executescript(_UPGRADE_MEMORY_CURRENT)
+        await connection.executescript(_UPGRADE_MEMORY_FIVE)
     except BaseException:
         await connection.rollback()
         raise
@@ -716,6 +732,118 @@ PRAGMA foreign_keys=ON;
 """
 
 
+_UPGRADE_WORKSPACE_SIXTEEN = """
+BEGIN IMMEDIATE;
+CREATE TABLE IF NOT EXISTS context_summary_segments (
+  id TEXT PRIMARY KEY,
+  source_digest TEXT NOT NULL,
+  model_profile TEXT NOT NULL,
+  summary_json TEXT NOT NULL CHECK(json_valid(summary_json)),
+  source_refs_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(source_refs_json)),
+  input_tokens INTEGER NOT NULL DEFAULT 0 CHECK(input_tokens>=0),
+  output_tokens INTEGER NOT NULL DEFAULT 0 CHECK(output_tokens>=0),
+  created_at TEXT NOT NULL,
+  UNIQUE(source_digest,model_profile)
+) STRICT;
+CREATE TABLE IF NOT EXISTS episodic_documents (
+  id INTEGER PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  run_id TEXT REFERENCES runs(id) ON DELETE CASCADE,
+  source_kind TEXT NOT NULL CHECK(source_kind IN ('message','tool_result','artifact')),
+  source_id TEXT NOT NULL,
+  chunk_ordinal INTEGER NOT NULL CHECK(chunk_ordinal>=0),
+  content TEXT NOT NULL,
+  artifact_id TEXT REFERENCES tool_artifacts(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL,
+  UNIQUE(session_id,source_kind,source_id,chunk_ordinal)
+) STRICT;
+CREATE INDEX IF NOT EXISTS idx_episodic_documents_session ON episodic_documents(session_id,created_at);
+CREATE VIRTUAL TABLE IF NOT EXISTS episodic_fts USING fts5(
+  content,
+  content='episodic_documents',
+  content_rowid='id',
+  tokenize='unicode61'
+);
+CREATE TRIGGER IF NOT EXISTS episodic_documents_ai AFTER INSERT ON episodic_documents BEGIN
+  INSERT INTO episodic_fts(rowid,content) VALUES(new.id,new.content);
+END;
+CREATE TRIGGER IF NOT EXISTS episodic_documents_ad AFTER DELETE ON episodic_documents BEGIN
+  INSERT INTO episodic_fts(episodic_fts,rowid,content) VALUES('delete',old.id,old.content);
+END;
+CREATE TRIGGER IF NOT EXISTS episodic_documents_au AFTER UPDATE ON episodic_documents BEGIN
+  INSERT INTO episodic_fts(episodic_fts,rowid,content) VALUES('delete',old.id,old.content);
+  INSERT INTO episodic_fts(rowid,content) VALUES(new.id,new.content);
+END;
+CREATE TRIGGER IF NOT EXISTS episodic_messages_ai AFTER INSERT ON messages BEGIN
+  INSERT OR IGNORE INTO episodic_documents(
+    session_id,run_id,source_kind,source_id,chunk_ordinal,content,created_at
+  ) VALUES(new.session_id,new.run_id,'message',cast(new.id AS TEXT),0,new.content,new.created_at);
+END;
+CREATE TRIGGER IF NOT EXISTS episodic_tool_invocations_ai AFTER INSERT ON tool_invocations
+WHEN new.result_preview IS NOT NULL BEGIN
+  INSERT OR IGNORE INTO episodic_documents(
+    session_id,run_id,source_kind,source_id,chunk_ordinal,content,artifact_id,created_at
+  ) VALUES(new.session_id,new.run_id,'tool_result',new.id,0,new.result_preview,new.artifact_id,new.started_at);
+END;
+CREATE TRIGGER IF NOT EXISTS episodic_tool_artifacts_ai AFTER INSERT ON tool_artifacts BEGIN
+  INSERT OR IGNORE INTO episodic_documents(
+    session_id,run_id,source_kind,source_id,chunk_ordinal,content,artifact_id,created_at
+  ) VALUES(
+    new.session_id,new.run_id,'artifact',new.id,0,
+    CASE
+      WHEN new.index_content=0 THEN
+        'quarantined artifact metadata: media_type=' || new.media_type ||
+        '; size_bytes=' || new.size_bytes || '; sha256=' || new.sha256 ||
+        '; content omitted'
+      WHEN lower(new.media_type) LIKE 'text/%'
+        OR lower(new.media_type) LIKE 'application/%json%'
+        OR lower(new.media_type) LIKE 'application/%xml%'
+        OR lower(new.media_type) IN (
+          'application/javascript','application/x-javascript',
+          'application/yaml','application/x-yaml'
+        ) THEN new.preview
+      ELSE 'binary artifact metadata: media_type=' || new.media_type ||
+        '; size_bytes=' || new.size_bytes || '; sha256=' || new.sha256 ||
+        '; content omitted'
+    END,
+    new.id,new.created_at
+  );
+END;
+INSERT OR IGNORE INTO episodic_documents(
+  session_id,run_id,source_kind,source_id,chunk_ordinal,content,created_at
+)
+SELECT session_id,run_id,'message',cast(id AS TEXT),0,content,created_at FROM messages;
+INSERT OR IGNORE INTO episodic_documents(
+  session_id,run_id,source_kind,source_id,chunk_ordinal,content,artifact_id,created_at
+)
+SELECT session_id,run_id,'tool_result',id,0,result_preview,artifact_id,started_at
+FROM tool_invocations WHERE result_preview IS NOT NULL;
+INSERT OR IGNORE INTO episodic_documents(
+  session_id,run_id,source_kind,source_id,chunk_ordinal,content,artifact_id,created_at
+)
+SELECT session_id,run_id,'artifact',id,0,
+  CASE
+    WHEN index_content=0 THEN
+      'quarantined artifact metadata: media_type=' || media_type ||
+      '; size_bytes=' || size_bytes || '; sha256=' || sha256 ||
+      '; content omitted'
+    WHEN lower(media_type) LIKE 'text/%'
+      OR lower(media_type) LIKE 'application/%json%'
+      OR lower(media_type) LIKE 'application/%xml%'
+      OR lower(media_type) IN (
+        'application/javascript','application/x-javascript',
+        'application/yaml','application/x-yaml'
+      ) THEN preview
+    ELSE 'binary artifact metadata: media_type=' || media_type ||
+      '; size_bytes=' || size_bytes || '; sha256=' || sha256 ||
+      '; content omitted'
+  END,
+  id,created_at FROM tool_artifacts;
+PRAGMA user_version=16;
+COMMIT;
+"""
+
+
 _UPGRADE_MEMORY_CURRENT = """
 PRAGMA foreign_keys=OFF;
 PRAGMA legacy_alter_table=ON;
@@ -898,4 +1026,48 @@ PRAGMA user_version=4;
 COMMIT;
 PRAGMA legacy_alter_table=OFF;
 PRAGMA foreign_keys=ON;
+"""
+
+
+_UPGRADE_MEMORY_FIVE = """
+BEGIN IMMEDIATE;
+ALTER TABLE memories ADD COLUMN owner_session_id TEXT;
+ALTER TABLE memories ADD COLUMN project_instance_id TEXT;
+ALTER TABLE memory_workspace_settings ADD COLUMN temporary_ttl_days INTEGER NOT NULL DEFAULT 7
+ CHECK(temporary_ttl_days BETWEEN 1 AND 365);
+ALTER TABLE memory_candidates ADD COLUMN extractor_confidence REAL NOT NULL DEFAULT 0
+ CHECK(extractor_confidence>=0 AND extractor_confidence<=1);
+ALTER TABLE memory_candidates ADD COLUMN verifier_confidence REAL
+ CHECK(verifier_confidence IS NULL OR (verifier_confidence>=0 AND verifier_confidence<=1));
+ALTER TABLE memory_candidates ADD COLUMN verification_status TEXT NOT NULL DEFAULT 'unverified'
+ CHECK(verification_status IN ('unverified','supported','unsupported','failed'));
+ALTER TABLE memory_candidates ADD COLUMN instruction_like INTEGER NOT NULL DEFAULT 0
+ CHECK(instruction_like IN (0,1));
+ALTER TABLE memory_candidates ADD COLUMN calibration_version TEXT;
+CREATE TABLE IF NOT EXISTS memory_extraction_segments (
+  id TEXT PRIMARY KEY,
+  source_digest TEXT NOT NULL,
+  model TEXT NOT NULL,
+  prompt_version TEXT NOT NULL,
+  response_json TEXT NOT NULL CHECK(json_valid(response_json)),
+  source_refs_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(source_refs_json)),
+  input_tokens INTEGER NOT NULL DEFAULT 0 CHECK(input_tokens>=0),
+  output_tokens INTEGER NOT NULL DEFAULT 0 CHECK(output_tokens>=0),
+  created_at TEXT NOT NULL,
+  UNIQUE(source_digest,model,prompt_version)
+) STRICT;
+UPDATE memory_candidates SET extractor_confidence=confidence;
+UPDATE memories SET owner_session_id=coalesce(
+  session_id,
+  (SELECT s.session_id FROM memory_sources s
+   WHERE s.memory_id=memories.id AND s.session_id IS NOT NULL ORDER BY s.id LIMIT 1)
+) WHERE id IN (
+  SELECT m.id FROM memories m JOIN memory_revisions r
+  ON r.memory_id=m.id AND r.revision=m.current_revision
+  WHERE r.durability='session'
+);
+UPDATE memory_revisions SET expires_at=strftime('%Y-%m-%dT%H:%M:%fZ','now','+7 days')
+ WHERE durability='temporary' AND expires_at IS NULL;
+PRAGMA user_version=5;
+COMMIT;
 """

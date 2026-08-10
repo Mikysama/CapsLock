@@ -1,6 +1,6 @@
 # 当前运行内核与安全边界
 
-本文描述 CapsLock 2.7.2 的开发边界。产品在本机运行，支持直接能力工具、类型化斜杠命令、可审批 Action、AST 分析与沙箱保护的通用 Shell、session 隔离后台进程、受管理的本地/远程 MCP、LSP、IDE 上下文桥、受控仓库指令和单层子 Agent；不提供远程控制、后台 daemon 或第三方可执行 Hook。
+本文描述 CapsLock 2.7.4 的开发边界。产品在本机运行，支持直接能力工具、类型化斜杠命令、可审批 Action、AST 分析与沙箱保护的通用 Shell、session 隔离后台进程、受管理的本地/远程 MCP、LSP、IDE 上下文桥、受控仓库指令和单层子 Agent；不提供远程控制、后台 daemon 或第三方可执行 Hook。
 
 ## 模块边界
 
@@ -15,7 +15,13 @@
 
 `ToolContract`、`ToolDefinition`、`ResolvedToolPolicy`、`ToolOutcome` 和 `ToolPause` 描述输入/输出 schema、参数级策略、取消行为、富结果及可恢复暂停。`ToolCatalog` 只负责稳定排序、schema fingerprint、deferred discovery 和动态刷新；`ToolExecutor` 固定执行 normalize、validate、authorize、execute、output validation 和 middleware；`ToolRuntime` 是 Agent/ToolLoop 使用的聚合接口。
 
-只允许只读、并发安全且不改变上下文的调用并发，提交顺序保持模型 tool-call 顺序。审批和用户输入可跨进程恢复；副作用执行状态与结果 delivery 状态独立。单项超过 16 KiB 时使用 content-addressed artifact，批次结果受聚合预算限制。
+只允许只读、并发安全且不改变上下文的调用并发，提交顺序保持模型 tool-call 顺序。审批和用户输入可跨进程恢复；副作用执行状态与结果 delivery 状态独立。单项超过 16 KiB 时使用 content-addressed artifact，批次结果受聚合预算限制。旧大型 Tool Result 只有在 Artifact 持久化成功后才能从模型上下文替换；失败必须保留原文并返回 `context_budget_exceeded`。
+
+## 上下文、摘要与 episodic retrieval
+
+原始 transcript、Tool Result 和 Artifact 是事实来源；compaction summary、FTS 和分段缓存均为可重建派生数据。workspace schema 16 使用 session-scoped `episodic_documents` 与 FTS5 保存来源 ID、run、类型和分块序号。文本 Artifact 按 8 KiB 分块，二进制或 prompt-injection quarantine 只索引安全元数据。每轮自动召回最多 5 条、合计 4 KiB，并以不可信 `episodic_recall` section 注入；显式 `search_session_history` 最多返回 20 条，深度读取仍通过 `read_tool_artifact`。
+
+摘要按消息边界和输入预算进行 map-reduce；超大单条消息继续分片，不允许对整体来源执行字符级截断。summary v2 保留来源覆盖与检索提示，v1 继续只读兼容。每个 map 分段按 digest 与模型 profile 缓存，最终 summary 仍不是唯一事实来源。portable export 不包含 episodic 或摘要分段缓存；升级、导入、branch 和 rewind 必须幂等重建索引。
 
 ## 外部执行
 
@@ -43,14 +49,16 @@ inline 与 fullscreen 共用语义 theme token、选择/问题 view model、审�
 
 ## 记忆与指令
 
-普通记忆始终作为不可信数据注入。run 完成只排队幂等的 extraction job，后台 worker 从用户消息和已验证 evidence/source 构造严格来源 envelope；自动采用受来源、置信度、风险和 scope 门槛约束。召回批量融合词法与语义排名，语义不可用时降级为词法，并记录过滤和选择原因。edit、forget、purge 或来源失效会通过 revision digest 使旧 compaction 失效。
+普通记忆始终作为不可信数据注入。run 完成只排队幂等的 extraction job，后台 worker 读取完整用户 transcript，按 40k 字符预算分段并复用未变化 map digest，再在 reduce 阶段合并跨轮偏好。Candidate 保存多个逐字来源；提取分数只作诊断，独立验证器不接收该分数，并输出支持性、指令属性、durability 建议和原始分数。
+
+自动采用只使用与模型 profile、验证 Prompt 版本精确绑定的校准文件；无有效校准时 fail closed 为 review-only。直接陈述阈值为 0.95，跨轮推断阈值为 0.98 且至少需要两个独立用户来源。global、冲突、无来源、指令型或验证失败的 Candidate 始终审核。`temporary` 默认 7 天 TTL，`session` 绑定 lifecycle owner，`project` 绑定稳定 `project_instance_id`，`durable` 不因 session 或项目实例变化清理。召回批量融合词法与语义排名；edit、forget、purge 或来源失效通过 revision digest 使旧 compaction 失效。
 
 consolidation 只自动合并完全重复的 automatic memory、遗忘来源已全部失效的 automatic memory，以及降级已确认 supersedes 的旧 automatic memory；冲突、manual/reviewed 修改和 instruction promotion 均进入 review。仓库指令按受控层级加载，拒绝 include 与符号链接，且始终低于系统安全、工具权限和审批策略。子 Agent 只能提交带 namespace 和验证 provenance 的 memory proposal，由父进程持久化晋升。
 
 ## 当前数据协议
 
-当前格式为 config 9、workspace schema 14、memory schema 4、portable archive 6、session export 6、JSONL schema 3、IDE Bridge protocol 1 和 plugin protocol 4。workspace 启动支持 backup-first、事务化的 v6-v13→v14 升级；memory schema v3 与 config v3-v8 自动备份并升级。迁移失败保留原库和备份，不继续部分升级。
+当前格式为 config 9、workspace schema 16、memory schema 5、portable archive 6、session export 6、JSONL schema 3、IDE Bridge protocol 1 和 plugin protocol 4。workspace 启动支持 backup-first 的 v6-v15→v16 升级；memory schema v3-v4 与 config v3-v8 自动备份并升级。迁移失败保留原库和备份，不继续部分升级。
 
 ## 发布门禁
 
-合并前运行 compileall、Ruff、全量 pytest、真实迁移 fixture、确定性 Agent/Memory 评测、依赖审计和 wheel/sdist 冒烟。边界测试必须验证 runtime/tooling 不依赖具体 LSP/MCP manager、旧 `*_runtime.py` 模块不存在、Shell 分类规则只有一个实现，并确保轻量 CLI 不导入 MCP SDK或启动集成进程。
+合并前运行 compileall、Ruff、全量 pytest、真实迁移 fixture、位置敏感 context 评测、memory calibration 评测、依赖审计和 wheel/sdist 冒烟。context 确定性评测要求 transcript、compaction、Tool Result、Artifact 在 front/middle/tail 全部找回；memory 自动采纳要求 precision ≥98%、跨轮 recall ≥90%、ECE ≤0.05，否则相应 profile 保持 review-only。边界测试必须验证 runtime/tooling 不依赖具体 LSP/MCP manager、旧 `*_runtime.py` 模块不存在、Shell 分类规则只有一个实现，并确保轻量 CLI 不导入 MCP SDK或启动集成进程。

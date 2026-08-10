@@ -26,3 +26,6 @@ version = {attr = "capslock._version.__version__"}
 
 [tool.setuptools.packages.find]
 include = ["capslock*"]
+
+[tool.setuptools.package-data]
+"capslock.memory" = ["calibrations/*.json"]

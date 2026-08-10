@@ -10,6 +10,7 @@ from typing import Any
 from ..domain import (
     EmbeddingBackend,
     MemoryCandidateStatus,
+    MemoryDurability,
     MemoryInfo,
     MemoryOrigin,
     MemoryJobType,
@@ -53,6 +54,10 @@ class MemoryService:
         source_validator=None,
         task_repository=None,
         capture_policy: str = "automatic",
+        temporary_ttl_days: int = 7,
+        project_instance_id: str | None = None,
+        conversation_source: Any = None,
+        model_profile: str | None = None,
     ) -> None:
         self.repositories = repositories
         self.workspace = workspace.resolve()
@@ -63,6 +68,9 @@ class MemoryService:
         self.project_recall_enabled = recall_enabled
         self.maintenance_enabled = maintenance_enabled
         self.project_capture_policy = MemoryPolicy(capture_policy)
+        self.temporary_ttl_days = temporary_ttl_days
+        self.project_instance_id = project_instance_id or self.workspace_key
+        self.conversation_source = conversation_source
         self.event = event or (lambda *args, **kwargs: None)
         self.external_embedding_profiles = external_embedding_profiles or {}
         self.embeddings = EmbeddingService(
@@ -88,6 +96,9 @@ class MemoryService:
             session_id=session_id,
             event=self.event,
             tasks=task_repository,
+            temporary_ttl_days=temporary_ttl_days,
+            project_instance_id=self.project_instance_id,
+            model_profile=model_profile,
         )
         self.transfer = MemoryTransferService(
             repositories,
@@ -95,6 +106,8 @@ class MemoryService:
             workspace_key=self.workspace_key,
             session_id=session_id,
             event=self.event,
+            temporary_ttl_days=temporary_ttl_days,
+            project_instance_id=self.project_instance_id,
         )
         self.embedding_policy = EmbeddingPolicyService(
             repositories,
@@ -165,9 +178,13 @@ class MemoryService:
         confidence: float = 1.0,
         expires_at: str | None = None,
         namespace: str | None = None,
+        durability: MemoryDurability = MemoryDurability.DURABLE,
     ) -> tuple[MemoryInfo, tuple[str, ...]]:
         await self._require_write()
         safe, rules = validated_text(content)
+        expires_at = _retention_expiry(
+            durability, expires_at, days=self.temporary_ttl_days
+        )
         workspace, session_id = self._scope_keys(scope)
         if scope is MemoryScope.AGENT:
             if not namespace or not __import__("re").fullmatch(
@@ -185,10 +202,19 @@ class MemoryService:
             source_kind="manual",
             source_ref=self.session_id,
             confidence=confidence_value(confidence),
-            expires_at=expiry(expires_at),
+            expires_at=expires_at,
             origin=MemoryOrigin.MANUAL,
             run_id=self.session_id,
             namespace=namespace,
+            durability=durability,
+            owner_session_id=(
+                self.session_id if durability is MemoryDurability.SESSION else None
+            ),
+            project_instance_id=(
+                self.project_instance_id
+                if durability is MemoryDurability.PROJECT
+                else None
+            ),
         )
         await self._index(item)
         self.event(
@@ -211,6 +237,9 @@ class MemoryService:
         await self._require_write()
         current = await self.resolve(prefix)
         safe, rules = validated_text(content)
+        retained_until = _retention_expiry(
+            current.durability, expires_at, days=self.temporary_ttl_days
+        )
         item = await self.repositories.lifecycle.edit(
             current.id,
             content=safe,
@@ -218,7 +247,7 @@ class MemoryService:
             source_kind="manual",
             source_ref=self.session_id,
             confidence=confidence_value(confidence),
-            expires_at=expiry(expires_at),
+            expires_at=retained_until,
         )
         await self._index(item)
         self.event(
@@ -428,6 +457,25 @@ class MemoryService:
         view = await self.settings()
         if not view.capture_enabled or not view.write_enabled:
             return None
+        if self.conversation_source is not None:
+            history = await self.conversation_source.context_entries(self.session_id)
+            current = [
+                item
+                for item in envelope.get("messages", [])
+                if isinstance(item, dict)
+            ]
+            messages = [
+                {
+                    "id": str(item["id"]),
+                    "role": str(item["role"]),
+                    "content": str(item["content"]),
+                }
+                for item in history
+                if item.get("role") == "user"
+            ]
+            known = {str(item["id"]) for item in messages}
+            messages.extend(item for item in current if str(item.get("id")) not in known)
+            envelope = {**envelope, "messages": messages}
         identifier = await self.repositories.jobs.enqueue(
             MemoryJobType.EXTRACT_RUN,
             workspace=self.workspace_key,
@@ -462,6 +510,17 @@ class MemoryService:
     async def close(self) -> None:
         await self.jobs.close(10.0)
 
+    async def reconcile_lifecycle(self) -> dict[str, int]:
+        return {
+            "expired": await self.repositories.lifecycle.purge_expired(
+                workspace=self.workspace_key
+            ),
+            "stale_projects": await self.repositories.lifecycle.purge_stale_projects(
+                workspace=self.workspace_key,
+                project_instance_id=self.project_instance_id,
+            ),
+        }
+
     async def maintenance_status(self) -> dict[str, object]:
         status = await self.repositories.maintenance.status(self.workspace_key)
         jobs = await self.repositories.jobs.list(workspace=self.workspace_key, limit=20)
@@ -475,6 +534,7 @@ class MemoryService:
     async def run_maintenance(self) -> dict[str, object]:
         if not (await self.settings()).maintenance_enabled:
             raise PermissionError("memory maintenance is disabled")
+        lifecycle = await self.reconcile_lifecycle()
         bucket = datetime.now(UTC).strftime("%Y%m%dT%H")
         job_id = await self.repositories.jobs.enqueue(
             MemoryJobType.CONSOLIDATE_WORKSPACE,
@@ -496,7 +556,7 @@ class MemoryService:
             )
             await self.repositories.jobs.complete(str(job["id"]))
             self.event("memory_consolidation_completed", job_id=job["id"], **result)
-            return {"job_id": job["id"], **result}
+            return {"job_id": job["id"], **lifecycle, **result}
         except Exception as exc:
             await self.repositories.jobs.fail(str(job["id"]), type(exc).__name__)
             self.event(
@@ -749,3 +809,15 @@ class MemoryService:
 
 
 confidence_value = confidence
+
+
+def _retention_expiry(
+    durability: MemoryDurability, value: str | None, *, days: int
+) -> str | None:
+    if durability is MemoryDurability.TEMPORARY:
+        return expiry(
+            value or (datetime.now(UTC) + timedelta(days=days)).isoformat()
+        )
+    if value is not None:
+        raise ValueError("expires_at is only valid for temporary memory")
+    return None

@@ -264,8 +264,8 @@ def test_current_state_reopens_without_mutation(tmp_path: Path) -> None:
         try:
             workspace_version = (await workspace.fetch_one("PRAGMA user_version"))[0]
             memory_version = (await memory.fetch_one("PRAGMA user_version"))[0]
-            assert workspace_version == WORKSPACE_SCHEMA_VERSION == 15
-            assert memory_version == MEMORY_SCHEMA_VERSION == 4
+            assert workspace_version == WORKSPACE_SCHEMA_VERSION == 16
+            assert memory_version == MEMORY_SCHEMA_VERSION == 5
         finally:
             await workspace.close()
             await memory.close()
@@ -277,12 +277,79 @@ def test_current_state_reopens_without_mutation(tmp_path: Path) -> None:
             assert (await workspace.fetch_one("PRAGMA user_version"))[
                 0
             ] == WORKSPACE_SCHEMA_VERSION
-            assert (await memory.fetch_one("PRAGMA user_version"))[0] == 4
+            assert (await memory.fetch_one("PRAGMA user_version"))[0] == 5
         finally:
             await workspace.close()
             await memory.close()
 
     asyncio.run(scenario())
+
+
+def test_v15_workspace_and_v4_memory_migrations_are_backup_first(
+    tmp_path: Path,
+) -> None:
+    workspace_path = tmp_path / "workspace.sqlite3"
+    memory_path = tmp_path / "memory.sqlite3"
+
+    async def initialize() -> None:
+        workspace = await WorkspaceDatabase.open(workspace_path)
+        memory = await MemoryDatabase.open(memory_path)
+        await workspace.close()
+        await memory.close()
+
+    asyncio.run(initialize())
+    with sqlite3.connect(workspace_path) as connection:
+        connection.executescript(
+            """
+            DROP TRIGGER episodic_tool_artifacts_ai;
+            DROP TRIGGER episodic_tool_invocations_ai;
+            DROP TRIGGER episodic_messages_ai;
+            DROP TRIGGER episodic_documents_au;
+            DROP TRIGGER episodic_documents_ad;
+            DROP TRIGGER episodic_documents_ai;
+            DROP TABLE episodic_fts;
+            DROP TABLE episodic_documents;
+            DROP TABLE context_summary_segments;
+            ALTER TABLE tool_artifacts DROP COLUMN index_content;
+            PRAGMA user_version=15;
+            """
+        )
+    with sqlite3.connect(memory_path) as connection:
+        connection.executescript(
+            """
+            DROP TABLE memory_extraction_segments;
+            ALTER TABLE memories DROP COLUMN owner_session_id;
+            ALTER TABLE memories DROP COLUMN project_instance_id;
+            ALTER TABLE memory_workspace_settings DROP COLUMN temporary_ttl_days;
+            ALTER TABLE memory_candidates DROP COLUMN extractor_confidence;
+            ALTER TABLE memory_candidates DROP COLUMN verifier_confidence;
+            ALTER TABLE memory_candidates DROP COLUMN verification_status;
+            ALTER TABLE memory_candidates DROP COLUMN instruction_like;
+            ALTER TABLE memory_candidates DROP COLUMN calibration_version;
+            PRAGMA user_version=4;
+            """
+        )
+
+    async def upgrade() -> None:
+        workspace = await WorkspaceDatabase.open(workspace_path)
+        memory = await MemoryDatabase.open(memory_path)
+        try:
+            assert (await workspace.fetch_one("PRAGMA user_version"))[0] == 16
+            assert (await memory.fetch_one("PRAGMA user_version"))[0] == 5
+            assert await workspace.fetch_one(
+                "SELECT 1 FROM sqlite_master WHERE name='episodic_documents'"
+            )
+            assert await memory.fetch_one(
+                "SELECT 1 FROM sqlite_master WHERE name='memory_extraction_segments'"
+            )
+        finally:
+            await workspace.close()
+            await memory.close()
+
+    asyncio.run(upgrade())
+    backups = {item.name for item in (tmp_path / "backups").iterdir()}
+    assert any(name.startswith("capslock-v15-") for name in backups)
+    assert any(name.startswith("memory-v4-") for name in backups)
 
 
 def test_workspace_schema_ten_upgrades_permission_state_to_twelve(
@@ -332,7 +399,7 @@ PRAGMA user_version=10;
     async def upgrade() -> None:
         database = await WorkspaceDatabase.open(path)
         try:
-            assert (await database.fetch_one("PRAGMA user_version"))[0] == 15
+            assert (await database.fetch_one("PRAGMA user_version"))[0] == 16
             tables = {
                 row[0]
                 for row in await database.fetch_all(
@@ -398,7 +465,7 @@ PRAGMA user_version=11;
     async def upgrade() -> None:
         database = await WorkspaceDatabase.open(path)
         try:
-            assert (await database.fetch_one("PRAGMA user_version"))[0] == 15
+            assert (await database.fetch_one("PRAGMA user_version"))[0] == 16
             tables = {
                 row[0]
                 for row in await database.fetch_all(

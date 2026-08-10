@@ -28,6 +28,42 @@ class CompactionRecord:
 
 
 class ContextCompactionRepository(Repository):
+    async def summary_segment(
+        self, source_digest: str, model_profile: str
+    ) -> dict[str, object] | None:
+        row = await self.one(
+            """SELECT summary_json FROM context_summary_segments
+               WHERE source_digest=? AND model_profile=?""",
+            (source_digest, model_profile),
+        )
+        return None if row is None else json.loads(row["summary_json"])
+
+    async def store_summary_segment(
+        self,
+        *,
+        source_digest: str,
+        model_profile: str,
+        summary: dict[str, object],
+        source_refs: list[str],
+        input_tokens: int,
+        output_tokens: int,
+    ) -> None:
+        await self.execute(
+            """INSERT OR IGNORE INTO context_summary_segments(
+               id,source_digest,model_profile,summary_json,source_refs_json,
+               input_tokens,output_tokens,created_at) VALUES(?,?,?,?,?,?,?,?)""",
+            (
+                f"segment_{uuid.uuid4().hex}",
+                source_digest,
+                model_profile,
+                json.dumps(summary, ensure_ascii=False, sort_keys=True),
+                json.dumps(source_refs, ensure_ascii=False),
+                input_tokens,
+                output_tokens,
+                now(),
+            ),
+        )
+
     async def matching(
         self, session_id: str, source_digest: str, memory_revision_digest: str = ""
     ) -> CompactionRecord | None:

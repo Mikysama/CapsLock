@@ -54,6 +54,7 @@ def workspace_tools(
         "read_file",
         "read_image",
         "read_tool_artifact",
+        "search_session_history",
         "search_files",
         "git_status",
         "git_diff",
