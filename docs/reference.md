@@ -4,7 +4,7 @@
 
 ## 稳定契约
 
-CapsLock 2.7.5 支持 Linux/macOS 与 Python 3.12。当前开发协议为 `permissions_version = 2`、`config_version = 10`、workspace schema 16、memory schema 5、portable archive 6、session export 6、JSONL schema 3、IDE Bridge protocol 1 和插件 manifest/protocol/grant 4。config v3-v9、workspace schema v6-v15 与 memory schema v3-v4 使用 backup-first 自动迁移。
+CapsLock 2.7.6 支持 Linux/macOS 与 Python 3.12。当前开发协议为 `permissions_version = 2`、`config_version = 10`、workspace schema 17、memory schema 5、portable archive 6、session export 6、JSONL schema 3、IDE Bridge protocol 1 和插件 manifest/protocol/grant 4。config v3-v9、workspace schema v6-v16 与 memory schema v3-v4 使用 backup-first 自动迁移。
 
 公开运行入口为 `AgentSession.run_stream(RunRequest)`。CLI 通过应用查询面读取状态，不应依赖 repository 聚合对象。
 
@@ -75,7 +75,9 @@ Markdown 镜像位于 `.capslock/state/plans/<session-id>/<plan-id>.md`。数据
 
 ## 上下文预算
 
-输入预算由模型 `context_window - max_output_tokens` 计算，并计入 system prompt、memory、episodic recall、显式 attachment、Skill catalog、工具 schema 与 checkpoint。达到触发比例后，旧 Tool Result 必须先成功写入 Artifact 才能从模型上下文替换；随后按消息/token 分块进行 map-reduce 摘要，不再对原始 JSON 做字符切片。摘要 v2 保存来源引用和检索提示，旧 v1 继续兼容；持久化或压缩失败返回 `context_budget_exceeded`，不会留下不可恢复的哈希占位。
+输入预算由模型 `context_window - max_output_tokens` 计算，并计入 system prompt、memory、episodic recall、显式 attachment、Skill catalog、工具 schema 与 checkpoint。默认在 80% 触发并压到 60% 目标；自动、active-run checkpoint 与 `/compact` 共用同一管线。最近历史按完整 user turn/API-safe tool round 从尾部选择，始终保留最新完整 turn，并受 `preserve_recent_turns=6` 与 `preserve_recent_tokens=32768` 双重约束。预算不足时先移除 episodic recall，再减少非最新 recent turn；核心/运行时策略、仓库指令、当前输入、显式附件及最新 turn 不会为达成 target 而删除。
+
+旧 Tool Result 超过 `inline_tool_result_bytes=16384` 且 Artifact 持久化成功后才从模型上下文替换；失败保留原文并返回明确错误。摘要 v3 使用 `summary_max_tokens=2048` 作为 provider 输出与最终结果的硬上限，保存用户纠正、当前工作、代码符号、验证状态、逐项 `source_map` 和引用式 `working_set`。文件引用包含路径、SHA、行区间及 invocation ID，已加载 Skill 只记录名称和 digest，不跨 run 恢复正文。v1/v2 读取时仅在内存补齐 v3 默认字段，不重写旧记录。模型输出会校验并纠错一次；仍失败时生成 `degraded=true` 的确定性摘要及 `search_session_history`/`read_tool_artifact` 提示。超过 target 但低于 trigger 标记 `target_unreachable` 并继续，不在相同上下文中循环重压缩；只有超过硬输入预算或命中三次失败熔断才返回 `context_budget_exceeded`。
 
 Composer 的 `@path[:line[-line]]` 仅在用户显式引用时读取工作区文本，最多四项、合计 64 KiB，并标记为不可信数据。启用 IDE Bridge 后，编辑器使用权限 `0600` 的 Unix socket descriptor 与随机 token 调用 JSON-RPC protocol 1；只有提示中的 `@selection` / `@diagnostics` 会展开最近上下文，路径仍受工作区私有文件边界限制。`CAPSLOCK_IDE=1` 可临时启用，持久配置使用 `[bridge]`。
 
@@ -267,7 +269,7 @@ ToolLoop 每个模型或工具阶段写 `run_steps`。只有 completed 且带 ch
 
 调度器按契约顺序返回结果，兄弟任务失败不会互相取消，父运行取消会传播到全部未完成子任务。子快照排除 `.git`、`.capslock`、环境文件和符号链接，并使用自己的 workspace/memory 数据库。后台任务通过独立 `agent_mailbox` 表交换 instruction/question/response/progress/artifact offer/cancel；消息先脱敏并限制为 32 KiB，读取时复验 SHA-256，状态为 queued/delivered/acknowledged/expired。`AgentOutputVerifier` 校验输出对象、allowlist 路径、必需检查、文件大小和 SHA-256；未通过的输出只返回失败诊断。
 
-workspace schema 16 使用 Agent、mailbox、performance span、Tool invocation、input request、task dependency、session lineage、active compaction、context snapshot、episodic document、session worktree 与 Plan Mode 表保存可恢复状态、审计与验证结果。portable archive 默认不包含 artifact 正文，也不包含可重建的 episodic 与摘要分段索引。
+workspace schema 17 使用 Agent、mailbox、performance span、Tool invocation、input request、task dependency、session lineage、active compaction、context snapshot、episodic document、session worktree 与 Plan Mode 表保存可恢复状态、审计与验证结果，并为压缩记录 summary-policy digest、结果 token 与质量状态。portable archive 默认不包含 artifact 正文，也不包含可重建的 episodic 与摘要分段索引。
 
 ## 记忆契约
 

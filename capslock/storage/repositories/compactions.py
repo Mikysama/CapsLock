@@ -16,6 +16,7 @@ class CompactionRecord:
     summary: dict[str, object]
     source_digest: str
     memory_revision_digest: str
+    summary_policy_digest: str
     first_message_id: int | None
     last_message_id: int | None
     source_tokens: int
@@ -24,17 +25,19 @@ class CompactionRecord:
     input_tokens: int = 0
     output_tokens: int = 0
     focus_instructions: str | None = None
+    result_tokens: int = 0
+    quality_status: str = "legacy"
     created_at: str = ""
 
 
 class ContextCompactionRepository(Repository):
     async def summary_segment(
-        self, source_digest: str, model_profile: str
+        self, source_digest: str, model_profile: str, summary_policy_digest: str = ""
     ) -> dict[str, object] | None:
         row = await self.one(
             """SELECT summary_json FROM context_summary_segments
-               WHERE source_digest=? AND model_profile=?""",
-            (source_digest, model_profile),
+               WHERE source_digest=? AND model_profile=? AND summary_policy_digest=?""",
+            (source_digest, model_profile, summary_policy_digest),
         )
         return None if row is None else json.loads(row["summary_json"])
 
@@ -43,6 +46,7 @@ class ContextCompactionRepository(Repository):
         *,
         source_digest: str,
         model_profile: str,
+        summary_policy_digest: str = "",
         summary: dict[str, object],
         source_refs: list[str],
         input_tokens: int,
@@ -50,12 +54,13 @@ class ContextCompactionRepository(Repository):
     ) -> None:
         await self.execute(
             """INSERT OR IGNORE INTO context_summary_segments(
-               id,source_digest,model_profile,summary_json,source_refs_json,
-               input_tokens,output_tokens,created_at) VALUES(?,?,?,?,?,?,?,?)""",
+               id,source_digest,model_profile,summary_policy_digest,summary_json,
+               source_refs_json,input_tokens,output_tokens,created_at) VALUES(?,?,?,?,?,?,?,?,?)""",
             (
                 f"segment_{uuid.uuid4().hex}",
                 source_digest,
                 model_profile,
+                summary_policy_digest,
                 json.dumps(summary, ensure_ascii=False, sort_keys=True),
                 json.dumps(source_refs, ensure_ascii=False),
                 input_tokens,
@@ -65,13 +70,26 @@ class ContextCompactionRepository(Repository):
         )
 
     async def matching(
-        self, session_id: str, source_digest: str, memory_revision_digest: str = ""
+        self,
+        session_id: str,
+        source_digest: str,
+        memory_revision_digest: str = "",
+        summary_policy_digest: str | None = None,
     ) -> CompactionRecord | None:
+        policy_clause = (
+            "" if summary_policy_digest is None else " AND summary_policy_digest=?"
+        )
+        values: tuple[object, ...] = (
+            session_id,
+            source_digest,
+            memory_revision_digest,
+        ) + (() if summary_policy_digest is None else (summary_policy_digest,))
         row = await self.one(
             """SELECT * FROM context_compactions
-               WHERE session_id=? AND source_digest=? AND memory_revision_digest=? AND valid=1
-               ORDER BY created_at DESC LIMIT 1""",
-            (session_id, source_digest, memory_revision_digest),
+               WHERE session_id=? AND source_digest=? AND memory_revision_digest=? AND valid=1"""
+            + policy_clause
+            + " ORDER BY created_at DESC LIMIT 1",
+            values,
         )
         return None if row is None else _record(row)
 
@@ -113,6 +131,27 @@ class ContextCompactionRepository(Repository):
             "UPDATE context_compactions SET valid=0 WHERE id=?", (compaction_id,)
         )
 
+    async def update_result(
+        self,
+        compaction_id: str,
+        *,
+        result_tokens: int,
+        quality_status: str,
+        source_tokens: int | None = None,
+    ) -> None:
+        if source_tokens is None:
+            await self.execute(
+                """UPDATE context_compactions SET result_tokens=?,quality_status=?
+                   WHERE id=?""",
+                (result_tokens, quality_status, compaction_id),
+            )
+        else:
+            await self.execute(
+                """UPDATE context_compactions
+                   SET source_tokens=?,result_tokens=?,quality_status=? WHERE id=?""",
+                (source_tokens, result_tokens, quality_status, compaction_id),
+            )
+
     async def create(
         self,
         *,
@@ -129,7 +168,10 @@ class ContextCompactionRepository(Repository):
         model_profile: str,
         source_digest: str,
         memory_revision_digest: str = "",
+        summary_policy_digest: str = "",
         focus_instructions: str | None = None,
+        result_tokens: int = 0,
+        quality_status: str = "ok",
         activate: bool = False,
     ) -> CompactionRecord:
         identifier = f"compact_{uuid.uuid4().hex}"
@@ -138,8 +180,8 @@ class ContextCompactionRepository(Repository):
                  id,session_id,run_id,first_message_id,last_message_id,summary_json,
                  source_compaction_id,input_tokens,output_tokens,source_tokens,
                  target_tokens,model_profile,source_digest,memory_revision_digest,
-                 focus_instructions,created_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 summary_policy_digest,focus_instructions,result_tokens,quality_status,created_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 identifier,
                 session_id,
@@ -155,11 +197,19 @@ class ContextCompactionRepository(Repository):
                 model_profile,
                 source_digest,
                 memory_revision_digest,
+                summary_policy_digest,
                 focus_instructions,
+                result_tokens,
+                quality_status,
                 now(),
             ),
         )
-        record = await self.matching(session_id, source_digest, memory_revision_digest)
+        record = await self.matching(
+            session_id,
+            source_digest,
+            memory_revision_digest,
+            summary_policy_digest,
+        )
         assert record is not None
         if activate:
             await self.activate(session_id, record.id)
@@ -173,6 +223,7 @@ def _record(row) -> CompactionRecord:
         json.loads(row["summary_json"]),
         str(row["source_digest"]),
         str(row["memory_revision_digest"]),
+        str(row["summary_policy_digest"]),
         int(row["first_message_id"]) if row["first_message_id"] is not None else None,
         int(row["last_message_id"]) if row["last_message_id"] is not None else None,
         int(row["source_tokens"]),
@@ -183,5 +234,7 @@ def _record(row) -> CompactionRecord:
         str(row["focus_instructions"])
         if row["focus_instructions"] is not None
         else None,
+        int(row["result_tokens"]),
+        str(row["quality_status"]),
         str(row["created_at"]),
     )

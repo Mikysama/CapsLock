@@ -124,6 +124,7 @@ def test_adaptive_token_calibration_and_micro_compaction() -> None:
     before = estimator.estimate({"text": "中文 code " * 20})
     asyncio.run(estimator.observe({"text": "中文 code " * 20}, before * 2))
     assert estimator.samples == 1 and estimator.ratio > 1
+
     class Artifacts:
         async def put(self, **values):
             content = values["content"]
@@ -146,7 +147,7 @@ def test_adaptive_token_calibration_and_micro_compaction() -> None:
     )
     messages = [
         {"role": "system", "content": "system"},
-        {"role": "tool", "tool_call_id": "x", "content": "x" * 10_000},
+        {"role": "tool", "tool_call_id": "x", "content": "x" * 20_000},
         *({"role": "user", "content": str(i)} for i in range(20)),
     ]
     compacted, saved = asyncio.run(

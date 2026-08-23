@@ -2,7 +2,7 @@
 
 CapsLock 是一个本机工作区 Agent，用于读取和修改代码、检索证据、运行受沙箱保护的 Shell、查询代码语义，以及按审批策略访问 Web、MCP 和本地插件。Tool Runtime v2 将工具契约、参数级策略、可恢复暂停、调度、富结果与审计统一到异步执行链。
 
-当前源码版本为 `2.7.5`。本版本为 Tool Runtime 增加受控参数修复、显式副作用状态、可靠并发额度、动态目录兜底和 shadow 工具选择评估，并修复已有数据的 workspace v14 升级失败。当前协议为 workspace schema 16、memory schema 5、portable archive 6、session export 6 和 config 10。完整边界见 [2.7.5 发布说明](docs/releases/v2.7.5.md)。
+当前源码版本为 `2.7.6`。本版本统一手动、自动与 checkpoint 上下文压缩，新增 token-aware recent turn 保留、summary v3、引用式 working set、显式降级与防抖，并将 workspace schema 升至 17。当前协议为 workspace schema 17、memory schema 5、portable archive 6、session export 6 和 config 10。完整边界见 [2.7.6 发布说明](docs/releases/v2.7.6.md)。
 
 正式支持矩阵：Linux/macOS，Python 3.12。发布 CI 会在两个操作系统组合中执行测试、构建、依赖审计和安装冒烟。
 
@@ -371,6 +371,8 @@ auto_compact = true
 trigger_ratio = 0.80
 target_ratio = 0.60
 preserve_recent_turns = 6
+preserve_recent_tokens = 32768
+working_set_limit = 5
 inline_tool_result_bytes = 16384
 summary_max_tokens = 2048
 max_compaction_failures = 3
@@ -443,6 +445,8 @@ maintenance_enabled = true
 policy = "automatic"
 temporary_ttl_days = 7
 ```
+
+自动、checkpoint 与 `/compact` 使用同一条 token-aware 压缩管线。最近历史按完整 user turn 与 API-safe tool round 保留，最多 6 turn/32K token，并始终保留最新完整 turn；超过 16 KiB 的旧 Tool Result 只有在 Artifact 写入成功后才外置。summary v3 记录用户纠正、当前工作、代码符号、验证状态、文件/Skill 引用及逐项来源映射；工作集只保存路径、digest、行区间和 invocation 引用，不自动重新注入文件或 Skill 正文。摘要生成失败会纠错一次，再生成带 `degraded`/`omissions` 和恢复提示的确定性摘要；只有最终仍超过模型硬输入预算才中止。
 
 `CAPSLOCK_HOME` 与 `CAPSLOCK_MEMORY_DATABASE` 必须是 shell 中的绝对路径。
 

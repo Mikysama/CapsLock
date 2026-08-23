@@ -65,6 +65,7 @@ class ChatModel(Protocol):
         model: str,
         messages: list[dict[str, object]],
         tools: list[dict[str, object]],
+        max_output_tokens: int | None = None,
     ) -> ModelResponse: ...
 
 
@@ -76,6 +77,7 @@ class StreamingChatModel(Protocol):
         model: str,
         messages: list[dict[str, object]],
         tools: list[dict[str, object]],
+        max_output_tokens: int | None = None,
     ) -> AsyncIterator[ModelDelta]: ...
 
 
@@ -99,8 +101,16 @@ class ModelRunSession:
         model: str,
         messages: list[dict[str, object]],
         tools: list[dict[str, object]],
+        max_output_tokens: int | None = None,
     ) -> ModelResponse:
-        return await self.model.complete(model=model, messages=messages, tools=tools)
+        arguments: dict[str, object] = {
+            "model": model,
+            "messages": messages,
+            "tools": tools,
+        }
+        if max_output_tokens is not None:
+            arguments["max_output_tokens"] = max_output_tokens
+        return await self.model.complete(**arguments)
 
     async def stream_complete(
         self,
@@ -108,9 +118,14 @@ class ModelRunSession:
         model: str,
         messages: list[dict[str, object]],
         tools: list[dict[str, object]],
+        max_output_tokens: int | None = None,
     ) -> AsyncIterator[ModelDelta]:
         async for delta in stream_model_response(
-            self.model, model=model, messages=messages, tools=tools
+            self.model,
+            model=model,
+            messages=messages,
+            tools=tools,
+            max_output_tokens=max_output_tokens,
         ):
             yield delta
 
@@ -154,6 +169,7 @@ class AsyncOpenAIChatModel:
         model: str,
         messages: list[dict[str, object]],
         tools: list[dict[str, object]],
+        max_output_tokens: int | None = None,
     ) -> ModelResponse:
         arguments: dict[str, object] = {
             "model": model,
@@ -161,8 +177,14 @@ class AsyncOpenAIChatModel:
         }
         if tools:
             arguments["tools"] = _strict_tools(tools) if self.strict_tools else tools
-        if model in self.max_output_tokens:
-            arguments["max_tokens"] = self.max_output_tokens[model]
+        configured = self.max_output_tokens.get(model)
+        effective = (
+            min(configured, max_output_tokens)
+            if configured is not None and max_output_tokens is not None
+            else configured or max_output_tokens
+        )
+        if effective is not None:
+            arguments["max_tokens"] = effective
         response = await self.client.chat.completions.create(**arguments)
         return self._response(response)
 
@@ -172,6 +194,7 @@ class AsyncOpenAIChatModel:
         model: str,
         messages: list[dict[str, object]],
         tools: list[dict[str, object]],
+        max_output_tokens: int | None = None,
     ) -> AsyncIterator[ModelDelta]:
         arguments: dict[str, object] = {
             "model": model,
@@ -181,8 +204,14 @@ class AsyncOpenAIChatModel:
         }
         if tools:
             arguments["tools"] = _strict_tools(tools) if self.strict_tools else tools
-        if model in self.max_output_tokens:
-            arguments["max_tokens"] = self.max_output_tokens[model]
+        configured = self.max_output_tokens.get(model)
+        effective = (
+            min(configured, max_output_tokens)
+            if configured is not None and max_output_tokens is not None
+            else configured or max_output_tokens
+        )
+        if effective is not None:
+            arguments["max_tokens"] = effective
         stream = await self.client.chat.completions.create(**arguments)
         if not hasattr(stream, "__aiter__"):
             response = self._response(stream)
@@ -252,14 +281,23 @@ async def stream_model_response(
     model: str,
     messages: list[dict[str, object]],
     tools: list[dict[str, object]],
+    max_output_tokens: int | None = None,
 ) -> AsyncIterator[ModelDelta]:
     if isinstance(chat_model, StreamingChatModel):
-        async for delta in chat_model.stream_complete(
-            model=model, messages=messages, tools=tools
-        ):
+        arguments: dict[str, object] = {
+            "model": model,
+            "messages": messages,
+            "tools": tools,
+        }
+        if max_output_tokens is not None:
+            arguments["max_output_tokens"] = max_output_tokens
+        async for delta in chat_model.stream_complete(**arguments):
             yield delta
         return
-    response = await chat_model.complete(model=model, messages=messages, tools=tools)
+    arguments = {"model": model, "messages": messages, "tools": tools}
+    if max_output_tokens is not None:
+        arguments["max_output_tokens"] = max_output_tokens
+    response = await chat_model.complete(**arguments)
     if response.message.reasoning:
         yield ModelDelta(reasoning=response.message.reasoning)
     if response.message.content:

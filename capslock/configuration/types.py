@@ -85,6 +85,8 @@ class ContextSettings:
     trigger_ratio: float = 0.80
     target_ratio: float = 0.60
     preserve_recent_turns: int = 6
+    preserve_recent_tokens: int = 32_768
+    working_set_limit: int = 5
     inline_tool_result_bytes: int = 16_384
     summary_max_tokens: int = 2_048
     max_compaction_failures: int = 3

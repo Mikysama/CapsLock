@@ -203,6 +203,38 @@ def test_router_explicit_run_session_records_usage_without_ambient_binding(
     asyncio.run(scenario())
 
 
+def test_router_uses_request_output_cap_for_provider_and_budget(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        repositories = await WorkspaceRepositories.open(
+            tmp_path / "capped.sqlite3", workspace=tmp_path
+        )
+        try:
+            _, prepared = await workspace_run(repositories)
+            client = ScriptedClient(ModelResponse(ModelMessage("ok"), ModelUsage(1, 1)))
+            router = ModelRouter(
+                providers={"provider": provider("provider")},
+                profiles={"fast": profile("fast", "provider")},
+                routing=RoutingSettings(("fast",), ("fast",), (), ()),
+                clients={"provider": client},
+                audit=repositories.models,
+                budget=BudgetSettings(max_run_tokens=20),
+            )
+            response = await router.open_session(
+                ModelRunContext(prepared.run.id, ModelRole.FAST)
+            ).complete(
+                model="ignored",
+                messages=[],
+                tools=[],
+                max_output_tokens=7,
+            )
+            assert response.message.content == "ok"
+            assert client.requests[0]["max_output_tokens"] == 7
+        finally:
+            await repositories.close()
+
+    asyncio.run(scenario())
+
+
 def test_router_applies_allowlisted_interactive_model_override(tmp_path: Path) -> None:
     async def scenario() -> None:
         repositories = await WorkspaceRepositories.open(

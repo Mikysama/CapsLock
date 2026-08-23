@@ -38,6 +38,8 @@ _GROUP_FIELDS = {
         "trigger_ratio",
         "target_ratio",
         "preserve_recent_turns",
+        "preserve_recent_tokens",
+        "working_set_limit",
         "inline_tool_result_bytes",
         "summary_max_tokens",
         "max_compaction_failures",
@@ -338,6 +340,8 @@ def validate_semantics(document: dict[str, object]) -> None:
             )
         for field, default in (
             ("preserve_recent_turns", 6),
+            ("preserve_recent_tokens", 32_768),
+            ("working_set_limit", 5),
             ("inline_tool_result_bytes", 16_384),
             ("summary_max_tokens", 2_048),
             ("max_compaction_failures", 3),
@@ -347,6 +351,8 @@ def validate_semantics(document: dict[str, object]) -> None:
             if int(context.get(field, default)) <= 0:
                 raise ValueError(f"context.{field} must be positive")
         boolean(context.get("episodic_recall_enabled", True))
+        if int(context.get("working_set_limit", 5)) > 20:
+            raise ValueError("context.working_set_limit must not exceed 20")
         if int(context.get("episodic_recall_limit", 5)) > 20:
             raise ValueError("context.episodic_recall_limit must not exceed 20")
         tokenizer = str(context.get("tokenizer", "adaptive"))

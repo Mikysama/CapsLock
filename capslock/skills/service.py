@@ -135,3 +135,16 @@ class SkillService:
     def finish_run(self, run_id: str) -> None:
         for key in [key for key in self._loaded if key[0] == run_id]:
             del self._loaded[key]
+
+    def loaded_references(self, run_id: str) -> list[dict[str, object]]:
+        return [
+            {
+                "kind": "skill",
+                "identifier": name,
+                "digest": loaded.package.digest,
+                "details": [loaded.package.scope],
+                "source_refs": [f"skill:{name}"],
+            }
+            for (loaded_run, name), loaded in sorted(self._loaded.items())
+            if loaded_run == run_id
+        ]

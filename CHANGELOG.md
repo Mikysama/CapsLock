@@ -4,6 +4,21 @@
 
 ## [Unreleased]
 
+## [2.7.6] - 2026-08-23
+
+### Added
+
+- 上下文摘要升级为 v3，记录用户反馈、当前工作、代码符号、验证状态、引用式 working set、逐项来源映射与显式降级信息；workspace schema 升至 17，并按模型 profile 与摘要策略隔离分段缓存。
+
+### Changed
+
+- `/compact`、自动压缩和 active-run checkpoint 统一使用 token-aware 管线；正式启用 Tool Result 外置阈值、摘要输出上限、32K recent token 上限和 60% 目标质量状态。
+- 模型完成接口支持可选 `max_output_tokens`，provider 与预算门按请求上限和 profile 上限的较小值执行；未传时保持原行为。
+
+### Compatibility
+
+- v1/v2 摘要在内存中补齐 v3 默认字段，现有 session、配置和 compaction 无需重写；工作现场只做引用式恢复，不自动注入文件或 Skill 正文，也不增加通用压缩 hooks。
+
 ## [2.7.5] - 2026-08-10
 
 ### Added

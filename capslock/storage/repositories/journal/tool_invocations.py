@@ -11,6 +11,54 @@ from ..core import now
 
 
 class ToolInvocationJournalRepository:
+    async def recent_working_set(
+        self, session_id: str, limit: int = 5
+    ) -> list[dict[str, object]]:
+        rows = await self.all(
+            """SELECT id,arguments_json,result_preview FROM tool_invocations
+               WHERE session_id=? AND name='read_file' AND status='completed'
+               ORDER BY finished_at DESC,sequence DESC LIMIT ?""",
+            (session_id, max(1, min(limit * 4, 80))),
+        )
+        output: list[dict[str, object]] = []
+        seen: set[str] = set()
+        for row in rows:
+            try:
+                arguments = json.loads(row["arguments_json"])
+                preview = json.loads(row["result_preview"] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if isinstance(preview, dict) and isinstance(preview.get("data"), dict):
+                preview = preview["data"]
+            path = preview.get("path") if isinstance(preview, dict) else None
+            if not isinstance(path, str):
+                path = arguments.get("path") if isinstance(arguments, dict) else None
+            if not isinstance(path, str) or path in seen:
+                continue
+            seen.add(path)
+            digest = preview.get("sha256") if isinstance(preview, dict) else None
+            details = [f"invocation {row['id']}"]
+            start = preview.get("start_line") if isinstance(preview, dict) else None
+            end = preview.get("end_line") if isinstance(preview, dict) else None
+            if not isinstance(start, int) and isinstance(arguments, dict):
+                start = arguments.get("start_line")
+            if not isinstance(end, int) and isinstance(arguments, dict):
+                end = arguments.get("end_line")
+            if isinstance(start, int) or isinstance(end, int):
+                details.append(f"lines {start or 1}-{end or 'end'}")
+            output.append(
+                {
+                    "kind": "file",
+                    "identifier": path,
+                    "digest": digest if isinstance(digest, str) else None,
+                    "details": details,
+                    "source_refs": [f"tool:{row['id']}"],
+                }
+            )
+            if len(output) >= limit:
+                break
+        return output
+
     async def tool_invocation(self, identifier: str) -> dict[str, Any] | None:
         row = await self.one("SELECT * FROM tool_invocations WHERE id=?", (identifier,))
         if row is None:

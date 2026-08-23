@@ -62,10 +62,13 @@ class RoutePlanner:
         self,
         messages: list[dict[str, object]],
         tools: list[dict[str, object]],
+        max_output_tokens: int | None = None,
     ) -> RoutePlan:
         run_id = self.router._required_run()
         role = self.router._role.get()
-        candidates, exclusions = self.router._candidates(role, messages, tools)
+        candidates, exclusions = self.router._candidates(
+            role, messages, tools, max_output_tokens
+        )
         if not candidates:
             await self.router._record_failed_route(run_id, role, exclusions)
             self.router._raise_no_route(exclusions)
@@ -235,13 +238,21 @@ class ModelRouter:
         model: str,
         messages: list[dict[str, object]],
         tools: list[dict[str, object]],
+        max_output_tokens: int | None = None,
     ) -> ModelResponse:
-        plan = await self.planner.plan(messages, tools)
+        plan = await self.planner.plan(messages, tools, max_output_tokens)
         run_id, role = plan.run_id, plan.role
         previous: str | None = None
         last_error: Exception | None = None
         for configured_profile in plan.candidates:
             profile = _model_override(configured_profile, model, role)
+            effective_profile = replace(
+                profile,
+                max_output_tokens=min(
+                    profile.max_output_tokens,
+                    max_output_tokens or profile.max_output_tokens,
+                ),
+            )
             selection = await self.planner.select(plan, profile, previous)
             if selection is None:
                 last_error = ModelRoutingError(
@@ -251,14 +262,21 @@ class ModelRouter:
                 continue
             decision_id, client = selection
             for attempt in range(1, self.retries + 2):
-                await self.budget_gate.check(run_id, profile, messages, tools)
+                await self.budget_gate.check(run_id, effective_profile, messages, tools)
                 call_id, started = await self.attempt_executor.start(
                     run_id, decision_id, role, profile, attempt, previous
                 )
                 try:
-                    response = await client.complete(
-                        model=profile.model, messages=messages, tools=tools
-                    )
+                    arguments: dict[str, object] = {
+                        "model": profile.model,
+                        "messages": messages,
+                        "tools": tools,
+                    }
+                    if max_output_tokens is not None:
+                        arguments["max_output_tokens"] = (
+                            effective_profile.max_output_tokens
+                        )
+                    response = await client.complete(**arguments)
                 except Exception as exc:
                     last_error = exc
                     code, retryable = _classify_error(exc)
@@ -292,13 +310,21 @@ class ModelRouter:
         model: str,
         messages: list[dict[str, object]],
         tools: list[dict[str, object]],
+        max_output_tokens: int | None = None,
     ) -> AsyncIterator[ModelDelta]:
-        plan = await self.planner.plan(messages, tools)
+        plan = await self.planner.plan(messages, tools, max_output_tokens)
         run_id, role = plan.run_id, plan.role
         previous: str | None = None
         last_error: Exception | None = None
         for configured_profile in plan.candidates:
             profile = _model_override(configured_profile, model, role)
+            effective_profile = replace(
+                profile,
+                max_output_tokens=min(
+                    profile.max_output_tokens,
+                    max_output_tokens or profile.max_output_tokens,
+                ),
+            )
             selection = await self.planner.select(plan, profile, previous)
             if selection is None:
                 client = None
@@ -312,15 +338,22 @@ class ModelRouter:
                 previous = profile.name
                 continue
             for attempt in range(1, self.retries + 2):
-                await self.budget_gate.check(run_id, profile, messages, tools)
+                await self.budget_gate.check(run_id, effective_profile, messages, tools)
                 call_id, started = await self.attempt_executor.start(
                     run_id, decision_id, role, profile, attempt, previous
                 )
                 emitted, usage = False, ModelUsage()
                 try:
-                    async for delta in client.stream_complete(
-                        model=profile.model, messages=messages, tools=tools
-                    ):
+                    arguments: dict[str, object] = {
+                        "model": profile.model,
+                        "messages": messages,
+                        "tools": tools,
+                    }
+                    if max_output_tokens is not None:
+                        arguments["max_output_tokens"] = (
+                            effective_profile.max_output_tokens
+                        )
+                    async for delta in client.stream_complete(**arguments):
                         emitted = emitted or bool(
                             delta.content
                             or delta.reasoning
@@ -373,6 +406,7 @@ class ModelRouter:
         role: ModelRole,
         messages: list[dict[str, object]],
         tools: list[dict[str, object]],
+        max_output_tokens: int | None = None,
     ) -> tuple[list[ModelProfileSettings], list[dict[str, str]]]:
         names = getattr(self.routing, role.value)
         estimated = _estimate_tokens((messages, tools))
@@ -384,7 +418,14 @@ class ModelRouter:
             or (override and override.max_budget_usd)
         )
         for name in names:
-            profile = self.profiles[name]
+            configured = self.profiles[name]
+            profile = replace(
+                configured,
+                max_output_tokens=min(
+                    configured.max_output_tokens,
+                    max_output_tokens or configured.max_output_tokens,
+                ),
+            )
             provider = self.providers[profile.provider]
             reason = None
             if estimated + profile.max_output_tokens > profile.context_window:
@@ -588,10 +629,14 @@ class _RouterModelRunSession(ModelRunSession):
         model: str,
         messages: list[dict[str, object]],
         tools: list[dict[str, object]],
+        max_output_tokens: int | None = None,
     ) -> ModelResponse:
         with self.router._bind_context(self.context):
             return await self.router.complete(
-                model=model, messages=messages, tools=tools
+                model=model,
+                messages=messages,
+                tools=tools,
+                max_output_tokens=max_output_tokens,
             )
 
     async def stream_complete(
@@ -600,10 +645,14 @@ class _RouterModelRunSession(ModelRunSession):
         model: str,
         messages: list[dict[str, object]],
         tools: list[dict[str, object]],
+        max_output_tokens: int | None = None,
     ) -> AsyncIterator[ModelDelta]:
         with self.router._bind_context(self.context):
             async for delta in self.router.stream_complete(
-                model=model, messages=messages, tools=tools
+                model=model,
+                messages=messages,
+                tools=tools,
+                max_output_tokens=max_output_tokens,
             ):
                 yield delta
 

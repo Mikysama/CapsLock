@@ -2,7 +2,7 @@
 
 WORKSPACE_APPLICATION_ID = 0x434C4B32  # CLK2
 MEMORY_APPLICATION_ID = 0x434C4D32  # CLM2
-WORKSPACE_SCHEMA_VERSION = 16
+WORKSPACE_SCHEMA_VERSION = 17
 MEMORY_SCHEMA_VERSION = 5
 
 WORKSPACE_SCHEMA = """
@@ -380,7 +380,11 @@ CREATE TABLE context_compactions (
   model_profile TEXT NOT NULL,
   source_digest TEXT NOT NULL,
   memory_revision_digest TEXT NOT NULL DEFAULT '',
+  summary_policy_digest TEXT NOT NULL DEFAULT '',
   focus_instructions TEXT,
+  result_tokens INTEGER NOT NULL DEFAULT 0 CHECK(result_tokens>=0),
+  quality_status TEXT NOT NULL DEFAULT 'legacy'
+    CHECK(quality_status IN ('legacy','ok','degraded','target_unreachable')),
   valid INTEGER NOT NULL DEFAULT 1 CHECK(valid IN (0,1)),
   created_at TEXT NOT NULL,
   CHECK(first_message_id IS NULL OR last_message_id IS NULL OR first_message_id<=last_message_id)
@@ -390,12 +394,13 @@ CREATE TABLE context_summary_segments (
   id TEXT PRIMARY KEY,
   source_digest TEXT NOT NULL,
   model_profile TEXT NOT NULL,
+  summary_policy_digest TEXT NOT NULL DEFAULT '',
   summary_json TEXT NOT NULL CHECK(json_valid(summary_json)),
   source_refs_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(source_refs_json)),
   input_tokens INTEGER NOT NULL DEFAULT 0 CHECK(input_tokens>=0),
   output_tokens INTEGER NOT NULL DEFAULT 0 CHECK(output_tokens>=0),
   created_at TEXT NOT NULL,
-  UNIQUE(source_digest,model_profile)
+  UNIQUE(source_digest,model_profile,summary_policy_digest)
 ) STRICT;
 CREATE TABLE episodic_documents (
   id INTEGER PRIMARY KEY,

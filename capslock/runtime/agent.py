@@ -238,6 +238,7 @@ class AgentSession:
             episodic=self.episodic,
             artifacts=artifacts,
             journal=journal,
+            working_set_provider=getattr(skill_service, "loaded_references", None),
             attachment_resolver=LocalAttachmentResolver(policy, bridge=ide_bridge),
             settings_store=settings_store,
         )
@@ -619,6 +620,7 @@ class AgentSession:
                             else self.context_budget.estimate(messages)
                         ),
                         source="estimate",
+                        result=context_result,
                     ),
                 },
             )
@@ -1172,17 +1174,30 @@ class AgentSession:
         return context
 
     def _context_event_data(
-        self, used_tokens: int, *, source: str
+        self, used_tokens: int, *, source: str, result: Any = None
     ) -> dict[str, object]:
         limit_tokens = self.context_budget.input_budget
         used_tokens = max(0, int(used_tokens))
-        return {
+        payload: dict[str, object] = {
             "used_tokens": used_tokens,
             "limit_tokens": limit_tokens,
             "remaining_tokens": max(0, limit_tokens - used_tokens),
             "used_percent": round(used_tokens * 100 / max(1, limit_tokens), 1),
             "source": source,
         }
+        if result is not None:
+            payload.update(
+                {
+                    "target_tokens": result.target_tokens,
+                    "compaction_quality": result.compaction_quality,
+                    "working_set_count": result.working_set_count,
+                    "micro_compaction_saved_tokens": (
+                        result.micro_compaction_saved_tokens
+                    ),
+                    "no_progress_reason": result.no_progress_reason,
+                }
+            )
+        return payload
 
     @staticmethod
     def _explicit_skill(question: str) -> tuple[str, str] | None:

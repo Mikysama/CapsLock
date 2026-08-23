@@ -141,6 +141,10 @@ def resolve_settings(
             trigger_ratio=float(group("context").get("trigger_ratio", 0.80)),
             target_ratio=float(group("context").get("target_ratio", 0.60)),
             preserve_recent_turns=int(group("context").get("preserve_recent_turns", 6)),
+            preserve_recent_tokens=int(
+                group("context").get("preserve_recent_tokens", 32_768)
+            ),
+            working_set_limit=int(group("context").get("working_set_limit", 5)),
             inline_tool_result_bytes=int(
                 group("context").get("inline_tool_result_bytes", 16_384)
             ),

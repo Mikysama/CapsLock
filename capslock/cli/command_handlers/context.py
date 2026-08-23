@@ -42,10 +42,12 @@ async def context_info(context, parts: list[str], raw: str) -> CommandOutcome:
     total = breakdown.total
     budget = context.session.context_budget.input_budget
     trigger = int(budget * context.session.context_budget.settings.trigger_ratio)
+    target = context.session.context_budget.target_tokens
     live = " live stable snapshot" if context.session.engine.active else ""
     lines = [
         f"Total: {total}/{budget} tokens ({total / budget:.1%}){live}",
         f"Auto-compact threshold: {trigger} ({context.session.context_budget.settings.trigger_ratio:.0%})",
+        f"Compaction target: {target} ({context.session.context_budget.settings.target_ratio:.0%})",
         "Core {core}; repository instructions {repo}; skills {skills}; memory {memory}; "
         "attachments {attachments}; compaction {compaction}; history {history}; tools {tools}".format(
             core=breakdown.core,
@@ -62,9 +64,21 @@ async def context_info(context, parts: list[str], raw: str) -> CommandOutcome:
         f"{manager.estimator.safety_margin:.0%}",
     ]
     if active:
+        working_set = active.summary.get("working_set", [])
         lines.append(
-            f"Active compaction: {active.id}; source {active.source_tokens}; target {active.target_tokens}; {active.created_at}"
+            f"Active compaction: {active.id}; source {active.source_tokens}; "
+            f"result {active.result_tokens}; target {active.target_tokens}; "
+            f"quality {active.quality_status}; working set {len(working_set) if isinstance(working_set, list) else 0}; "
+            f"{active.created_at}"
         )
+    if context.session.context_budget.last_no_progress_reason:
+        lines.append(
+            "No progress: " + context.session.context_budget.last_no_progress_reason
+        )
+    lines.append(
+        "Last micro-compaction saving: "
+        f"{context.session.context_budget.last_micro_compaction_saved_tokens} tokens"
+    )
     await get_ui(context).show("Context", "\n".join(lines))
     await repositories.database.execute(
         """INSERT INTO context_snapshots(id,session_id,compaction_id,system_tokens,tool_tokens,

@@ -264,7 +264,7 @@ def test_current_state_reopens_without_mutation(tmp_path: Path) -> None:
         try:
             workspace_version = (await workspace.fetch_one("PRAGMA user_version"))[0]
             memory_version = (await memory.fetch_one("PRAGMA user_version"))[0]
-            assert workspace_version == WORKSPACE_SCHEMA_VERSION == 16
+            assert workspace_version == WORKSPACE_SCHEMA_VERSION == 17
             assert memory_version == MEMORY_SCHEMA_VERSION == 5
         finally:
             await workspace.close()
@@ -283,6 +283,68 @@ def test_current_state_reopens_without_mutation(tmp_path: Path) -> None:
             await memory.close()
 
     asyncio.run(scenario())
+
+
+def test_workspace_schema_sixteen_adds_compaction_policy_and_quality(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "workspace-v16.sqlite3"
+
+    async def initialize() -> None:
+        database = await WorkspaceDatabase.open(path)
+        await database.close()
+
+    asyncio.run(initialize())
+    with sqlite3.connect(path) as connection:
+        connection.executescript(
+            """
+            ALTER TABLE context_compactions DROP COLUMN summary_policy_digest;
+            ALTER TABLE context_compactions DROP COLUMN result_tokens;
+            ALTER TABLE context_compactions DROP COLUMN quality_status;
+            ALTER TABLE context_summary_segments RENAME TO segments_current;
+            CREATE TABLE context_summary_segments (
+              id TEXT PRIMARY KEY,
+              source_digest TEXT NOT NULL,
+              model_profile TEXT NOT NULL,
+              summary_json TEXT NOT NULL CHECK(json_valid(summary_json)),
+              source_refs_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(source_refs_json)),
+              input_tokens INTEGER NOT NULL DEFAULT 0 CHECK(input_tokens>=0),
+              output_tokens INTEGER NOT NULL DEFAULT 0 CHECK(output_tokens>=0),
+              created_at TEXT NOT NULL,
+              UNIQUE(source_digest,model_profile)
+            ) STRICT;
+            INSERT INTO context_summary_segments VALUES(
+              'segment-old','digest','fast','{}','[]',1,2,'created'
+            );
+            DROP TABLE segments_current;
+            PRAGMA user_version=16;
+            """
+        )
+
+    async def upgrade() -> None:
+        database = await WorkspaceDatabase.open(path)
+        try:
+            assert (await database.fetch_one("PRAGMA user_version"))[0] == 17
+            columns = {
+                row[1]
+                for row in await database.fetch_all(
+                    "PRAGMA table_info(context_compactions)"
+                )
+            }
+            assert {
+                "summary_policy_digest",
+                "result_tokens",
+                "quality_status",
+            } <= columns
+            segment = await database.fetch_one(
+                """SELECT summary_policy_digest,input_tokens,output_tokens
+                   FROM context_summary_segments WHERE id='segment-old'"""
+            )
+            assert tuple(segment) == ("", 1, 2)
+        finally:
+            await database.close()
+
+    asyncio.run(upgrade())
 
 
 def test_workspace_and_memory_migrations_are_backup_first(
@@ -334,7 +396,7 @@ def test_workspace_and_memory_migrations_are_backup_first(
         workspace = await WorkspaceDatabase.open(workspace_path)
         memory = await MemoryDatabase.open(memory_path)
         try:
-            assert (await workspace.fetch_one("PRAGMA user_version"))[0] == 16
+            assert (await workspace.fetch_one("PRAGMA user_version"))[0] == 17
             assert (await memory.fetch_one("PRAGMA user_version"))[0] == 5
             assert await workspace.fetch_one(
                 "SELECT 1 FROM sqlite_master WHERE name='episodic_documents'"
@@ -399,7 +461,7 @@ PRAGMA user_version=10;
     async def upgrade() -> None:
         database = await WorkspaceDatabase.open(path)
         try:
-            assert (await database.fetch_one("PRAGMA user_version"))[0] == 16
+            assert (await database.fetch_one("PRAGMA user_version"))[0] == 17
             tables = {
                 row[0]
                 for row in await database.fetch_all(
@@ -465,7 +527,7 @@ PRAGMA user_version=11;
     async def upgrade() -> None:
         database = await WorkspaceDatabase.open(path)
         try:
-            assert (await database.fetch_one("PRAGMA user_version"))[0] == 16
+            assert (await database.fetch_one("PRAGMA user_version"))[0] == 17
             tables = {
                 row[0]
                 for row in await database.fetch_all(

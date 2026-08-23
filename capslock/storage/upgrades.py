@@ -19,7 +19,7 @@ async def upgrade_workspace_schema(
     if source_version is None:
         row = await (await connection.execute("PRAGMA user_version")).fetchone()
         source_version = int(row[0])
-    if source_version not in {6, 7, 8, 9, 10, 11, 12, 13, 14, 15}:
+    if source_version not in {6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}:
         raise ValueError(f"unsupported workspace upgrade source: {source_version}")
     checkpoint = await connection.execute("PRAGMA wal_checkpoint(FULL)")
     await checkpoint.close()
@@ -51,21 +51,47 @@ async def upgrade_workspace_schema(
             await connection.executescript(_UPGRADE_WORKSPACE_THIRTEEN)
         if source_version in {6, 7, 8, 9, 10, 11, 12, 13}:
             await connection.executescript(_UPGRADE_WORKSPACE_FOURTEEN)
-        if source_version != 15:
+        if source_version < 15:
             await connection.executescript(_UPGRADE_WORKSPACE_FIFTEEN)
-        artifact_columns = {
+        if source_version < 16:
+            artifact_columns = {
+                str(row[1])
+                for row in await (
+                    await connection.execute("PRAGMA table_info(tool_artifacts)")
+                ).fetchall()
+            }
+            if "index_content" not in artifact_columns:
+                await connection.execute(
+                    """ALTER TABLE tool_artifacts ADD COLUMN index_content INTEGER
+                       NOT NULL DEFAULT 1 CHECK(index_content IN (0,1))"""
+                )
+                await connection.commit()
+            await connection.executescript(_UPGRADE_WORKSPACE_SIXTEEN)
+        compaction_columns = {
             str(row[1])
             for row in await (
-                await connection.execute("PRAGMA table_info(tool_artifacts)")
+                await connection.execute("PRAGMA table_info(context_compactions)")
             ).fetchall()
         }
-        if "index_content" not in artifact_columns:
+        if "summary_policy_digest" not in compaction_columns:
             await connection.execute(
-                """ALTER TABLE tool_artifacts ADD COLUMN index_content INTEGER
-                   NOT NULL DEFAULT 1 CHECK(index_content IN (0,1))"""
+                """ALTER TABLE context_compactions ADD COLUMN summary_policy_digest
+                   TEXT NOT NULL DEFAULT ''"""
             )
-            await connection.commit()
-        await connection.executescript(_UPGRADE_WORKSPACE_SIXTEEN)
+        if "result_tokens" not in compaction_columns:
+            await connection.execute(
+                """ALTER TABLE context_compactions ADD COLUMN result_tokens
+                   INTEGER NOT NULL DEFAULT 0 CHECK(result_tokens>=0)"""
+            )
+        if "quality_status" not in compaction_columns:
+            await connection.execute(
+                """ALTER TABLE context_compactions ADD COLUMN quality_status
+                   TEXT NOT NULL DEFAULT 'legacy'
+                   CHECK(quality_status IN
+                     ('legacy','ok','degraded','target_unreachable'))"""
+            )
+        await connection.commit()
+        await connection.executescript(_UPGRADE_WORKSPACE_SEVENTEEN)
     except BaseException:
         await connection.rollback()
         raise
@@ -855,6 +881,35 @@ SELECT session_id,run_id,'artifact',id,0,
   id,created_at FROM tool_artifacts;
 PRAGMA user_version=16;
 COMMIT;
+"""
+
+
+_UPGRADE_WORKSPACE_SEVENTEEN = """
+PRAGMA foreign_keys=OFF;
+BEGIN IMMEDIATE;
+ALTER TABLE context_summary_segments RENAME TO context_summary_segments_v16;
+CREATE TABLE context_summary_segments (
+  id TEXT PRIMARY KEY,
+  source_digest TEXT NOT NULL,
+  model_profile TEXT NOT NULL,
+  summary_policy_digest TEXT NOT NULL DEFAULT '',
+  summary_json TEXT NOT NULL CHECK(json_valid(summary_json)),
+  source_refs_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(source_refs_json)),
+  input_tokens INTEGER NOT NULL DEFAULT 0 CHECK(input_tokens>=0),
+  output_tokens INTEGER NOT NULL DEFAULT 0 CHECK(output_tokens>=0),
+  created_at TEXT NOT NULL,
+  UNIQUE(source_digest,model_profile,summary_policy_digest)
+) STRICT;
+INSERT INTO context_summary_segments(
+ id,source_digest,model_profile,summary_policy_digest,summary_json,
+ source_refs_json,input_tokens,output_tokens,created_at
+) SELECT id,source_digest,model_profile,'',summary_json,
+ source_refs_json,input_tokens,output_tokens,created_at
+ FROM context_summary_segments_v16;
+DROP TABLE context_summary_segments_v16;
+PRAGMA user_version=17;
+COMMIT;
+PRAGMA foreign_keys=ON;
 """
 
 
