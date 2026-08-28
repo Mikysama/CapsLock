@@ -5,6 +5,18 @@ from __future__ import annotations
 import os
 import re
 
+from ..behavior_defaults import (
+    DEFAULT_AGENT_MAX_CHILD_TOOL_ROUNDS,
+    DEFAULT_AGENT_MAX_CHILDREN,
+    DEFAULT_AGENT_MAX_CONCURRENCY,
+    DEFAULT_AGENT_MAX_DEPTH,
+    DEFAULT_LOOP_CONSECUTIVE_REPEATS,
+    DEFAULT_LOOP_CYCLE_REPETITIONS,
+    DEFAULT_LOOP_FAILED_RETRIES,
+    DEFAULT_LOOP_MAX_CYCLE_LENGTH,
+    DEFAULT_MAX_TOOL_ROUNDS,
+    DEFAULT_PROVIDER_TIMEOUT_SECONDS,
+)
 from ..credentials import parse_reference, resolve_credential
 from ..domain import LoopDetectionSettings
 from .types import (
@@ -15,8 +27,6 @@ from .types import (
     RoutingSettings,
 )
 
-
-DEFAULT_MAX_TOOL_ROUNDS = 32
 _CONFIG_ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}\Z")
 
 
@@ -68,7 +78,7 @@ def model_routes(
         if not credential_ref:
             raise ValueError(f"provider {name} requires credential")
         parse_reference(credential_ref)
-        timeout = float(value.get("timeout_seconds", 60))
+        timeout = float(value.get("timeout_seconds", DEFAULT_PROVIDER_TIMEOUT_SECONDS))
         if timeout <= 0:
             raise ValueError(f"provider {name} timeout_seconds must be positive")
         data_policy = str(value.get("data_policy", f"provider:{name}")).strip()
@@ -169,10 +179,12 @@ def budget_settings(raw: dict[str, object]) -> BudgetSettings:
 def agent_settings(raw: dict[str, object]) -> AgentSettings:
     values = AgentSettings(
         enabled=boolean(raw.get("enabled", True)),
-        max_children=int(raw.get("max_children", 4)),
-        max_concurrency=int(raw.get("max_concurrency", 2)),
-        max_depth=int(raw.get("max_depth", 1)),
-        max_child_tool_rounds=int(raw.get("max_child_tool_rounds", 16)),
+        max_children=int(raw.get("max_children", DEFAULT_AGENT_MAX_CHILDREN)),
+        max_concurrency=int(raw.get("max_concurrency", DEFAULT_AGENT_MAX_CONCURRENCY)),
+        max_depth=int(raw.get("max_depth", DEFAULT_AGENT_MAX_DEPTH)),
+        max_child_tool_rounds=int(
+            raw.get("max_child_tool_rounds", DEFAULT_AGENT_MAX_CHILD_TOOL_ROUNDS)
+        ),
         background_enabled=boolean(raw.get("background_enabled", True)),
         mailbox_enabled=boolean(raw.get("mailbox_enabled", True)),
         message_ttl_seconds=int(raw.get("message_ttl_seconds", 3600)),
@@ -208,10 +220,16 @@ def max_tool_rounds(runtime: dict[str, object]) -> int:
 
 def loop_detection_settings(raw: dict[str, object]) -> LoopDetectionSettings:
     return LoopDetectionSettings(
-        consecutive_repeats=int(raw.get("consecutive_repeats", 3)),
-        failed_retries=int(raw.get("failed_retries", 3)),
-        cycle_repetitions=int(raw.get("cycle_repetitions", 3)),
-        max_cycle_length=int(raw.get("max_cycle_length", 4)),
+        consecutive_repeats=int(
+            raw.get("consecutive_repeats", DEFAULT_LOOP_CONSECUTIVE_REPEATS)
+        ),
+        failed_retries=int(raw.get("failed_retries", DEFAULT_LOOP_FAILED_RETRIES)),
+        cycle_repetitions=int(
+            raw.get("cycle_repetitions", DEFAULT_LOOP_CYCLE_REPETITIONS)
+        ),
+        max_cycle_length=int(
+            raw.get("max_cycle_length", DEFAULT_LOOP_MAX_CYCLE_LENGTH)
+        ),
     )
 
 

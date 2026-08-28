@@ -10,7 +10,7 @@ from capslock.cli.app import build_parser
 
 
 def test_package_version_matches_distribution_metadata() -> None:
-    assert re.fullmatch(r"\d+\.\d+\.\d+", __version__)
+    assert re.fullmatch(r"\d+(?:\.\d+){2,3}", __version__)
     assert version("capslock") == __version__
 
 

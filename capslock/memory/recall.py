@@ -3,20 +3,86 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import difflib
+import json
 from collections.abc import Awaitable, Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 
+from ..behavior_defaults import (
+    DEFAULT_MEMORY_CONFIDENCE_WEIGHT,
+    DEFAULT_MEMORY_FRESHNESS_WEIGHT,
+    DEFAULT_MEMORY_RECALL_BYTES,
+    DEFAULT_MEMORY_RECALL_LIMIT,
+    DEFAULT_MEMORY_RECALL_THRESHOLD,
+    DEFAULT_MEMORY_RETRIEVAL_WEIGHT,
+    DEFAULT_MEMORY_SCOPE_WEIGHT,
+    DEFAULT_MEMORY_SEMANTIC_THRESHOLD,
+    DEFAULT_MEMORY_SOURCE_VALIDITY_WEIGHT,
+)
 from ..domain import MemoryOrigin, MemoryRecallHit, MemoryScope, MemoryType
 from ..storage.memory_repositories import MemoryRepositories
 from .embeddings import EmbeddingService
 
-RECALL_LIMIT = 5
-RECALL_BYTES = 4 * 1024
-RECALL_THRESHOLD = 0.50
-SEMANTIC_THRESHOLD = 0.45
+RECALL_LIMIT = DEFAULT_MEMORY_RECALL_LIMIT
+RECALL_BYTES = DEFAULT_MEMORY_RECALL_BYTES
+RECALL_THRESHOLD = DEFAULT_MEMORY_RECALL_THRESHOLD
+SEMANTIC_THRESHOLD = DEFAULT_MEMORY_SEMANTIC_THRESHOLD
+
+
+@dataclass(frozen=True)
+class RecallPolicy:
+    """Injectable ranking policy used by runtime and policy evaluation."""
+
+    limit: int = DEFAULT_MEMORY_RECALL_LIMIT
+    byte_budget: int = DEFAULT_MEMORY_RECALL_BYTES
+    recall_threshold: float = DEFAULT_MEMORY_RECALL_THRESHOLD
+    semantic_threshold: float = DEFAULT_MEMORY_SEMANTIC_THRESHOLD
+    lexical_weight: float = 0.60
+    semantic_weight: float = 0.40
+    dual_bonus: float = 0.08
+    retrieval_weight: float = DEFAULT_MEMORY_RETRIEVAL_WEIGHT
+    scope_weight: float = DEFAULT_MEMORY_SCOPE_WEIGHT
+    confidence_weight: float = DEFAULT_MEMORY_CONFIDENCE_WEIGHT
+    freshness_weight: float = DEFAULT_MEMORY_FRESHNESS_WEIGHT
+    source_validity_weight: float = DEFAULT_MEMORY_SOURCE_VALIDITY_WEIGHT
+    duplicate_threshold: float = 0.93
+
+    def __post_init__(self) -> None:
+        if self.limit < 1 or self.byte_budget < 1:
+            raise ValueError("memory recall limits must be positive")
+        probabilities = (
+            self.recall_threshold,
+            self.semantic_threshold,
+            self.duplicate_threshold,
+        )
+        if any(value < 0 or value > 1 for value in probabilities):
+            raise ValueError("memory recall thresholds must be between 0 and 1")
+        weights = (
+            self.lexical_weight,
+            self.semantic_weight,
+            self.retrieval_weight,
+            self.scope_weight,
+            self.confidence_weight,
+            self.freshness_weight,
+            self.source_validity_weight,
+        )
+        if any(value < 0 for value in weights):
+            raise ValueError("memory recall weights must be non-negative")
+        if abs(self.lexical_weight + self.semantic_weight - 1.0) > 1e-6:
+            raise ValueError("memory retrieval weights must sum to 1")
+        if (
+            abs(
+                self.retrieval_weight
+                + self.scope_weight
+                + self.confidence_weight
+                + self.freshness_weight
+                + self.source_validity_weight
+                - 1.0
+            )
+            > 1e-6
+        ):
+            raise ValueError("memory final-score weights must sum to 1")
 
 
 class RecallService:
@@ -29,10 +95,12 @@ class RecallService:
         session_id: str,
         event,
         source_validator: Callable[[str], Awaitable[bool]] | None = None,
+        policy: RecallPolicy | None = None,
     ) -> None:
         self.repositories, self.embeddings = repositories, embeddings
         self.workspace, self.session_id, self.event = workspace, session_id, event
         self.source_validator = source_validator
+        self.policy = policy or RecallPolicy()
 
     async def recall(self, query: str, *, run_id: str) -> list[MemoryRecallHit]:
         settings = await self.repositories.settings.get(self.workspace)
@@ -80,9 +148,16 @@ class RecallService:
             lex = 61 / (60 + lexical_rank) if lexical_rank is not None else 0.0
             sem = 61 / (60 + semantic_rank) if semantic_rank is not None else 0.0
             dual_bonus = (
-                0.08 if lexical_rank is not None and semantic_rank is not None else 0.0
+                self.policy.dual_bonus
+                if lexical_rank is not None and semantic_rank is not None
+                else 0.0
             )
-            retrieval = min(1.0, 0.6 * lex + 0.4 * sem + dual_bonus)
+            retrieval = min(
+                1.0,
+                self.policy.lexical_weight * lex
+                + self.policy.semantic_weight * sem
+                + dual_bonus,
+            )
             scope = {
                 MemoryScope.SESSION: 1.0,
                 MemoryScope.AGENT: 0.9,
@@ -108,11 +183,11 @@ class RecallService:
             freshness = max(0.0, 1.0 - age_days / horizon)
             source_validity = 1.0 if item.source_valid else 0.25
             score = (
-                0.72 * retrieval
-                + 0.08 * scope
-                + 0.08 * item.confidence
-                + 0.06 * freshness
-                + 0.06 * source_validity
+                self.policy.retrieval_weight * retrieval
+                + self.policy.scope_weight * scope
+                + self.policy.confidence_weight * item.confidence
+                + self.policy.freshness_weight * freshness
+                + self.policy.source_validity_weight * source_validity
             )
             reasons = [
                 f"retrieval {retrieval:.4f}",
@@ -131,10 +206,10 @@ class RecallService:
                 filter_reason = "automatic memory has no valid source"
             elif not (
                 (lexical_rank is not None and lexical_rank <= 10)
-                or (cosine is not None and cosine >= SEMANTIC_THRESHOLD)
+                or (cosine is not None and cosine >= self.policy.semantic_threshold)
             ):
                 filter_reason = "failed lexical and semantic candidate gates"
-            elif score < RECALL_THRESHOLD:
+            elif score < self.policy.recall_threshold:
                 filter_reason = "final score below recall threshold"
             hit = MemoryRecallHit(
                 item,
@@ -149,7 +224,7 @@ class RecallService:
             )
             (filtered if filter_reason else ranked).append(hit)
         ranked.sort(key=lambda hit: (-hit.score, hit.memory.id))
-        selected, selection_audit = _bounded_diverse(ranked)
+        selected, selection_audit = _bounded_diverse(ranked, policy=self.policy)
         await self._record(run_id, query, filtered + selection_audit)
         await self.repositories.sources.record_access(
             [hit.memory for hit in selected],
@@ -222,7 +297,10 @@ class RecallService:
 
 def _bounded_diverse(
     hits: list[MemoryRecallHit],
+    *,
+    policy: RecallPolicy | None = None,
 ) -> tuple[list[MemoryRecallHit], list[MemoryRecallHit]]:
+    policy = policy or RecallPolicy()
     selected: list[MemoryRecallHit] = []
     audit: list[MemoryRecallHit] = []
     normalized: list[str] = []
@@ -234,7 +312,8 @@ def _bounded_diverse(
             key == prior
             or (
                 min(len(key), len(prior)) >= 80
-                and difflib.SequenceMatcher(None, key, prior).ratio() >= 0.93
+                and difflib.SequenceMatcher(None, key, prior).ratio()
+                >= policy.duplicate_threshold
             )
             for prior in normalized
         ):
@@ -242,8 +321,8 @@ def _bounded_diverse(
                 replace(hit, filter_reason="filtered as a near-duplicate result")
             )
             continue
-        remaining = RECALL_BYTES - used
-        if len(selected) >= RECALL_LIMIT:
+        remaining = policy.byte_budget - used
+        if len(selected) >= policy.limit:
             audit.append(replace(hit, filter_reason="recall item limit reached"))
             continue
         if remaining <= 0:

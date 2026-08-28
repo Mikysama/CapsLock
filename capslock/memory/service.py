@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from datetime import UTC, datetime, timedelta
 import json
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from ..domain import (
@@ -12,8 +12,8 @@ from ..domain import (
     MemoryCandidateStatus,
     MemoryDurability,
     MemoryInfo,
-    MemoryOrigin,
     MemoryJobType,
+    MemoryOrigin,
     MemoryPolicy,
     MemoryScope,
     MemoryType,
@@ -21,16 +21,16 @@ from ..domain import (
 from ..layout import UserLayout
 from ..storage.memory_repositories import MemoryRepositories, workspace_key
 from .candidates import CandidateService, MemoryExtractionResult
+from .embedding_policy import EmbeddingPolicyService
 from .embeddings import (
     EmbeddingService,
     ExternalEmbeddingConfig,
 )
-from .embedding_policy import EmbeddingPolicyService
-from .recall import RecallService
+from .jobs import MemoryJobWorker
+from .recall import RecallPolicy, RecallService
+from .settings_service import MemorySettingsService, MemorySettingsView
 from .transfer import MemoryTransferService
 from .validation import confidence, expiry, validated_text
-from .jobs import MemoryJobWorker
-from .settings_service import MemorySettingsService, MemorySettingsView
 
 
 def default_memory_database() -> Path:
@@ -58,6 +58,7 @@ class MemoryService:
         project_instance_id: str | None = None,
         conversation_source: Any = None,
         model_profile: str | None = None,
+        recall_policy: RecallPolicy | None = None,
     ) -> None:
         self.repositories = repositories
         self.workspace = workspace.resolve()
@@ -88,6 +89,7 @@ class MemoryService:
             session_id=session_id,
             event=self.event,
             source_validator=source_validator,
+            policy=recall_policy,
         )
         self.candidate_service = CandidateService(
             repositories,
@@ -460,9 +462,7 @@ class MemoryService:
         if self.conversation_source is not None:
             history = await self.conversation_source.context_entries(self.session_id)
             current = [
-                item
-                for item in envelope.get("messages", [])
-                if isinstance(item, dict)
+                item for item in envelope.get("messages", []) if isinstance(item, dict)
             ]
             messages = [
                 {
@@ -474,7 +474,9 @@ class MemoryService:
                 if item.get("role") == "user"
             ]
             known = {str(item["id"]) for item in messages}
-            messages.extend(item for item in current if str(item.get("id")) not in known)
+            messages.extend(
+                item for item in current if str(item.get("id")) not in known
+            )
             envelope = {**envelope, "messages": messages}
         identifier = await self.repositories.jobs.enqueue(
             MemoryJobType.EXTRACT_RUN,
@@ -815,9 +817,7 @@ def _retention_expiry(
     durability: MemoryDurability, value: str | None, *, days: int
 ) -> str | None:
     if durability is MemoryDurability.TEMPORARY:
-        return expiry(
-            value or (datetime.now(UTC) + timedelta(days=days)).isoformat()
-        )
+        return expiry(value or (datetime.now(UTC) + timedelta(days=days)).isoformat())
     if value is not None:
         raise ValueError("expires_at is only valid for temporary memory")
     return None

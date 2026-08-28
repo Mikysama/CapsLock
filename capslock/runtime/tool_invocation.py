@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import hashlib
+import json
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from typing import Any
 
+from ..behavior_defaults import DEFAULT_MAX_ARGUMENT_REPAIR_ATTEMPTS
 from ..domain import AgentEventKind, RunStepKind, RunStepStatus
+from ..external import assess_prompt_injection
 from ..ports import RunJournal
 from ..tooling.contracts import (
     DeliveryStatus,
@@ -27,7 +29,6 @@ from ..tooling.executor import ToolRuntime
 from ..tooling.presentation import tool_presentation
 from .governance import RunGovernor
 from .model import ModelToolCall
-from ..external import assess_prompt_injection
 
 
 class InvocationPreparer:
@@ -39,12 +40,14 @@ class InvocationPreparer:
         context_factory: Callable[[str], ExecutionContext],
         outcome_factory: Callable[..., Any],
         paused_error: type[RuntimeError],
+        max_argument_repair_attempts: int = DEFAULT_MAX_ARGUMENT_REPAIR_ATTEMPTS,
     ) -> None:
         self.journal = journal
         self.tools = tools
         self.context_factory = context_factory
         self._outcome_factory = outcome_factory
         self._paused_error = paused_error
+        self.max_argument_repair_attempts = max(0, max_argument_repair_attempts)
 
     async def prepare(
         self,
@@ -119,7 +122,8 @@ class InvocationPreparer:
                         "path": "$",
                         "expected": "valid JSON object",
                         "received_type": "invalid_json",
-                        "retryable": call.repair_attempt == 0,
+                        "retryable": call.repair_attempt
+                        < self.max_argument_repair_attempts,
                         "suggested_tools": [call.name] if contract is not None else [],
                         "repair_attempt": call.repair_attempt,
                     },
@@ -133,7 +137,9 @@ class InvocationPreparer:
                         "path": "$.name",
                         "expected": "registered tool name",
                         "received_type": "string",
-                        "retryable": call.repair_attempt == 0 and bool(suggestions),
+                        "retryable": call.repair_attempt
+                        < self.max_argument_repair_attempts
+                        and bool(suggestions),
                         "suggested_tools": suggestions,
                         "repair_attempt": call.repair_attempt,
                     },
@@ -233,7 +239,8 @@ class InvocationPreparer:
                 detail = dict(outcome.data) if isinstance(outcome.data, dict) else {}
                 detail.update(
                     {
-                        "retryable": call.repair_attempt == 0,
+                        "retryable": call.repair_attempt
+                        < self.max_argument_repair_attempts,
                         "suggested_tools": [call.name],
                         "repair_attempt": call.repair_attempt,
                     }
@@ -243,10 +250,14 @@ class InvocationPreparer:
                     data=detail,
                     execution_state=ToolExecutionState.NOT_STARTED,
                 )
-            if call.repair_attempt > 0 and outcome.error_code in {
-                "invalid_tool_arguments",
-                "unsupported_tool",
-            }:
+            if (
+                call.repair_attempt >= self.max_argument_repair_attempts
+                and outcome.error_code
+                in {
+                    "invalid_tool_arguments",
+                    "unsupported_tool",
+                }
+            ):
                 detail = dict(outcome.data) if isinstance(outcome.data, dict) else {}
                 detail.update(
                     {

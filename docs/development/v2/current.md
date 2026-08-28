@@ -1,6 +1,6 @@
 # 当前运行内核与安全边界
 
-本文描述 CapsLock 2.7.6 的开发边界。产品在本机运行，支持直接能力工具、类型化斜杠命令、可审批 Action、AST 分析与沙箱保护的通用 Shell、session 隔离后台进程、受管理的本地/远程 MCP、LSP、IDE 上下文桥、受控仓库指令和单层子 Agent；不提供远程控制、后台 daemon 或第三方可执行 Hook。
+本文描述 CapsLock 2.7.6.1 的开发边界。产品在本机运行，支持直接能力工具、类型化斜杠命令、可审批 Action、AST 分析与沙箱保护的通用 Shell、session 隔离后台进程、受管理的本地/远程 MCP、LSP、IDE 上下文桥、受控仓库指令和单层子 Agent；不提供远程控制、后台 daemon 或第三方可执行 Hook。
 
 ## 模块边界
 
@@ -17,7 +17,7 @@
 
 只允许只读、并发安全且不改变上下文的调用并发，提交顺序保持模型 tool-call 顺序。额度检查、attempt reservation、历史追加与计数位于同一个异步临界区，完成状态按持久 `attempt_id` 回填；并发批次不能突破 `max_tool_calls`。审批和用户输入可跨进程恢复；副作用执行状态与结果 delivery 状态独立。`ToolOutcome.execution_state` 使用 `not_started | committed | unknown`，旧 `executed` 保持兼容；输出校验失败不得抹除真实执行状态。
 
-只有确定 `not_started` 的 `invalid_tool_arguments` 与 `unsupported_tool` 可进入一次修复轮。已知工具只暴露原工具，未知名称按名称、别名、描述和参数字段提供最多三个候选；运行时不静默重写路径、命令、URL或业务参数。修复轮正常消耗 token、tool round 和 tool call 预算，第二次失败返回 `argument_repair_exhausted` 并解除工具限制。`unknown`、`committed`、权限拒绝和业务执行失败禁止参数修复。
+只有确定 `not_started` 的 `invalid_tool_arguments` 与 `unsupported_tool` 可进入参数修复轮。修复预算由 `max_argument_repair_attempts` 控制，允许 0、1 或 2；已知工具只暴露原工具，未知名称按名称、别名、描述和参数字段提供最多三个候选。运行时不静默重写路径、命令、URL或业务参数。修复轮正常消耗 token、tool round 和 tool call 预算，预算耗尽后返回 `argument_repair_exhausted` 并解除工具限制。`unknown`、`committed`、权限拒绝和业务执行失败禁止参数修复。
 
 工具选择默认处于 `shadow`：模型仍看到完整目录，runtime 记录候选集合、实际调用召回和混淆信息；`filtered` 只有在评测门槛满足后才用于真实裁剪，`full` 是回滚开关。声明 `strict_tool_calls=true` 的 provider 接收 required+nullable 的 strict schema，调用执行前移除表示未提供可选字段的 `null`；未声明支持的 provider 保持宽松 schema。单项超过 16 KiB 时使用 content-addressed artifact，批次结果受聚合预算限制。旧大型 Tool Result 只有在 Artifact 持久化成功后才能从模型上下文替换；失败必须保留原文并返回 `context_budget_exceeded`。
 
@@ -66,3 +66,5 @@ consolidation 只自动合并完全重复的 automatic memory、遗忘来源已�
 ## 发布门禁
 
 合并前运行 compileall、Ruff、全量 pytest、真实迁移 fixture、确定性/live Agent 工具评测、位置敏感 context 评测、memory calibration 评测、依赖审计和 wheel/sdist 冒烟。Agent eval 必须校验 pytest 退出码、收集数量和场景数，并统计首次工具选择、首次 schema 通过、一次修复成功、最终成功和重复副作用；零收集或少收集是 `test_runner` 失败。filtered 上线要求 deterministic 候选召回 100%、任务成功率不低于 full，且 live 召回至少 99%。context 确定性评测要求 transcript、compaction、Tool Result、Artifact 在 front/middle/tail 全部找回；memory 自动采纳要求 precision ≥98%、跨轮 recall ≥90%、ECE ≤0.05，否则相应 profile 保持 review-only。边界测试必须验证 runtime/tooling 不依赖具体 LSP/MCP manager、旧 `*_runtime.py` 模块不存在、Shell 分类规则只有一个实现，并确保轻量 CLI 不导入 MCP SDK或启动集成进程。
+
+行为默认值变更还必须通过 `evaluate_policies.py`。PR 只运行 deterministic 阶段；screen 与 confirm 必须显式指定 provider、model 和前一阶段报告。评测只能生成 recommendation manifest，不能自动修改默认值。安全硬上限不参与普通调参。

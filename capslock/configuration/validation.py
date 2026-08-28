@@ -2,6 +2,17 @@
 
 from __future__ import annotations
 
+from ..behavior_defaults import (
+    DEFAULT_CONTEXT_MAX_COMPACTION_FAILURES,
+    DEFAULT_CONTEXT_PRESERVE_RECENT_TOKENS,
+    DEFAULT_CONTEXT_PRESERVE_RECENT_TURNS,
+    DEFAULT_CONTEXT_TARGET_RATIO,
+    DEFAULT_CONTEXT_TRIGGER_RATIO,
+    DEFAULT_MAX_ARGUMENT_REPAIR_ATTEMPTS,
+    DEFAULT_MAX_READ_CONCURRENCY,
+    DEFAULT_MEMORY_RECALL_BYTES,
+    DEFAULT_MEMORY_RECALL_LIMIT,
+)
 from ..credentials import parse_reference
 from .rules import (
     DEFAULT_MAX_TOOL_ROUNDS,
@@ -12,7 +23,6 @@ from .rules import (
     model_routes,
 )
 from .types import ConfigIssue
-
 
 CONFIG_VERSION = 10
 _GROUP_FIELDS = {
@@ -278,7 +288,9 @@ def validate_semantics(document: dict[str, object]) -> None:
     if isinstance(tools, dict):
         if int(tools.get("schema_budget_tokens", 8_000)) <= 0:
             raise ValueError("tools.schema_budget_tokens must be positive")
-        concurrency = int(tools.get("max_read_concurrency", 4))
+        concurrency = int(
+            tools.get("max_read_concurrency", DEFAULT_MAX_READ_CONCURRENCY)
+        )
         if concurrency < 1 or concurrency > 32:
             raise ValueError("tools.max_read_concurrency must be between 1 and 32")
         if int(tools.get("aggregate_result_bytes", 65_536)) < 1024:
@@ -289,9 +301,14 @@ def validate_semantics(document: dict[str, object]) -> None:
             "filtered",
         }:
             raise ValueError("tools.selection_mode must be full, shadow, or filtered")
-        repairs = int(tools.get("max_argument_repair_attempts", 1))
-        if repairs not in {0, 1}:
-            raise ValueError("tools.max_argument_repair_attempts must be 0 or 1")
+        repairs = int(
+            tools.get(
+                "max_argument_repair_attempts",
+                DEFAULT_MAX_ARGUMENT_REPAIR_ATTEMPTS,
+            )
+        )
+        if repairs not in {0, 1, 2}:
+            raise ValueError("tools.max_argument_repair_attempts must be 0, 1, or 2")
     shell = document.get("shell", {})
     if isinstance(shell, dict):
         default_timeout = float(shell.get("default_timeout_seconds", 120))
@@ -332,21 +349,21 @@ def validate_semantics(document: dict[str, object]) -> None:
     context = document.get("context", {})
     if isinstance(context, dict):
         boolean(context.get("auto_compact", True))
-        trigger = float(context.get("trigger_ratio", 0.80))
-        target = float(context.get("target_ratio", 0.60))
+        trigger = float(context.get("trigger_ratio", DEFAULT_CONTEXT_TRIGGER_RATIO))
+        target = float(context.get("target_ratio", DEFAULT_CONTEXT_TARGET_RATIO))
         if not 0 < target < trigger <= 1:
             raise ValueError(
                 "context ratios must satisfy 0 < target_ratio < trigger_ratio <= 1"
             )
         for field, default in (
-            ("preserve_recent_turns", 6),
-            ("preserve_recent_tokens", 32_768),
+            ("preserve_recent_turns", DEFAULT_CONTEXT_PRESERVE_RECENT_TURNS),
+            ("preserve_recent_tokens", DEFAULT_CONTEXT_PRESERVE_RECENT_TOKENS),
             ("working_set_limit", 5),
             ("inline_tool_result_bytes", 16_384),
             ("summary_max_tokens", 2_048),
-            ("max_compaction_failures", 3),
-            ("episodic_recall_limit", 5),
-            ("episodic_recall_bytes", 4_096),
+            ("max_compaction_failures", DEFAULT_CONTEXT_MAX_COMPACTION_FAILURES),
+            ("episodic_recall_limit", DEFAULT_MEMORY_RECALL_LIMIT),
+            ("episodic_recall_bytes", DEFAULT_MEMORY_RECALL_BYTES),
         ):
             if int(context.get(field, default)) <= 0:
                 raise ValueError(f"context.{field} must be positive")

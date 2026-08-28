@@ -4,16 +4,16 @@ import os
 import tempfile
 from pathlib import Path
 
+from ..behavior_defaults import DEFAULT_MAX_TOOL_ROUNDS
 from .loader import load_config_document, read_config_document
-from .rules import DEFAULT_MAX_TOOL_ROUNDS
 from .settings import Settings
 from .types import (
     AgentSettings,
-    BudgetSettings,
     BridgeSettings,
+    BudgetSettings,
     CommandSettings,
-    ContextSettings,
     ConfigIssue,
+    ContextSettings,
     DocumentSettings,
     LspServerSettings,
     LspSettings,
@@ -36,11 +36,11 @@ __all__ = [
     "CONFIG_VERSION",
     "DEFAULT_MAX_TOOL_ROUNDS",
     "AgentSettings",
-    "BudgetSettings",
     "BridgeSettings",
+    "BudgetSettings",
     "CommandSettings",
-    "ContextSettings",
     "ConfigIssue",
+    "ContextSettings",
     "DocumentSettings",
     "LspServerSettings",
     "LspSettings",
@@ -52,8 +52,8 @@ __all__ = [
     "ProviderSettings",
     "RoutingSettings",
     "RuntimeSettings",
-    "ShellSettings",
     "Settings",
+    "ShellSettings",
     "ToolSettings",
     "WebSettings",
     "WorktreeSettings",

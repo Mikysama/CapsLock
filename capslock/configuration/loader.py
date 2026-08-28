@@ -2,11 +2,24 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import os
 import tempfile
 from datetime import UTC, datetime
+from pathlib import Path
 
+from ..behavior_defaults import (
+    DEFAULT_AGENT_MAX_CHILD_TOOL_ROUNDS,
+    DEFAULT_AGENT_MAX_CHILDREN,
+    DEFAULT_AGENT_MAX_CONCURRENCY,
+    DEFAULT_AGENT_MAX_DEPTH,
+    DEFAULT_CONTEXT_MAX_COMPACTION_FAILURES,
+    DEFAULT_CONTEXT_PRESERVE_RECENT_TOKENS,
+    DEFAULT_CONTEXT_PRESERVE_RECENT_TURNS,
+    DEFAULT_CONTEXT_TARGET_RATIO,
+    DEFAULT_CONTEXT_TRIGGER_RATIO,
+    DEFAULT_MAX_ARGUMENT_REPAIR_ATTEMPTS,
+    DEFAULT_MAX_READ_CONCURRENCY,
+)
 from .document import DocumentReader
 from .validation import validate_config_document
 
@@ -54,14 +67,16 @@ def _upgrade_config(path: Path) -> None:
         "tools",
         {
             "schema_budget_tokens": 8000,
-            "max_read_concurrency": 4,
+            "max_read_concurrency": DEFAULT_MAX_READ_CONCURRENCY,
             "aggregate_result_bytes": 65536,
         },
     )
     tools = document.setdefault("tools", {})
     if isinstance(tools, dict):
         tools.setdefault("selection_mode", "shadow")
-        tools.setdefault("max_argument_repair_attempts", 1)
+        tools.setdefault(
+            "max_argument_repair_attempts", DEFAULT_MAX_ARGUMENT_REPAIR_ATTEMPTS
+        )
     providers = document.get("providers", {})
     if isinstance(providers, dict):
         for provider in providers.values():
@@ -101,11 +116,26 @@ def _upgrade_config(path: Path) -> None:
     document.setdefault("worktree", {"enabled": True, "max_per_session": 4})
     agents = document.setdefault("agents", {})
     if isinstance(agents, dict):
+        agents.setdefault("max_children", DEFAULT_AGENT_MAX_CHILDREN)
+        agents.setdefault("max_concurrency", DEFAULT_AGENT_MAX_CONCURRENCY)
+        agents.setdefault("max_depth", DEFAULT_AGENT_MAX_DEPTH)
+        agents.setdefault("max_child_tool_rounds", DEFAULT_AGENT_MAX_CHILD_TOOL_ROUNDS)
         agents.setdefault("background_enabled", True)
         agents.setdefault("mailbox_enabled", True)
         agents.setdefault("message_ttl_seconds", 3600)
     context = document.setdefault("context", {})
     if isinstance(context, dict):
+        context.setdefault("trigger_ratio", DEFAULT_CONTEXT_TRIGGER_RATIO)
+        context.setdefault("target_ratio", DEFAULT_CONTEXT_TARGET_RATIO)
+        context.setdefault(
+            "preserve_recent_turns", DEFAULT_CONTEXT_PRESERVE_RECENT_TURNS
+        )
+        context.setdefault(
+            "preserve_recent_tokens", DEFAULT_CONTEXT_PRESERVE_RECENT_TOKENS
+        )
+        context.setdefault(
+            "max_compaction_failures", DEFAULT_CONTEXT_MAX_COMPACTION_FAILURES
+        )
         context.setdefault("tokenizer", "adaptive")
     mcp = document.setdefault("mcp", {})
     if isinstance(mcp, dict):

@@ -3,39 +3,47 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 import time
-import hashlib
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
+from ..behavior_defaults import (
+    DEFAULT_MAX_ARGUMENT_REPAIR_ATTEMPTS,
+    DEFAULT_MAX_READ_CONCURRENCY,
+    DEFAULT_MAX_TOOL_ROUNDS,
+)
+from ..configuration import ContextSettings
 from ..domain import (
-    ActionStatus,
     ActionRecord,
-    ApprovalChoice,
-    ApprovalDecision,
+    ActionStatus,
     AgentEvent,
     AgentEventKind,
+    ApprovalChoice,
+    ApprovalDecision,
     BudgetSnapshot,
     LoopDetectionSettings,
-    ModelRole,
     ModelBudgetExceeded,
+    ModelRole,
     ModelRoutingError,
-    RunLimits,
     RunKind,
+    RunLimits,
     RunMode,
     RunStopped,
     StopReason,
     WorkItemStatus,
 )
-from ..configuration import ContextSettings
 from ..evidence import Evidence
-from ..observability import EventSink
+from ..external import assess_prompt_injection
+from ..instructions import InstructionLoader
 from ..interaction import RunInteraction
 from ..models import selectable_model
+from ..observability import EventSink
 from ..permissions import PermissionMode
+from ..policy import WorkspacePolicy
 from ..ports import (
     ActionFactory,
     ActionRepositoryPort,
@@ -48,19 +56,16 @@ from ..ports import (
     SkillRegistryPort,
     SourcePort,
     TaskPort,
-    WorkItemRepositoryPort,
     WorkflowPort,
+    WorkItemRepositoryPort,
 )
-from ..policy import WorkspacePolicy
 from ..skills import SkillValidationError
-from ..tooling.tools import workspace_tools
 from ..tooling.contracts import ExecutionContext
 from ..tooling.executor import ToolRuntime
-from .context import CitationResolver, ContextBudgetManager, citation_data
+from ..tooling.tools import workspace_tools
 from .attachments import LocalAttachmentResolver
+from .context import CitationResolver, ContextBudgetManager, citation_data
 from .engine import MemoryRunMode, RunEngine, RunRequest
-from ..instructions import InstructionLoader
-from ..external import assess_prompt_injection
 from .model import ChatModel
 from .prompts import PromptBundle, PromptSection, PromptTrust
 from .run_support import (
@@ -69,13 +74,13 @@ from .run_support import (
     RunOrchestrator,
     RunOutcomeBuilder,
 )
-from .tool_loop import ToolLoop, ToolLoopError, ToolLoopPaused
 from .session_services import (
     PermissionRequestService,
     PlanRequestService,
     RunExecutionCoordinator,
     SessionAdministration,
 )
+from .tool_loop import ToolLoop, ToolLoopError, ToolLoopPaused
 
 
 class AgentRuntimeError(RuntimeError):
@@ -144,7 +149,7 @@ class AgentSession:
         tools: ToolRuntime | None = None,
         memory: Any = None,
         permission_mode: PermissionMode = PermissionMode.APPROVE_FOR_ME,
-        max_tool_rounds: int = 32,
+        max_tool_rounds: int = DEFAULT_MAX_TOOL_ROUNDS,
         context_settings: ContextSettings = ContextSettings(),
         context_window: int = 128_000,
         max_output_tokens: int = 8_192,
@@ -159,9 +164,9 @@ class AgentSession:
         artifacts: Any = None,
         permission_engine: Any = None,
         process_manager: Any = None,
-        max_read_concurrency: int = 4,
+        max_read_concurrency: int = DEFAULT_MAX_READ_CONCURRENCY,
         aggregate_result_bytes: int = 65_536,
-        max_argument_repair_attempts: int = 1,
+        max_argument_repair_attempts: int = DEFAULT_MAX_ARGUMENT_REPAIR_ATTEMPTS,
         shell_classifier_factory: Callable[[Any], Any] | None = None,
         document_settings: Any = None,
         planning: Any = None,

@@ -4,6 +4,27 @@
 
 ## [Unreleased]
 
+## [2.7.6.1] - 2026-08-29
+
+### Added
+
+- 新增版本化行为策略评测漏斗，覆盖运行预算、上下文压缩、循环检测、Memory 与子 Agent；产出原始样本、置信区间、Pareto 集合、报告哈希和人工审批建议。
+- 新增可注入的 Memory `RecallPolicy`、行为指标注册表、220 条调优任务、60 条隔离确认任务，以及参数矩阵、报告 Schema 和确定性 CI 门禁。
+
+### Changed
+
+- 将分散在配置、runtime、Memory 与协作模块中的行为默认值集中到 `capslock.behavior_defaults`，loader、validation、运行时和文档共享同一来源。
+- 工具参数修复预算支持 0、1 或 2 次；默认仍为 1，且只允许明确未执行的工具名称或 Schema 错误进入下一轮修复。
+
+### Validation
+
+- 首轮 OAT、子系统组合与 Memory 权重搜索共执行 41,580 个确定性样本；Loop、Memory 和 Agent 冲突证据未达到更新门槛，因此所有生产默认值保持不变。
+- live screen 与双 seed confirm 必须显式提供 Provider、模型和价格；评测报告不能自动修改安全硬限制或生产默认值。
+
+### Compatibility
+
+- workspace schema 17、memory schema 5、portable archive 6、session export 6、config 10、公开 Tool API 和默认行为保持兼容。
+
 ## [2.7.6] - 2026-08-23
 
 ### Added

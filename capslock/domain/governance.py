@@ -6,6 +6,14 @@ from dataclasses import asdict, dataclass
 from enum import StrEnum
 from typing import Any
 
+from ..behavior_defaults import (
+    DEFAULT_LOOP_CONSECUTIVE_REPEATS,
+    DEFAULT_LOOP_CYCLE_REPETITIONS,
+    DEFAULT_LOOP_FAILED_RETRIES,
+    DEFAULT_LOOP_MAX_CYCLE_LENGTH,
+    DEFAULT_MAX_TOOL_ROUNDS,
+)
+
 
 class RunMode(StrEnum):
     INTERACTIVE = "interactive"
@@ -23,7 +31,7 @@ class StopReason(StrEnum):
 
 @dataclass(frozen=True)
 class RunLimits:
-    max_tool_rounds: int = 32
+    max_tool_rounds: int = DEFAULT_MAX_TOOL_ROUNDS
     max_tool_calls: int | None = None
     max_duration_seconds: float | None = None
     max_tokens: int | None = None
@@ -40,10 +48,10 @@ class RunLimits:
 
 @dataclass(frozen=True)
 class LoopDetectionSettings:
-    consecutive_repeats: int = 3
-    failed_retries: int = 3
-    cycle_repetitions: int = 3
-    max_cycle_length: int = 4
+    consecutive_repeats: int = DEFAULT_LOOP_CONSECUTIVE_REPEATS
+    failed_retries: int = DEFAULT_LOOP_FAILED_RETRIES
+    cycle_repetitions: int = DEFAULT_LOOP_CYCLE_REPETITIONS
+    max_cycle_length: int = DEFAULT_LOOP_MAX_CYCLE_LENGTH
 
     def __post_init__(self) -> None:
         for name, value in asdict(self).items():

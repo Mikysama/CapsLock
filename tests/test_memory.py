@@ -18,7 +18,7 @@ from capslock.domain import (
     MemoryStatus,
     MemoryType,
 )
-from capslock.memory import MemoryService
+from capslock.memory import MemoryService, RecallPolicy
 from capslock.memory.transfer import EXPORT_FORMAT, EXPORT_VERSION
 from capslock.storage.memory_repositories import MemoryRepositories
 from tests.helpers import FakeChatModel, answer
@@ -45,6 +45,13 @@ async def create_memory(
         expires_at=expires_at,
         origin=MemoryOrigin.MANUAL,
     )
+
+
+def test_recall_policy_is_injectable_and_validated() -> None:
+    policy = RecallPolicy(limit=8, byte_budget=8192, semantic_threshold=0.35)
+    assert policy.limit == 8
+    with pytest.raises(ValueError, match="thresholds"):
+        RecallPolicy(semantic_threshold=1.1)
 
 
 def test_immutable_revisions_expiry_clear_forget_and_undo(tmp_path: Path) -> None:

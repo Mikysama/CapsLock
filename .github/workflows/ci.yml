@@ -41,6 +41,10 @@ jobs:
         run: python -m pytest -q
       - name: Core agent evaluation
         run: python scripts/evaluate_agent.py --mode deterministic --output "$RUNNER_TEMP/capslock-eval.json"
+      - name: Behaviour policy evaluation
+        run: |
+          python scripts/evaluate_policies.py --stage deterministic --matrix evaluations/core-v1.toml --output "$RUNNER_TEMP/capslock-policy-eval"
+          python -c 'import json, jsonschema, os; from pathlib import Path; root=Path.cwd(); report=json.loads((Path(os.environ["RUNNER_TEMP"])/"capslock-policy-eval"/"report.json").read_text()); schema=json.loads((root/"evaluations"/"report-schema-v1.json").read_text()); jsonschema.validate(report, schema)'
       - name: Memory quality evaluation
         run: python scripts/evaluate_memory.py --minimum 0.90
       - name: Check installed dependencies

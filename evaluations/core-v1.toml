@@ -1,0 +1,36 @@
+schema_version = 1
+matrix_id = "core-v1"
+task_set_version = "core-v1"
+
+[pricing]
+input_cost_per_million = 0.0
+output_cost_per_million = 0.0
+
+[parameters]
+"runtime.max_tool_rounds" = [8, 16, 24, 32, 48, 64]
+"providers.timeout_seconds" = [15, 30, 45, 60, 90, 120]
+"tools.max_read_concurrency" = [1, 2, 4, 8, 16]
+"tools.max_argument_repair_attempts" = [0, 1, 2]
+"context.trigger_ratio" = [0.70, 0.75, 0.80, 0.85, 0.90]
+"context.target_ratio" = [0.40, 0.50, 0.60, 0.70]
+"context.preserve_recent_turns" = [4, 6, 8]
+"context.preserve_recent_tokens" = [16384, 32768, 49152]
+"context.max_compaction_failures" = [2, 3, 4]
+"loop_detection.consecutive_repeats" = [2, 3, 4, 5]
+"loop_detection.failed_retries" = [2, 3, 4]
+"loop_detection.cycle_repetitions" = [2, 3, 4]
+"loop_detection.max_cycle_length" = [2, 4, 6]
+"memory.recall_limit" = [3, 5, 8]
+"memory.recall_bytes" = [2048, 4096, 8192]
+"memory.semantic_threshold" = [0.35, 0.45, 0.55]
+"memory.recall_threshold" = [0.40, 0.50, 0.60]
+"agents.max_children" = [2, 4, 8]
+"agents.max_concurrency" = [1, 2, 4]
+"agents.max_child_tool_rounds" = [8, 16, 24]
+
+[subsystems]
+runtime = ["runtime.max_tool_rounds", "providers.timeout_seconds", "tools.max_read_concurrency", "tools.max_argument_repair_attempts"]
+context = ["context.trigger_ratio", "context.target_ratio", "context.preserve_recent_turns", "context.preserve_recent_tokens", "context.max_compaction_failures"]
+loop = ["loop_detection.consecutive_repeats", "loop_detection.failed_retries", "loop_detection.cycle_repetitions", "loop_detection.max_cycle_length"]
+memory = ["memory.recall_limit", "memory.recall_bytes", "memory.semantic_threshold", "memory.recall_threshold"]
+agents = ["agents.max_children", "agents.max_concurrency", "agents.max_child_tool_rounds"]

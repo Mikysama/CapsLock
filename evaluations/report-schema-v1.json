@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://capslock.local/schemas/policy-evaluation-report-v1.json",
+  "title": "CapsLock Policy Evaluation Report",
+  "type": "object",
+  "required": ["schema_version", "status", "manifest", "metrics_registry", "summary", "sample_count", "report_hash"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "status": {"enum": ["completed", "failed"]},
+    "manifest": {
+      "type": "object",
+      "required": ["stage", "matrix_fingerprint", "task_set_hash", "git_commit", "seed", "repetitions"],
+      "properties": {
+        "stage": {"enum": ["deterministic", "screen", "confirm"]},
+        "matrix_fingerprint": {"type": "string", "minLength": 8},
+        "task_set_hash": {"type": "string", "minLength": 32},
+        "git_commit": {"type": "string"},
+        "seed": {"type": "integer"},
+        "repetitions": {"type": "integer", "minimum": 1}
+      }
+    },
+    "metrics_registry": {"type": "array", "minItems": 1},
+    "summary": {
+      "type": "object",
+      "required": ["candidates", "pareto_fingerprints", "recommendation"],
+      "properties": {
+        "candidates": {"type": "array", "minItems": 1},
+        "pareto_fingerprints": {"type": "array", "items": {"type": "string"}},
+        "recommendation": {"type": ["object", "null"]}
+      }
+    },
+    "sample_count": {"type": "integer", "minimum": 1},
+    "report_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  },
+  "additionalProperties": false
+}

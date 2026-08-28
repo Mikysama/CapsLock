@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
-import json
 import asyncio
+import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from typing import Any
 
+from ..behavior_defaults import (
+    DEFAULT_MAX_ARGUMENT_REPAIR_ATTEMPTS,
+    DEFAULT_MAX_READ_CONCURRENCY,
+)
 from ..domain import (
     AgentEventKind,
     BudgetSnapshot,
@@ -22,14 +26,15 @@ from ..ports import RunJournal
 from ..tooling.contracts import (
     ExecutionContext,
     ResolvedToolPolicy,
+    ToolExecutionState,
     ToolOutcome,
     ToolOutcomeStatus,
     ToolPause,
-    ToolExecutionState,
 )
 from ..tooling.executor import ToolRuntime
-from ..tooling.schema import SchemaValidationError
 from ..tooling.presentation import tool_presentation
+from ..tooling.schema import SchemaValidationError
+from .governance import RunGovernor
 from .model import (
     ChatModel,
     ModelMessage,
@@ -37,7 +42,6 @@ from .model import (
     ModelUsage,
     stream_model_response,
 )
-from .governance import RunGovernor
 from .tool_delivery import BatchScheduler, ResultDelivery
 from .tool_invocation import InvocationPreparer
 
@@ -209,6 +213,7 @@ class ToolCallExecutor:
         tools: ToolRuntime,
         context_factory: Callable[[str], ExecutionContext],
         aggregate_result_bytes: int = 65_536,
+        max_argument_repair_attempts: int = DEFAULT_MAX_ARGUMENT_REPAIR_ATTEMPTS,
     ) -> None:
         self.journal = journal
         self.tools = tools
@@ -225,6 +230,7 @@ class ToolCallExecutor:
             context_factory=context_factory,
             outcome_factory=ToolCallOutcome,
             paused_error=ToolLoopPaused,
+            max_argument_repair_attempts=max_argument_repair_attempts,
         )
 
     async def prepare(
@@ -413,9 +419,9 @@ class ToolLoop:
         journal: RunJournal,
         max_tool_rounds: int,
         context_factory: Callable[[str], ExecutionContext],
-        max_read_concurrency: int = 4,
+        max_read_concurrency: int = DEFAULT_MAX_READ_CONCURRENCY,
         aggregate_result_bytes: int = 65_536,
-        max_argument_repair_attempts: int = 1,
+        max_argument_repair_attempts: int = DEFAULT_MAX_ARGUMENT_REPAIR_ATTEMPTS,
     ) -> None:
         self.chat_model = chat_model
         self.model = model
@@ -424,13 +430,14 @@ class ToolLoop:
         self.max_tool_rounds = max_tool_rounds
         self.context_factory = context_factory
         self.max_read_concurrency = max(1, max_read_concurrency)
-        self.max_argument_repair_attempts = max(0, min(1, max_argument_repair_attempts))
+        self.max_argument_repair_attempts = max(0, min(2, max_argument_repair_attempts))
         self.model_steps = ModelStepExecutor(journal=journal, model=model, tools=tools)
         self.tool_calls = ToolCallExecutor(
             journal=journal,
             tools=tools,
             context_factory=context_factory,
             aggregate_result_bytes=aggregate_result_bytes,
+            max_argument_repair_attempts=self.max_argument_repair_attempts,
         )
 
     async def run(
@@ -456,6 +463,7 @@ class ToolLoop:
         input_tokens = output_tokens = 0
         turn = 0
         pending_repair: ToolRepairDirective | None = None
+        repair_attempt = 0
         while True:
             await self.tools.refresh_dynamic()
             for diagnostic in self.tools.pop_refresh_diagnostics():
@@ -470,6 +478,9 @@ class ToolLoop:
                 selection_query, planning=planning_active
             )
             active_repair = pending_repair
+            active_repair_attempt = (
+                repair_attempt + 1 if active_repair is not None else 0
+            )
             if active_repair is not None:
                 self.tools.discover(active_repair.candidates)
                 selected_schemas = self.tools.catalog.schemas_for(
@@ -604,7 +615,10 @@ class ToolLoop:
                     {"status": "running", "budget": snapshot.as_dict()},
                 )
             calls = (
-                tuple(replace(call, repair_attempt=1) for call in message.tool_calls)
+                tuple(
+                    replace(call, repair_attempt=active_repair_attempt)
+                    for call in message.tool_calls
+                )
                 if active_repair is not None
                 else message.tool_calls
             )
@@ -680,6 +694,7 @@ class ToolLoop:
                 raise
             if self.max_argument_repair_attempts:
                 pending_repair = self._repair_directive(round_outcomes)
+                repair_attempt = active_repair_attempt if pending_repair else 0
             turn += 1
         raise ToolLoopError(
             "agent exceeded the maximum number of tool-call rounds",
@@ -702,9 +717,7 @@ class ToolLoop:
         for item in outcomes:
             outcome = item.outcome
             if (
-                item.call.repair_attempt != 0
-                or outcome.error_code
-                not in {"invalid_tool_arguments", "unsupported_tool"}
+                outcome.error_code not in {"invalid_tool_arguments", "unsupported_tool"}
                 or outcome.effective_execution_state
                 is not ToolExecutionState.NOT_STARTED
                 or not isinstance(outcome.data, dict)

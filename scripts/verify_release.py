@@ -60,7 +60,7 @@ def main() -> int:
     parser.add_argument("--dist", type=Path, action="append", default=[])
     args = parser.parse_args()
 
-    if not re.fullmatch(r"\d+\.\d+\.\d+", __version__):
+    if not re.fullmatch(r"\d+(?:\.\d+){2,3}", __version__):
         raise SystemExit(f"invalid source version: {__version__}")
     if args.tag and args.tag != f"v{__version__}":
         raise SystemExit(f"tag {args.tag} does not match source version v{__version__}")

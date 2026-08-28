@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "task_set_version": "core-v1",
+  "sources": ["deterministic synthetic workspaces", "hand-authored safety and relevance labels"],
+  "tuning": {
+    "runtime": 40,
+    "context": 40,
+    "loop": 40,
+    "memory": 60,
+    "agents": 40,
+    "total": 220
+  },
+  "confirmation": {
+    "runtime": 12,
+    "context": 12,
+    "loop": 12,
+    "memory": 12,
+    "agents": 12,
+    "total": 60,
+    "loading_policy": "confirm-stage-only"
+  },
+  "external_validation": {
+    "status": "reserved",
+    "policy": "Add anonymized production traces as an independent set; never replace the reproducible benchmark."
+  }
+}

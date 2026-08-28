@@ -6,6 +6,18 @@ import os
 from collections.abc import Callable
 from typing import Any
 
+from ..behavior_defaults import (
+    DEFAULT_CONTEXT_MAX_COMPACTION_FAILURES,
+    DEFAULT_CONTEXT_PRESERVE_RECENT_TOKENS,
+    DEFAULT_CONTEXT_PRESERVE_RECENT_TURNS,
+    DEFAULT_CONTEXT_TARGET_RATIO,
+    DEFAULT_CONTEXT_TRIGGER_RATIO,
+    DEFAULT_MAX_ARGUMENT_REPAIR_ATTEMPTS,
+    DEFAULT_MAX_READ_CONCURRENCY,
+    DEFAULT_MEMORY_RECALL_BYTES,
+    DEFAULT_MEMORY_RECALL_LIMIT,
+    DEFAULT_PROVIDER_TIMEOUT_SECONDS,
+)
 from ..layout import ProjectLayout
 from .rules import (
     agent_settings,
@@ -18,8 +30,8 @@ from .rules import (
     web_credential,
 )
 from .types import (
-    CommandSettings,
     BridgeSettings,
+    CommandSettings,
     ContextSettings,
     DocumentSettings,
     LspServerSettings,
@@ -63,7 +75,11 @@ def resolve_settings(
             kind="openai_compatible",
             base_url=os.environ.get("CAPSLOCK_BASE_URL", "https://api.deepseek.com"),
             api_key=os.environ.get("CAPSLOCK_API_KEY"),
-            timeout_seconds=float(os.environ.get("CAPSLOCK_TIMEOUT_SECONDS", 60)),
+            timeout_seconds=float(
+                os.environ.get(
+                    "CAPSLOCK_TIMEOUT_SECONDS", DEFAULT_PROVIDER_TIMEOUT_SECONDS
+                )
+            ),
             data_policy="provider:default",
             credential_ref="env:CAPSLOCK_API_KEY",
         )
@@ -114,13 +130,18 @@ def resolve_settings(
         ),
         tools=ToolSettings(
             schema_budget_tokens=int(group("tools").get("schema_budget_tokens", 8_000)),
-            max_read_concurrency=int(group("tools").get("max_read_concurrency", 4)),
+            max_read_concurrency=int(
+                group("tools").get("max_read_concurrency", DEFAULT_MAX_READ_CONCURRENCY)
+            ),
             aggregate_result_bytes=int(
                 group("tools").get("aggregate_result_bytes", 65_536)
             ),
             selection_mode=str(group("tools").get("selection_mode", "shadow")),
             max_argument_repair_attempts=int(
-                group("tools").get("max_argument_repair_attempts", 1)
+                group("tools").get(
+                    "max_argument_repair_attempts",
+                    DEFAULT_MAX_ARGUMENT_REPAIR_ATTEMPTS,
+                )
             ),
         ),
         shell=ShellSettings(
@@ -138,11 +159,21 @@ def resolve_settings(
         ),
         context=ContextSettings(
             auto_compact=boolean(group("context").get("auto_compact", True)),
-            trigger_ratio=float(group("context").get("trigger_ratio", 0.80)),
-            target_ratio=float(group("context").get("target_ratio", 0.60)),
-            preserve_recent_turns=int(group("context").get("preserve_recent_turns", 6)),
+            trigger_ratio=float(
+                group("context").get("trigger_ratio", DEFAULT_CONTEXT_TRIGGER_RATIO)
+            ),
+            target_ratio=float(
+                group("context").get("target_ratio", DEFAULT_CONTEXT_TARGET_RATIO)
+            ),
+            preserve_recent_turns=int(
+                group("context").get(
+                    "preserve_recent_turns", DEFAULT_CONTEXT_PRESERVE_RECENT_TURNS
+                )
+            ),
             preserve_recent_tokens=int(
-                group("context").get("preserve_recent_tokens", 32_768)
+                group("context").get(
+                    "preserve_recent_tokens", DEFAULT_CONTEXT_PRESERVE_RECENT_TOKENS
+                )
             ),
             working_set_limit=int(group("context").get("working_set_limit", 5)),
             inline_tool_result_bytes=int(
@@ -150,15 +181,23 @@ def resolve_settings(
             ),
             summary_max_tokens=int(group("context").get("summary_max_tokens", 2_048)),
             max_compaction_failures=int(
-                group("context").get("max_compaction_failures", 3)
+                group("context").get(
+                    "max_compaction_failures", DEFAULT_CONTEXT_MAX_COMPACTION_FAILURES
+                )
             ),
             tokenizer=str(group("context").get("tokenizer", "adaptive")),
             episodic_recall_enabled=boolean(
                 group("context").get("episodic_recall_enabled", True)
             ),
-            episodic_recall_limit=int(group("context").get("episodic_recall_limit", 5)),
+            episodic_recall_limit=int(
+                group("context").get(
+                    "episodic_recall_limit", DEFAULT_MEMORY_RECALL_LIMIT
+                )
+            ),
             episodic_recall_bytes=int(
-                group("context").get("episodic_recall_bytes", 4_096)
+                group("context").get(
+                    "episodic_recall_bytes", DEFAULT_MEMORY_RECALL_BYTES
+                )
             ),
         ),
         agents=agent_settings(group("agents")),

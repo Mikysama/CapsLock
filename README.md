@@ -2,7 +2,7 @@
 
 CapsLock 是一个本机工作区 Agent，用于读取和修改代码、检索证据、运行受沙箱保护的 Shell、查询代码语义，以及按审批策略访问 Web、MCP 和本地插件。Tool Runtime v2 将工具契约、参数级策略、可恢复暂停、调度、富结果与审计统一到异步执行链。
 
-当前源码版本为 `2.7.6`。本版本统一手动、自动与 checkpoint 上下文压缩，新增 token-aware recent turn 保留、summary v3、引用式 working set、显式降级与防抖，并将 workspace schema 升至 17。当前协议为 workspace schema 17、memory schema 5、portable archive 6、session export 6 和 config 10。完整边界见 [2.7.6 发布说明](docs/releases/v2.7.6.md)。
+当前源码版本为 `2.7.6.1`。本版本集中管理运行轮数、超时、并发、上下文、循环检测、Memory 与子 Agent 默认值，并增加版本化行为指标评测、可注入 Memory 召回策略和最多两轮参数修复。首轮 41,580 个确定性样本未形成满足全部硬门槛的更新证据，因此生产默认值保持不变。当前协议仍为 workspace schema 17、memory schema 5、portable archive 6、session export 6 和 config 10。完整边界见 [2.7.6.1 发布说明](docs/releases/v2.7.6.1.md)。
 
 正式支持矩阵：Linux/macOS，Python 3.12。发布 CI 会在两个操作系统组合中执行测试、构建、依赖审计和安装冒烟。
 
@@ -354,7 +354,7 @@ schema_budget_tokens = 8000
 max_read_concurrency = 4
 aggregate_result_bytes = 65536
 selection_mode = "shadow" # full | shadow | filtered
-max_argument_repair_attempts = 1
+max_argument_repair_attempts = 1 # 0 | 1 | 2
 
 [shell]
 enabled = true
@@ -483,6 +483,18 @@ CapsLock 只接受 canonical 布局：
 - `cli/fullscreen_tui/`：保留的 Textual App、状态 reducer、widgets、screens 和安全展示适配。
 
 公开运行时入口只有 `AgentSession.run_stream(RunRequest)`；没有旧式聚合 Agent、同步包装或兼容别名。
+
+## 行为指标评测
+
+`evaluations/core-v1.toml` 定义运行轮数/超时/并发、上下文压缩、循环检测、Memory 和子 Agent 的候选矩阵。确定性阶段使用 220 条调优任务；screen 和 confirm 阶段必须显式指定 Provider、模型及前一阶段报告，confirm 使用隔离的 60 条任务。评测只生成带哈希的建议，不自动修改默认值。
+
+```bash
+python scripts/evaluate_policies.py --stage deterministic \
+  --matrix evaluations/core-v1.toml \
+  --output /tmp/capslock-policy-eval
+```
+
+完整漏斗、产物和人工审批规则见 [行为指标评测](docs/evaluation.md)。
 
 ## 验证
 

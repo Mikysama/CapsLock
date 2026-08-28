@@ -15,15 +15,15 @@ from capslock.application.action_system import (
     FileActionHandler,
 )
 from capslock.domain import (
-    ApprovalChoice,
-    ApprovalDecision,
     ActionStatus,
     ActionType,
     AgentEventKind,
+    ApprovalChoice,
+    ApprovalDecision,
     RunStepStatus,
 )
-from capslock.observability import EventSink
 from capslock.interaction import RunInteraction
+from capslock.observability import EventSink
 from capslock.permissions import PermissionMode
 from capslock.planning import PlanningService
 from capslock.policy import WorkspacePolicy
@@ -43,20 +43,20 @@ from capslock.tooling.contracts import (
     ToolOutcome,
     define_tool,
 )
+from capslock.tooling.executor import ToolRuntime
 from capslock.tooling.permission_policy.engine import PermissionEngine
 from capslock.tooling.permission_policy.middleware import PermissionMiddleware
 from capslock.tooling.planning import PlanningBoundaryMiddleware
-from capslock.tooling.executor import ToolRuntime
 from capslock.tooling.tools import workspace_tools
 from capslock.tooling.tools.plans import plan_tools
 from tests.helpers import (
     DummySkillRegistry,
     DummySkillService,
     FakeChatModel,
-    answer,
-    workspace_run,
     StubActionHandler,
+    answer,
     workflow_service,
+    workspace_run,
 )
 
 ToolRegistry = ToolRuntime
@@ -830,6 +830,53 @@ def test_tool_loop_does_not_retry_a_failed_repair(tmp_path: Path) -> None:
             assert json.loads(calls[1]["result_summary"])["error_code"] == (
                 "argument_repair_exhausted"
             )
+        finally:
+            await repositories.close()
+
+    asyncio.run(scenario())
+
+
+def test_tool_loop_can_use_two_argument_repairs_when_configured(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        repositories = await WorkspaceRepositories.open(
+            tmp_path / "two-repairs.sqlite3", workspace=tmp_path
+        )
+        try:
+            session, prepared = await workspace_run(repositories)
+
+            async def execute(context, arguments):
+                return ToolResult(True, arguments)
+
+            model = FakeChatModel(
+                ModelResponse(
+                    ModelMessage(None, (ModelToolCall("bad-1", "echo", "[invalid]"),))
+                ),
+                ModelResponse(
+                    ModelMessage(None, (ModelToolCall("bad-2", "echo", "[invalid]"),))
+                ),
+                ModelResponse(
+                    ModelMessage(None, (ModelToolCall("fixed", "echo", '{"x":1}'),))
+                ),
+                answer("repaired twice"),
+            )
+            loop = ToolLoop(
+                chat_model=model,
+                model="test",
+                tools=ToolRegistry([Tool("echo", "echo", {"type": "object"}, execute)]),
+                journal=repositories.run_journal,
+                max_tool_rounds=4,
+                max_argument_repair_attempts=2,
+                context_factory=context_factory(repositories, session.id),
+            )
+            result = await loop.run(
+                [], prepared.run.id, emit=lambda kind, data: asyncio.sleep(0)
+            )
+            assert result.text == "repaired twice"
+            calls = await repositories.database.fetch_all(
+                "SELECT result_summary FROM tool_calls ORDER BY id"
+            )
+            assert len(calls) == 3
+            assert json.loads(calls[1]["result_summary"])["data"]["repair_attempt"] == 1
         finally:
             await repositories.close()
 

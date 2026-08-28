@@ -6,12 +6,15 @@ import json
 import re
 from dataclasses import dataclass
 
+from ...behavior_defaults import (
+    DEFAULT_MEMORY_RECALL_BYTES,
+    DEFAULT_MEMORY_RECALL_LIMIT,
+)
 from .core import Repository, now
 
-
 EPISODIC_CHUNK_BYTES = 8 * 1024
-AUTOMATIC_RECALL_BYTES = 4 * 1024
-AUTOMATIC_RECALL_LIMIT = 5
+AUTOMATIC_RECALL_BYTES = DEFAULT_MEMORY_RECALL_BYTES
+AUTOMATIC_RECALL_LIMIT = DEFAULT_MEMORY_RECALL_LIMIT
 
 
 @dataclass(frozen=True)
@@ -139,9 +142,7 @@ class EpisodicRepository(Repository):
                     key[1],
                     int(row["chunk_ordinal"]),
                     content,
-                    str(row["artifact_id"])
-                    if row["artifact_id"] is not None
-                    else None,
+                    str(row["artifact_id"]) if row["artifact_id"] is not None else None,
                     round(-float(row["rank"]), 6),
                 )
             )
@@ -152,9 +153,7 @@ class EpisodicRepository(Repository):
     async def context(
         self, query: str, *, session_id: str, run_id: str
     ) -> tuple[str, list[EpisodicHit]]:
-        hits = await self.search(
-            query, session_id=session_id, exclude_run_id=run_id
-        )
+        hits = await self.search(query, session_id=session_id, exclude_run_id=run_id)
         if not hits:
             return "", []
         payload = [hit.as_dict() for hit in hits]

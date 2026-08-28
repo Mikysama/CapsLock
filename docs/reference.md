@@ -4,7 +4,7 @@
 
 ## 稳定契约
 
-CapsLock 2.7.6 支持 Linux/macOS 与 Python 3.12。当前开发协议为 `permissions_version = 2`、`config_version = 10`、workspace schema 17、memory schema 5、portable archive 6、session export 6、JSONL schema 3、IDE Bridge protocol 1 和插件 manifest/protocol/grant 4。config v3-v9、workspace schema v6-v16 与 memory schema v3-v4 使用 backup-first 自动迁移。
+CapsLock 2.7.6.1 支持 Linux/macOS 与 Python 3.12。当前开发协议为 `permissions_version = 2`、`config_version = 10`、workspace schema 17、memory schema 5、portable archive 6、session export 6、JSONL schema 3、IDE Bridge protocol 1 和插件 manifest/protocol/grant 4。config v3-v9、workspace schema v6-v16 与 memory schema v3-v4 使用 backup-first 自动迁移。
 
 公开运行入口为 `AgentSession.run_stream(RunRequest)`。CLI 通过应用查询面读取状态，不应依赖 repository 聚合对象。
 

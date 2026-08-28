@@ -8,6 +8,16 @@ import json
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from typing import Any
 
+from ..behavior_defaults import (
+    DEFAULT_AGENT_MAX_CHILDREN,
+    DEFAULT_AGENT_MAX_CONCURRENCY,
+    DEFAULT_AGENT_MAX_DEPTH,
+)
+from .components import (
+    CollaborationArtifactPublisher,
+    CollaborationAudit,
+    CollaborationMailbox,
+)
 from .models import (
     AgentMessageKind,
     AgentTaskContract,
@@ -17,12 +27,6 @@ from .models import (
 )
 from .verifier import AgentOutputVerifier, VerificationError
 from .workspace import AgentWorkspaceManager, WorkspaceSnapshot
-from .components import (
-    CollaborationArtifactPublisher,
-    CollaborationAudit,
-    CollaborationMailbox,
-)
-
 
 ChildRunner = Callable[
     [AgentTaskContract, WorkspaceSnapshot], Awaitable[dict[str, Any]]
@@ -45,9 +49,9 @@ class CollaborationService:
         *,
         workspace_manager: AgentWorkspaceManager,
         repository: Any,
-        max_children: int = 4,
-        max_concurrency: int = 2,
-        max_depth: int = 1,
+        max_children: int = DEFAULT_AGENT_MAX_CHILDREN,
+        max_concurrency: int = DEFAULT_AGENT_MAX_CONCURRENCY,
+        max_depth: int = DEFAULT_AGENT_MAX_DEPTH,
         child_runner: ChildRunner | None = None,
         verifier: AgentOutputVerifier | None = None,
         background_enabled: bool = True,
