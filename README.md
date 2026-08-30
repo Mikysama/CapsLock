@@ -2,7 +2,7 @@
 
 CapsLock 是一个本机工作区 Agent，用于读取和修改代码、检索证据、运行受沙箱保护的 Shell、查询代码语义，以及按审批策略访问 Web、MCP 和本地插件。Tool Runtime v2 将工具契约、参数级策略、可恢复暂停、调度、富结果与审计统一到异步执行链。
 
-当前源码版本为 `2.7.6.1`。本版本集中管理运行轮数、超时、并发、上下文、循环检测、Memory 与子 Agent 默认值，并增加版本化行为指标评测、可注入 Memory 召回策略和最多两轮参数修复。首轮 41,580 个确定性样本未形成满足全部硬门槛的更新证据，因此生产默认值保持不变。当前协议仍为 workspace schema 17、memory schema 5、portable archive 6、session export 6 和 config 10。完整边界见 [2.7.6.1 发布说明](docs/releases/v2.7.6.1.md)。
+当前源码版本标识为 `2.7.6.1`；main 开发协议已升级为 workspace schema 18。2.7.6.1 集中管理运行轮数、超时、并发、上下文、循环检测、Memory 与子 Agent 默认值，并增加版本化行为指标评测、可注入 Memory 召回策略和最多两轮参数修复；当前 main 进一步加入 session 级持久 Agent team、任务依赖图、可恢复 attempt 与 candidate-aware Runtime 评测。生产默认值仍未因评测自动改变。当前协议为 workspace schema 18、memory schema 5、portable archive 6、session export 6 和 config 10。稳定版本边界见 [2.7.6.1 发布说明](docs/releases/v2.7.6.1.md)，开发边界见 [current](docs/development/v2/current.md)。
 
 正式支持矩阵：Linux/macOS，Python 3.12。发布 CI 会在两个操作系统组合中执行测试、构建、依赖审计和安装冒烟。
 
@@ -229,11 +229,13 @@ capslock plugin uninstall my-plugin --yes
 
 ## 多 Agent 协作
 
-父 Agent 可通过 `delegate_agents` 一次委派最多四个本机子任务，默认最多并行两个。子 Agent 只有一层，使用排除 `.git`、`.capslock`、环境凭据和符号链接的私有快照；子数据库、session 和记忆上下文不会与父运行共享。
+父 Agent 可通过 `delegate_agents` 一次委派最多四个本机子任务，默认最多并行两个；也可以建立 session-scoped Agent team，启动命名的 persistent worker，为不可变任务声明依赖关系，并对中断 attempt 显式恢复。子 Agent 仍只有一层，不能继续委派；persistent 表示同一应用 session 内可接受后续任务，不表示后台 daemon 或退出后继续运行。
 
 子任务默认只有只读类工具，文件访问仍必须命中任务契约的路径 allowlist，空 allowlist 不授予文件访问。文件写入、Shell、Web 和 MCP 必须在任务契约中逐项声明；子工具目录不包含 `delegate_agents`，也不自动包含工作区插件。自由文本、证据和产物均是不可信数据，只有通过路径、schema、实际检查状态和 SHA-256 校验的输出才返回父 Agent。
 
-后台子任务使用持久化 mailbox 双向通信。父 Agent 可发送 instruction/response/cancel 并读取、确认 question/progress/response/artifact offer；子 Agent 通过契约绑定的 mailbox 工具读取与回传。artifact offer 的 SHA-256 由子端从受限快照自动计算，发布时先暂存全部产物，再与文件 Action 共用工作区写锁，在批量替换前复验 allowlist、大小、摘要和父工作区 snapshot baseline；部分失败会从备份回滚。外部编辑器不遵守应用写锁时只能通过最终复验尽力检测，不能提供跨任意进程的绝对 CAS 保证。
+后台子任务使用持久化 mailbox 双向通信。父 Agent 可发送 instruction/response/cancel 并读取、确认 question/progress/response/artifact offer；team worker 还支持点对点和广播消息，所有 payload 均作为不可信 Agent 数据处理。worker workspace 可选私有 snapshot、干净仓库上的 detached worktree 或强制只读的 shared workspace。artifact offer 的 SHA-256 由子端从受限工作区自动计算，发布时先暂存全部产物，再与文件 Action 共用工作区写锁，在批量替换前复验 allowlist、大小、摘要和父工作区 baseline；部分失败会从备份回滚。外部编辑器不遵守应用写锁时只能通过最终复验尽力检测，不能提供跨任意进程的绝对 CAS 保证。
+
+任务图使用原子 claim token 和 attempt ordinal 防止重复领取，并为每次执行持久化预算 ledger、审批关联及 checkpoint。只有 contract digest 一致、workspace 和 child session 仍可用且 checkpoint 明确标记为 resumable 时，`resume_agent` 才会复用原 attempt；未知副作用不会自动重放。
 
 ```text
 /agents
@@ -462,7 +464,7 @@ CapsLock 只接受 canonical 布局：
 - 计划镜像：`.capslock/state/plans/<session-id>/<plan-id>.md`
 - 用户记忆：`${CAPSLOCK_HOME:-~/.capslock}/state/memory.sqlite3`
 
-工作区库和记忆库使用不同的 SQLite `application_id`。当前 workspace schema 为 14，memory schema 为 4；workspace schema v6-v13 与 memory schema v3 在 WAL checkpoint 和 SQLite backup 后事务升级。schema 13 保存脱敏性能 span，schema 14 保存带 digest/TTL/交付状态的 Agent mailbox。portable archive 与 session export 当前为 version 6，portable archive 读取兼容 version 3/4/5。旧 application ID、其他非当前 schema 或未知已有表均拒绝启动。
+工作区库和记忆库使用不同的 SQLite `application_id`。当前 workspace schema 为 18，memory schema 为 5；workspace schema v6-v17 与 memory schema v3-v4 在 WAL checkpoint 和 SQLite backup 后事务升级。schema 18 保存 Agent team、worker、任务依赖、attempt/checkpoint、预算 ledger、审批关联和 workspace baseline。portable archive 与 session export 当前为 version 6，portable archive 读取兼容 version 3/4/5。旧 application ID、其他非当前 schema 或未知已有表均拒绝启动。
 
 ## 架构
 
@@ -486,7 +488,7 @@ CapsLock 只接受 canonical 布局：
 
 ## 行为指标评测
 
-`evaluations/core-v1.toml` 定义运行轮数/超时/并发、上下文压缩、循环检测、Memory 和子 Agent 的候选矩阵。确定性阶段使用 220 条调优任务；screen 和 confirm 阶段必须显式指定 Provider、模型及前一阶段报告，confirm 使用隔离的 60 条任务。评测只生成带哈希的建议，不自动修改默认值。
+`evaluations/core-v1.toml` 定义运行轮数/超时/并发、上下文压缩、循环检测、Memory 和子 Agent 的候选矩阵。确定性阶段使用 220 条调优任务；screen 和 confirm 阶段必须显式指定 Provider、模型、前一阶段报告及 candidate-aware probe，confirm 使用隔离的 60 条任务。内置 Runtime probe 会为每个样本创建隔离的真实 `WorkspaceApplication`；仅验证 Provider 的普通模型 probe 不能形成参数建议。评测只生成带哈希的建议，不自动修改默认值。
 
 ```bash
 python scripts/evaluate_policies.py --stage deterministic \

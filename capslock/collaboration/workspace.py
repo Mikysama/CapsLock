@@ -6,6 +6,7 @@ import shutil
 import tempfile
 import hashlib
 import os
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -52,6 +53,8 @@ def _is_private_name(name: str) -> bool:
 class WorkspaceSnapshot:
     source: Path
     root: Path
+    mode: str = "snapshot"
+    base_commit: str | None = None
 
     def policy(self) -> WorkspacePolicy:
         return WorkspacePolicy(self.root)
@@ -119,6 +122,67 @@ class AgentWorkspaceManager:
             shutil.rmtree(target, ignore_errors=True)
             raise
         return WorkspaceSnapshot(self.parent_workspace, target)
+
+    def create_worktree(self, worker_id: str) -> WorkspaceSnapshot:
+        if not worker_id or Path(worker_id).name != worker_id:
+            raise ValueError("invalid worker id")
+        if not (self.parent_workspace / ".git").exists():
+            raise ValueError("worktree mode requires a Git repository")
+        status = subprocess.run(
+            ["git", "-C", str(self.parent_workspace), "status", "--porcelain"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        if status.stdout.strip():
+            raise ValueError("worktree mode requires a clean parent repository")
+        self.state_root.mkdir(parents=True, exist_ok=True)
+        target = Path(tempfile.mkdtemp(prefix=f"{worker_id}-", dir=self.state_root))
+        target.rmdir()
+        try:
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(self.parent_workspace),
+                    "worktree",
+                    "add",
+                    "--detach",
+                    str(target),
+                    "HEAD",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            manifest: dict[str, str] = {}
+            self._manifest_tree(self.parent_workspace, manifest)
+            self._baselines[target.resolve()] = manifest
+        except BaseException:
+            shutil.rmtree(target, ignore_errors=True)
+            raise
+        base_commit = subprocess.run(
+            ["git", "-C", str(self.parent_workspace), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        return WorkspaceSnapshot(self.parent_workspace, target, "worktree", base_commit)
+
+    def shared_read(self) -> WorkspaceSnapshot:
+        """Expose the live parent tree; child capability policy keeps it read-only."""
+        return WorkspaceSnapshot(
+            self.parent_workspace, self.parent_workspace, "shared_read"
+        )
+
+    def baseline(self, snapshot: WorkspaceSnapshot) -> dict[str, str]:
+        return dict(self._baselines.get(snapshot.root.resolve(), {}))
+
+    def restore_baseline(
+        self, snapshot: WorkspaceSnapshot, baseline: dict[str, str]
+    ) -> None:
+        if snapshot.mode != "shared_read":
+            self._baselines[snapshot.root.resolve()] = dict(baseline)
 
     def publish_artifacts(
         self,
@@ -238,6 +302,8 @@ class AgentWorkspaceManager:
                 except BaseException:
                     self._remove_created_directories(created_directories)
                     raise
+            for _temporary, target, _original_digest, digest in staged:
+                baseline[str(target.relative_to(self.parent_workspace))] = digest
         finally:
             shutil.rmtree(stage_root, ignore_errors=True)
             for temporary in publish_temporaries:
@@ -309,11 +375,41 @@ class AgentWorkspaceManager:
         return failures
 
     def cleanup(self, snapshot: WorkspaceSnapshot) -> None:
+        if snapshot.mode == "shared_read":
+            return
         root = snapshot.root.resolve()
         if root == self.state_root or self.state_root not in root.parents:
             raise ValueError("refusing to remove a path outside agent state")
-        shutil.rmtree(root)
+        if snapshot.mode == "worktree":
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(self.parent_workspace),
+                    "worktree",
+                    "remove",
+                    "--force",
+                    str(root),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        else:
+            shutil.rmtree(root)
         self._baselines.pop(root, None)
+
+    def _manifest_tree(self, source: Path, manifest: dict[str, str]) -> None:
+        for entry in source.iterdir():
+            if entry.name in _EXCLUDED_NAMES or _is_private_name(entry.name):
+                continue
+            if entry.is_symlink():
+                raise ValueError(f"symlink is not allowed in child workspace: {entry}")
+            if entry.is_dir():
+                self._manifest_tree(entry, manifest)
+            elif entry.is_file():
+                relative = str(entry.relative_to(self.parent_workspace))
+                manifest[relative] = hashlib.sha256(entry.read_bytes()).hexdigest()
 
     def _copy_tree(
         self,

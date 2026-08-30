@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import sqlite3
 import threading
 from pathlib import Path
@@ -18,6 +19,7 @@ from capslock.collaboration import (
     CapabilityGrant,
     CapabilityKind,
     CollaborationService,
+    MailboxMessageKind,
     VerificationError,
     VerificationRequirement,
 )
@@ -34,6 +36,17 @@ from tests.helpers import workspace_run
 def test_child_tool_catalog_cannot_delegate_again() -> None:
     assert "delegate_agents" in workspace_tools().names
     assert "delegate_agents" not in workspace_tools(include_collaboration=False).names
+    assert {
+        "create_agent_team",
+        "start_agent",
+        "create_agent_task",
+        "assign_agent_task",
+        "follow_up_agent",
+        "resume_agent",
+        "get_agent_team",
+        "stop_agent",
+        "send_team_message",
+    }.issubset(workspace_tools().names)
 
 
 def test_parent_budget_is_divided_before_child_launch(tmp_path: Path) -> None:
@@ -497,7 +510,7 @@ def test_fresh_workspace_contains_collaboration_tables(tmp_path: Path) -> None:
         )
         try:
             version = await repositories.database.fetch_one("PRAGMA user_version")
-            assert int(version[0]) == 17
+            assert int(version[0]) == 18
             tables = await repositories.database.fetch_all(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'agent_%'"
             )
@@ -508,6 +521,13 @@ def test_fresh_workspace_contains_collaboration_tables(tmp_path: Path) -> None:
                 "agent_messages",
                 "agent_mailbox",
                 "agent_outputs",
+                "agent_teams",
+                "agent_workers",
+                "agent_task_dependencies",
+                "agent_attempts",
+                "agent_checkpoints",
+                "agent_budget_ledger",
+                "agent_approval_links",
             }
         finally:
             await repositories.close()
@@ -559,6 +579,452 @@ def test_reopen_interrupts_active_child_tasks(tmp_path: Path) -> None:
                 await repositories.collaboration.set_state(
                     contract.task_id, AgentTaskState.CANCELLED
                 )
+        finally:
+            await repositories.close()
+
+    asyncio.run(scenario())
+
+
+def test_concurrency_limit_is_shared_across_delegate_calls(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        workspace = tmp_path / "project"
+        workspace.mkdir()
+        repositories = await WorkspaceRepositories.open(
+            workspace / ".capslock" / "state" / "capslock.sqlite3",
+            workspace=workspace,
+        )
+        try:
+            _session, prepared = await workspace_run(repositories)
+            active = 0
+            maximum = 0
+            first_started = asyncio.Event()
+            release = asyncio.Event()
+
+            async def runner(contract, _snapshot):
+                nonlocal active, maximum
+                active += 1
+                maximum = max(maximum, active)
+                if contract.objective == "first":
+                    first_started.set()
+                    await release.wait()
+                active -= 1
+                return {"summary": contract.objective}
+
+            service = CollaborationService(
+                workspace_manager=AgentWorkspaceManager(workspace),
+                repository=repositories.collaboration,
+                max_concurrency=1,
+                child_runner=runner,
+            )
+            first = AgentTaskContract.create(prepared.run.id, "first")
+            second = AgentTaskContract.create(prepared.run.id, "second")
+            await service.delegate([first], background=True)
+            await first_started.wait()
+            await service.delegate([second], background=True)
+            await asyncio.sleep(0.05)
+            assert maximum == 1
+            release.set()
+            assert (await service.wait(first.task_id)).verified
+            assert (await service.wait(second.task_id)).verified
+            assert maximum == 1
+        finally:
+            await repositories.close()
+
+    asyncio.run(scenario())
+
+
+def test_background_agent_usage_is_added_to_parent_session_statistics(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        workspace = tmp_path / "project"
+        workspace.mkdir()
+        repositories = await WorkspaceRepositories.open(
+            workspace / ".capslock" / "state" / "capslock.sqlite3",
+            workspace=workspace,
+        )
+        try:
+            _session, prepared = await workspace_run(repositories)
+
+            async def runner(_contract, _snapshot):
+                return {
+                    "summary": "done",
+                    "_usage": {
+                        "input_tokens": 7,
+                        "output_tokens": 3,
+                        "cost_usd": 0.25,
+                    },
+                }
+
+            service = CollaborationService(
+                workspace_manager=AgentWorkspaceManager(workspace),
+                repository=repositories.collaboration,
+                child_runner=runner,
+            )
+            contract = AgentTaskContract.create(prepared.run.id, "background usage")
+            await service.delegate([contract], background=True)
+            assert (await service.wait(contract.task_id)).verified
+            run = await repositories.database.fetch_one(
+                "SELECT input_tokens,output_tokens,cost_usd FROM runs WHERE id=?",
+                (prepared.run.id,),
+            )
+            assert run is not None
+            assert tuple(run) == (7, 3, 0.25)
+            ledger = await repositories.database.fetch_all(
+                """SELECT operation FROM agent_budget_ledger
+                   WHERE task_id=? ORDER BY created_at""",
+                (contract.task_id,),
+            )
+            assert [row["operation"] for row in ledger] == ["reserve", "settle"]
+        finally:
+            await repositories.close()
+
+    asyncio.run(scenario())
+
+
+def test_session_owner_can_control_background_task_across_runs(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        workspace = tmp_path / "project"
+        workspace.mkdir()
+        repositories = await WorkspaceRepositories.open(
+            workspace / ".capslock" / "state" / "capslock.sqlite3",
+            workspace=workspace,
+        )
+        release = asyncio.Event()
+        try:
+            session, prepared = await workspace_run(repositories)
+
+            async def runner(_contract, _snapshot):
+                await release.wait()
+                return {"summary": "done"}
+
+            service = CollaborationService(
+                workspace_manager=AgentWorkspaceManager(workspace),
+                repository=repositories.collaboration,
+                child_runner=runner,
+            )
+            contract = AgentTaskContract.create(prepared.run.id, "background")
+            await service.delegate([contract], background=True)
+            message = await service.send_message(
+                contract.task_id,
+                session_id=session.id,
+                kind=MailboxMessageKind.INSTRUCTION,
+                payload={"text": "continue"},
+            )
+            assert message["task_id"] == contract.task_id
+            with pytest.raises(ValueError, match="controller"):
+                await service.send_message(
+                    contract.task_id,
+                    session_id="another-session",
+                    kind=MailboxMessageKind.INSTRUCTION,
+                    payload={"text": "forbidden"},
+                )
+            release.set()
+            await service.wait(contract.task_id)
+        finally:
+            release.set()
+            await repositories.close()
+
+    asyncio.run(scenario())
+
+
+def test_agent_dag_claim_is_atomic_and_dependency_aware(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        workspace = tmp_path / "project"
+        workspace.mkdir()
+        repositories = await WorkspaceRepositories.open(
+            workspace / ".capslock" / "state" / "capslock.sqlite3",
+            workspace=workspace,
+        )
+        try:
+            session, prepared = await workspace_run(repositories)
+            team = await repositories.collaboration.create_team(
+                session.id, "review", created_by_run_id=prepared.run.id
+            )
+            first_worker = await repositories.collaboration.create_worker(
+                str(team["id"]), "one"
+            )
+            second_worker = await repositories.collaboration.create_worker(
+                str(team["id"]), "two"
+            )
+            blocker = AgentTaskContract.create(prepared.run.id, "blocker")
+            dependent = AgentTaskContract.create(prepared.run.id, "dependent")
+            await repositories.collaboration.create_task(
+                blocker, team_id=str(team["id"])
+            )
+            await repositories.collaboration.create_task(
+                dependent,
+                team_id=str(team["id"]),
+                depends_on=(blocker.task_id,),
+            )
+            with pytest.raises(ValueError, match="dependencies"):
+                await repositories.collaboration.claim_task(
+                    dependent.task_id, str(first_worker["id"])
+                )
+
+            results = await asyncio.gather(
+                repositories.collaboration.claim_task(
+                    blocker.task_id, str(first_worker["id"])
+                ),
+                repositories.collaboration.claim_task(
+                    blocker.task_id, str(second_worker["id"])
+                ),
+                return_exceptions=True,
+            )
+            assert sum(isinstance(item, dict) for item in results) == 1
+            claim = next(item for item in results if isinstance(item, dict))
+            await repositories.collaboration.start_attempt(str(claim["attempt_id"]))
+            await repositories.collaboration.finish_attempt(
+                str(claim["attempt_id"]), "completed"
+            )
+            assert await repositories.collaboration.claim_task(
+                dependent.task_id, str(second_worker["id"])
+            )
+        finally:
+            await repositories.close()
+
+    asyncio.run(scenario())
+
+
+def test_named_agent_profile_cannot_be_expanded_by_task(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        workspace = tmp_path / "project"
+        workspace.mkdir()
+        repositories = await WorkspaceRepositories.open(
+            workspace / ".capslock" / "state" / "capslock.sqlite3",
+            workspace=workspace,
+        )
+        try:
+            session, prepared = await workspace_run(repositories)
+            service = CollaborationService(
+                workspace_manager=AgentWorkspaceManager(workspace),
+                repository=repositories.collaboration,
+                child_runner=lambda *_args: None,
+            )
+            team = await service.create_team(
+                session.id, "safe", created_by_run_id=prepared.run.id
+            )
+            worker = await service.start_agent(
+                session_id=session.id,
+                team_id=str(team["id"]),
+                name="reader",
+                profile={"capabilities": [], "allowed_paths": []},
+            )
+            contract = AgentTaskContract.create(
+                prepared.run.id,
+                "try expansion",
+                capabilities=(CapabilityGrant(CapabilityKind.COMMAND),),
+            )
+            await service.create_agent_task(
+                contract, session_id=session.id, team_id=str(team["id"])
+            )
+            with pytest.raises(ValueError, match="exceeds"):
+                await service.assign_agent_task(
+                    contract.task_id, str(worker["id"]), session_id=session.id
+                )
+        finally:
+            await repositories.close()
+
+    asyncio.run(scenario())
+
+
+def test_interrupted_agent_resumes_same_attempt_and_child_session(
+    tmp_path: Path,
+) -> None:
+    class RecoveringRunner:
+        def __init__(self) -> None:
+            self.release = asyncio.Event()
+            self.resumed: list[str] = []
+
+        async def __call__(self, _contract, _snapshot):
+            raise AssertionError("restart recovery must not start a fresh child")
+
+        async def resume_interrupted(self, contract, _snapshot):
+            self.resumed.append(contract.task_id)
+            await self.release.wait()
+            return {"summary": "resumed", "_child_run_id": "child-run-2"}
+
+    async def scenario() -> None:
+        workspace = tmp_path / "project"
+        workspace.mkdir()
+        repositories = await WorkspaceRepositories.open(
+            workspace / ".capslock" / "state" / "capslock.sqlite3",
+            workspace=workspace,
+        )
+        try:
+            session, prepared = await workspace_run(repositories)
+            runner = RecoveringRunner()
+            service = CollaborationService(
+                workspace_manager=AgentWorkspaceManager(workspace),
+                repository=repositories.collaboration,
+                child_runner=runner,
+            )
+            team = await service.create_team(
+                session.id, "recovery", created_by_run_id=prepared.run.id
+            )
+            worker = await service.start_agent(
+                session_id=session.id,
+                team_id=str(team["id"]),
+                name="persistent",
+                profile={"capabilities": [], "allowed_paths": []},
+            )
+            contract = AgentTaskContract.create(prepared.run.id, "resume me")
+            await service.create_agent_task(
+                contract,
+                session_id=session.id,
+                team_id=str(team["id"]),
+                worker_id=str(worker["id"]),
+            )
+            snapshot = service.workspace_manager.create(str(worker["id"]))
+            await repositories.collaboration.attach_workspace(
+                contract.task_id,
+                worker_id=str(worker["id"]),
+                mode="snapshot",
+                path=str(snapshot.root),
+                source_path=str(snapshot.source),
+                baseline=service.workspace_manager.baseline(snapshot),
+            )
+            claim = await repositories.collaboration.claim_task(
+                contract.task_id,
+                str(worker["id"]),
+                reservation=dict(contract.limits),
+            )
+            attempt_id = str(claim["attempt_id"])
+            await repositories.collaboration.start_attempt(attempt_id)
+            await repositories.collaboration.checkpoint_attempt(
+                attempt_id,
+                contract_sha256="wrong-digest",
+                child_session_id="child-session-1",
+                child_run_id="child-run-1",
+                checkpoint={"cursor": 1},
+                resumable=True,
+            )
+            await repositories.collaboration.interrupt_active()
+
+            with pytest.raises(ValueError, match="checkpoint is not resumable"):
+                await service.resume_agent(
+                    str(worker["id"]),
+                    session_id=session.id,
+                    task_id=contract.task_id,
+                )
+
+            await repositories.collaboration.checkpoint_attempt(
+                attempt_id,
+                contract_sha256=contract.digest(),
+                child_session_id="child-session-1",
+                child_run_id="child-run-1",
+                checkpoint={"cursor": 1},
+                resumable=True,
+            )
+            await service.resume_agent(
+                str(worker["id"]),
+                session_id=session.id,
+                task_id=contract.task_id,
+            )
+            while not runner.resumed:
+                await asyncio.sleep(0)
+            with pytest.raises(ValueError, match="not interrupted"):
+                await service.resume_agent(
+                    str(worker["id"]),
+                    session_id=session.id,
+                    task_id=contract.task_id,
+                )
+            runner.release.set()
+            output = await service.wait(contract.task_id)
+            assert output.verified is True
+            assert runner.resumed == [contract.task_id]
+            latest = await repositories.collaboration.latest_attempt(contract.task_id)
+            assert latest is not None
+            assert latest["id"] == attempt_id
+            assert latest["state"] == "completed"
+            task = await repositories.collaboration.get_task(contract.task_id)
+            assert task is not None
+            assert task["attempt_count"] == 1
+            stored_worker = await repositories.collaboration.worker(str(worker["id"]))
+            assert stored_worker is not None
+            assert stored_worker["child_session_id"] == "child-session-1"
+        finally:
+            runner.release.set()
+            await repositories.close()
+
+    asyncio.run(scenario())
+
+
+def test_persistent_worker_persists_artifact_baseline_between_followups(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        workspace = tmp_path / "project"
+        workspace.mkdir()
+        report = workspace / "report.md"
+        report.write_text("initial", encoding="utf-8")
+        repositories = await WorkspaceRepositories.open(
+            workspace / ".capslock" / "state" / "capslock.sqlite3",
+            workspace=workspace,
+        )
+        counter = 0
+        try:
+            session, prepared = await workspace_run(repositories)
+
+            async def runner(_contract, snapshot):
+                nonlocal counter
+                counter += 1
+                content = f"revision-{counter}"
+                (snapshot.root / "report.md").write_text(content, encoding="utf-8")
+                return {
+                    "summary": content,
+                    "artifacts": [
+                        {
+                            "path": "report.md",
+                            "sha256": hashlib.sha256(content.encode()).hexdigest(),
+                        }
+                    ],
+                }
+
+            service = CollaborationService(
+                workspace_manager=AgentWorkspaceManager(workspace),
+                repository=repositories.collaboration,
+                child_runner=runner,
+            )
+            team = await service.create_team(
+                session.id, "writers", created_by_run_id=prepared.run.id
+            )
+            worker = await service.start_agent(
+                session_id=session.id,
+                team_id=str(team["id"]),
+                name="writer",
+                profile={"capabilities": [], "allowed_paths": ["report.md"]},
+            )
+            first = AgentTaskContract.create(
+                prepared.run.id, "first", allowed_paths=("report.md",)
+            )
+            await service.create_agent_task(
+                first,
+                session_id=session.id,
+                team_id=str(team["id"]),
+                worker_id=str(worker["id"]),
+            )
+            await service.assign_agent_task(
+                first.task_id, str(worker["id"]), session_id=session.id
+            )
+            assert (await service.wait(first.task_id)).verified
+            assert report.read_text(encoding="utf-8") == "revision-1"
+
+            second = AgentTaskContract.create(
+                prepared.run.id, "second", allowed_paths=("report.md",)
+            )
+            await service.follow_up_agent(
+                str(worker["id"]), second, session_id=session.id
+            )
+            assert (await service.wait(second.task_id)).verified
+            assert report.read_text(encoding="utf-8") == "revision-2"
+            rows = await repositories.database.fetch_all(
+                "SELECT baseline_json FROM agent_workspaces WHERE worker_id=?",
+                (str(worker["id"]),),
+            )
+            expected = hashlib.sha256(b"revision-2").hexdigest()
+            assert rows
+            assert all(json.loads(str(row[0]))["report.md"] == expected for row in rows)
         finally:
             await repositories.close()
 

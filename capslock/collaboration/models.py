@@ -25,12 +25,59 @@ class CapabilityKind(StrEnum):
 
 class AgentTaskState(StrEnum):
     CREATED = "created"
+    BLOCKED = "blocked"
+    READY = "ready"
+    CLAIMED = "claimed"
     RUNNING = "running"
     WAITING_APPROVAL = "waiting_approval"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
     INTERRUPTED = "interrupted"
+
+
+class WorkspaceMode(StrEnum):
+    SNAPSHOT = "snapshot"
+    WORKTREE = "worktree"
+    SHARED_READ = "shared_read"
+
+
+class AgentWorkerState(StrEnum):
+    STARTING = "starting"
+    IDLE = "idle"
+    RUNNING = "running"
+    WAITING_APPROVAL = "waiting_approval"
+    INTERRUPTED = "interrupted"
+    STOPPED = "stopped"
+
+
+class AgentAttemptState(StrEnum):
+    CREATED = "created"
+    RUNNING = "running"
+    SUSPENDED = "suspended"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    INTERRUPTED = "interrupted"
+
+
+@dataclass(frozen=True)
+class AgentBudgetReservation:
+    reservation_id: str
+    attempt_id: str
+    limits: Mapping[str, int | float | None]
+    state: str = "reserved"
+
+
+@dataclass(frozen=True)
+class CollaborationEvent:
+    session_id: str
+    team_id: str
+    task_id: str
+    kind: str
+    agent_id: str | None = None
+    attempt_id: str | None = None
+    data: Mapping[str, Any] = field(default_factory=dict)
 
 
 class AgentMessageKind(StrEnum):
@@ -220,9 +267,7 @@ class AgentTaskContract:
                 output_schema=dict(verification.get("output_schema", {})),
                 required_paths=tuple(verification.get("required_paths", ())),
                 max_artifacts=int(verification.get("max_artifacts", 20)),
-                max_artifact_bytes=int(
-                    verification.get("max_artifact_bytes", 512_000)
-                ),
+                max_artifact_bytes=int(verification.get("max_artifact_bytes", 512_000)),
                 required_checks=tuple(verification.get("required_checks", ())),
             ),
             memory_namespace=value.get("memory_namespace"),

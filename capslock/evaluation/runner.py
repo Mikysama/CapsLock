@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import re
 import subprocess
 import sys
 import time
@@ -19,6 +20,10 @@ from .registry import registry_document
 from .selection import analyse_candidates
 
 LiveProbe = Callable[[EvaluationTask, str, str], Awaitable[tuple[bool, int, int]]]
+CandidateProbe = Callable[
+    [EvaluationTask, PolicyCandidate, str, str],
+    Awaitable[tuple[bool, int, int] | dict[str, Any]],
+]
 LIVE_PROMPT_VERSION = "policy-probe-v1"
 TOOL_SCHEMA_VERSION = "no-tools-v1"
 
@@ -34,6 +39,7 @@ class EvaluationRunner:
         provider: str | None = None,
         model: str | None = None,
         live_probe: LiveProbe | None = None,
+        candidate_probe: CandidateProbe | None = None,
     ) -> None:
         if stage not in {"deterministic", "screen", "confirm"}:
             raise ValueError("stage must be deterministic, screen, or confirm")
@@ -49,8 +55,9 @@ class EvaluationRunner:
         )
         self.provider, self.model = provider, model
         self.live_probe = live_probe
+        self.candidate_probe = candidate_probe
         self._live_cache: dict[
-            tuple[str, int], tuple[tuple[bool, int, int], float]
+            tuple[str, str, int], tuple[tuple[bool, int, int] | dict[str, Any], float]
         ] = {}
 
     async def run(
@@ -63,7 +70,14 @@ class EvaluationRunner:
             for repetition in range(self.repetitions):
                 for task in tasks:
                     samples.append(await self._evaluate(task, candidate, repetition))
-        analysis = analyse_candidates(candidates, samples, stage=self.stage)
+        analysis = analyse_candidates(
+            candidates,
+            samples,
+            stage=self.stage,
+            candidate_policy_injected=(
+                self.stage == "deterministic" or self.candidate_probe is not None
+            ),
+        )
         manifest = self._manifest(tasks, candidates)
         report = {
             "schema_version": 1,
@@ -87,24 +101,67 @@ class EvaluationRunner:
         if self.stage != "deterministic":
             try:
                 probe = self.live_probe or self._openai_probe
-                cache_key = (task.id, repetition)
+                cache_key = (
+                    candidate.fingerprint if self.candidate_probe else "shared-model",
+                    task.id,
+                    repetition,
+                )
                 if cache_key not in self._live_cache:
                     probe_started = time.monotonic()
-                    probe_result = await probe(
-                        task, str(self.provider), str(self.model)
-                    )
+                    if self.candidate_probe is not None:
+                        probe_result = await self.candidate_probe(
+                            task,
+                            candidate,
+                            str(self.provider),
+                            str(self.model),
+                        )
+                    else:
+                        probe_result = await probe(
+                            task, str(self.provider), str(self.model)
+                        )
                     self._live_cache[cache_key] = (
                         probe_result,
                         time.monotonic() - probe_started,
                     )
+                probe_result, probe_latency = self._live_cache[cache_key]
                 (
-                    (model_success, model_input, model_output),
-                    probe_latency,
-                ) = self._live_cache[cache_key]
-                success = success and model_success
+                    model_success,
+                    model_input,
+                    model_output,
+                    probe_metadata,
+                ) = _normalise_probe_result(probe_result)
+                # A candidate-aware probe executes the real Runtime and is the
+                # authoritative outcome. The legacy model-only path still
+                # combines the synthetic policy check with model correctness.
+                success = (
+                    model_success if self.candidate_probe else success and model_success
+                )
                 input_tokens += model_input
                 output_tokens += model_output
                 latency = max(latency, probe_latency)
+                # Workload labels come from the reviewed task set and are not
+                # mutable by a probe. Runtime telemetry and safety events are
+                # still accepted from the candidate-aware adapter.
+                metrics.update(
+                    {
+                        key: value
+                        for key, value in probe_metadata.items()
+                        if key not in {"in_budget", "capacity_case"}
+                    }
+                )
+                if self.candidate_probe:
+                    # The real Runtime owns the terminal state.  In
+                    # particular, a successful candidate probe must clear a
+                    # synthetic policy failure that was computed before the
+                    # probe ran.  Legacy tuple probes have no stop-reason
+                    # field, so clear it only when they report success.
+                    if "stop_reason" in probe_metadata:
+                        value = probe_metadata["stop_reason"]
+                        stop_reason = None if value is None else str(value)
+                    elif model_success:
+                        stop_reason = None
+                elif probe_metadata.get("stop_reason") is not None:
+                    stop_reason = str(probe_metadata["stop_reason"])
             except Exception as exc:  # noqa: BLE001 - provider adapters are an error boundary
                 success = False
                 stop_reason = "provider_error"
@@ -131,6 +188,10 @@ class EvaluationRunner:
             cost,
             metrics,
             error,
+            int(metrics.get("tool_calls", rounds)),
+            int(metrics.get("compaction_events", 0)),
+            int(metrics.get("approval_events", 0)),
+            int(metrics.get("conflicts", metrics.get("agent_conflict_cases", 0))),
         )
 
     async def _openai_probe(
@@ -145,24 +206,26 @@ class EvaluationRunner:
         client = AsyncOpenAI(api_key=key, base_url=base_url)
         expected = _expected_answer(task)
         try:
-            response = await client.chat.completions.create(
-                model=model,
-                messages=[
+            request: dict[str, Any] = {
+                "model": model,
+                "messages": [
                     {
                         "role": "system",
                         "content": "Answer the evaluation question with only the requested token.",
                     },
                     {"role": "user", "content": _live_prompt(task)},
                 ],
-                max_tokens=16,
-                temperature=0,
-            )
+                "max_tokens": 16,
+                "temperature": 0,
+            }
+            request.update(_reasoning_request_options(provider, model))
+            response = await client.chat.completions.create(**request)
         finally:
             await client.close()
         message = response.choices[0].message.content or ""
         usage = response.usage
         return (
-            message.strip() == expected,
+            _answer_matches(message, expected),
             int(usage.prompt_tokens if usage else 0),
             int(usage.completion_tokens if usage else 0),
         )
@@ -185,6 +248,15 @@ class EvaluationRunner:
             "prompt_version": LIVE_PROMPT_VERSION,
             "tool_schema_version": TOOL_SCHEMA_VERSION,
             "tool_schema_hash": canonical_hash([]),
+            "execution_mode": (
+                "synthetic_smoke"
+                if self.stage == "deterministic"
+                else (
+                    "candidate_probe"
+                    if self.candidate_probe is not None
+                    else "synthetic_plus_model_probe"
+                )
+            ),
             "task_count": len(tasks),
             "candidate_count": len(candidates),
             "max_candidate_read_concurrency": max(
@@ -203,6 +275,71 @@ class EvaluationRunner:
                 "output_cost_per_million": self.matrix.output_cost_per_million,
             },
         }
+
+
+def _normalise_probe_result(
+    result: tuple[bool, int, int] | dict[str, Any],
+) -> tuple[bool, int, int, dict[str, float | int | bool | str]]:
+    """Accept the legacy tuple and the richer candidate-probe result shape."""
+    if isinstance(result, tuple):
+        if len(result) != 3:
+            raise ValueError(
+                "probe tuple must contain success, input, and output tokens"
+            )
+        return bool(result[0]), int(result[1]), int(result[2]), {}
+    if not isinstance(result, dict):
+        raise TypeError("probe result must be a 3-tuple or object")
+    if "success" not in result:
+        raise ValueError("probe result is missing success")
+    metadata: dict[str, float | int | bool | str] = {}
+    raw_metrics = result.get("metrics", {})
+    if raw_metrics is not None:
+        if not isinstance(raw_metrics, dict):
+            raise TypeError("probe metrics must be an object")
+        metadata.update(raw_metrics)
+    for key in (
+        "stop_reason",
+        "tool_calls",
+        "compaction_events",
+        "approval_events",
+        "conflicts",
+    ):
+        if key in result:
+            metadata[key] = result[key]
+    return (
+        bool(result["success"]),
+        int(result.get("input_tokens", 0)),
+        int(result.get("output_tokens", 0)),
+        metadata,
+    )
+
+
+def _answer_matches(answer: str, expected: str) -> bool:
+    """Accept prose/code-fence formatting while rejecting ambiguous tokens."""
+    if answer.strip() == expected:
+        return True
+    tokens = re.findall(
+        r"\b(?:STOP|CONTINUE|USE|REJECT|SERIALIZE|DELEGATE|"
+        r"CAPSLOCK_CONTEXT_CANARY|CAPSLOCK_EVAL_OK)\b",
+        answer.upper(),
+    )
+    return bool(tokens) and tokens[-1] == expected and len(set(tokens)) == 1
+
+
+def _reasoning_request_options(provider: str, model: str) -> dict[str, Any]:
+    """Disable hidden reasoning for exact-token probes when supported.
+
+    DeepSeek reasoning models otherwise consume the small probe budget without
+    producing ``message.content``. Providers can opt in explicitly with
+    ``<PROVIDER>_DISABLE_THINKING=1``; the DeepSeek default covers the bundled
+    CapsLock endpoint while leaving ordinary OpenAI-compatible providers
+    untouched.
+    """
+    configured = os.environ.get(f"{provider.upper()}_DISABLE_THINKING", "")
+    enabled = configured.lower() in {"1", "true", "yes", "on"}
+    if enabled or model.lower().startswith("deepseek"):
+        return {"extra_body": {"thinking": {"type": "disabled"}}}
+    return {}
 
 
 def _expected_answer(task: EvaluationTask) -> str:
@@ -263,10 +400,29 @@ def _simulate(
     values, required = candidate.values, task.requirements
     metrics: dict[str, float | int | bool | str] = {
         "unauthorized_action": 0,
+        "approval_bypass": 0,
         "duplicate_destructive_side_effect": 0,
         "cross_workspace_leak": 0,
+        "unknown_execution_auto_replay": 0,
         "unresolved_agent_conflict": 0,
+        "in_budget": int(bool(required.get("in_budget", True))),
+        "capacity_case": int(bool(required.get("capacity_case", False))),
+        "capacity_covered": 0,
+        "safe_stop_case": 0,
+        "safe_stop_correct": 0,
     }
+    # These flags are used by focused safety fixtures.  Normal benchmark tasks
+    # omit them and therefore exercise the successful, non-violating path.
+    for requirement, metric in (
+        ("unauthorized_action", "unauthorized_action"),
+        ("approval_bypass", "approval_bypass"),
+        ("duplicate_destructive_side_effect", "duplicate_destructive_side_effect"),
+        ("cross_workspace_leak", "cross_workspace_leak"),
+        ("unknown_execution_auto_replay", "unknown_execution_auto_replay"),
+        ("force_unresolved_conflict", "unresolved_agent_conflict"),
+    ):
+        if bool(required.get(requirement, False)):
+            metrics[metric] = 1
     if task.subsystem == "runtime":
         rounds = int(required["rounds"])
         concurrency = int(values["tools.max_read_concurrency"])
@@ -290,8 +446,22 @@ def _simulate(
                 else "argument_repair_exhausted"
             )
         )
+        completed = all(checks)
+        metrics["capacity_covered"] = int(
+            bool(required.get("capacity_case", False)) and completed
+        )
+        if not completed:
+            metrics["safe_stop_case"] = 1
+            metrics["safe_stop_correct"] = int(
+                reason
+                in {
+                    "max_tool_rounds",
+                    "provider_timeout",
+                    "argument_repair_exhausted",
+                }
+            )
         return (
-            all(checks),
+            completed,
             reason,
             min(rounds, int(values["runtime.max_tool_rounds"])),
             latency,
@@ -318,6 +488,10 @@ def _simulate(
             "cycle": "loop_detection.cycle_repetitions",
         }[str(required["kind"])]
         detected = int(required["repetitions"]) >= int(values[key])
+        # A legal repeated call sequence carries an explicit progress signal;
+        # the detector must not classify it as a loop solely by call count.
+        if not bool(required.get("non_progressing", required["true_loop"])):
+            detected = False
         if required["kind"] == "cycle":
             detected = detected and int(required["cycle_length"]) <= int(
                 values["loop_detection.max_cycle_length"]
@@ -374,14 +548,25 @@ def _simulate(
     children = int(required["children"])
     concurrency = int(required["concurrency"])
     rounds = int(required["child_rounds"])
+    conflict = bool(required.get("conflicting", False))
+    if conflict:
+        metrics["agent_conflict_cases"] = 1
+        metrics["agent_conflict_resolved"] = int(
+            not bool(required.get("force_unresolved_conflict", False))
+        )
     success = (
         children <= values["agents.max_children"]
         and concurrency <= values["agents.max_concurrency"]
         and rounds <= values["agents.max_child_tool_rounds"]
     )
-    latency = (
-        rounds * max(1, children) / max(1, int(values["agents.max_concurrency"])) * 0.02
+    metrics["capacity_covered"] = int(
+        bool(required.get("capacity_case", False)) and success
     )
+    if not success:
+        metrics["safe_stop_case"] = 1
+        metrics["safe_stop_correct"] = 1
+    effective_concurrency = 1 if conflict else int(values["agents.max_concurrency"])
+    latency = rounds * max(1, children) / max(1, effective_concurrency) * 0.02
     return (
         success,
         None if success else "child_budget_exhausted",

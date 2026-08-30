@@ -280,7 +280,7 @@ def test_workspace_schema_fourteen_preserves_rows_and_migrates_to_init_kind(
     async def scenario() -> None:
         database = await WorkspaceDatabase.open(path)
         try:
-            assert (await database.fetch_one("PRAGMA user_version"))[0] == 17
+            assert (await database.fetch_one("PRAGMA user_version"))[0] == 18
             definitions = "\n".join(
                 str(row[0])
                 for row in await database.fetch_all(

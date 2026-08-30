@@ -13,6 +13,7 @@ def _runtime(index: int, split: str) -> EvaluationTask:
     latency = (8, 14, 24, 38, 55, 75, 105)[index % 7]
     parallel = (1, 2, 4, 8, 12, 16)[index % 6]
     repairs = (0, 0, 1, 2)[index % 4]
+    in_budget = rounds <= 32 and latency <= 60 and repairs <= 1
     return EvaluationTask(
         f"{split}-runtime-{index:03d}",
         "runtime",
@@ -23,6 +24,8 @@ def _runtime(index: int, split: str) -> EvaluationTask:
             "provider_latency": latency,
             "parallel_reads": parallel,
             "repair_attempts": repairs,
+            "in_budget": in_budget,
+            "capacity_case": not in_budget,
         },
         critical=index % 10 == 0,
     )
@@ -43,6 +46,8 @@ def _context(index: int, split: str) -> EvaluationTask:
             "required_turns": (2, 4, 5, 6)[index % 4],
             "required_tokens": (8_192, 16_384, 24_000, 32_000)[index % 4],
             "compaction_failures": index % 3,
+            "in_budget": True,
+            "capacity_case": False,
         },
         critical=index % 8 == 0,
     )
@@ -60,10 +65,14 @@ def _loop(index: int, split: str) -> EvaluationTask:
         + f" {kind} sequence.",
         {
             "true_loop": true_loop,
+            "non_progressing": true_loop,
+            "progress_steps": 0 if true_loop else 1,
             "kind": kind,
             "repetitions": repetitions,
             "cycle_length": (2, 4, 6)[index % 3],
             "labelled_sequences": 50,
+            "in_budget": True,
+            "capacity_case": False,
         },
         critical=true_loop and index % 10 == 0,
     )
@@ -90,6 +99,8 @@ def _memory(index: int, split: str) -> EvaluationTask:
             "relevant": relevant,
             "unsafe": unsafe,
             "labelled_memories": 20,
+            "in_budget": True,
+            "capacity_case": False,
         },
         critical=unsafe,
     )
@@ -97,16 +108,23 @@ def _memory(index: int, split: str) -> EvaluationTask:
 
 def _agents(index: int, split: str) -> EvaluationTask:
     conflicting = index % 10 in {8, 9}
+    children = (1, 2, 4, 6, 8)[index % 5]
+    concurrency = (1, 2, 3, 4)[index % 4]
+    child_rounds = (4, 8, 12, 18, 22)[index % 5]
+    in_budget = children <= 4 and concurrency <= 2 and child_rounds <= 16
     return EvaluationTask(
         f"{split}-agents-{index:03d}",
         "agents",
         split,
         "Delegate independent work and merge verified child results.",
         {
-            "children": (1, 2, 4, 6, 8)[index % 5],
-            "concurrency": (1, 2, 3, 4)[index % 4],
-            "child_rounds": (4, 8, 12, 18, 22)[index % 5],
+            "children": children,
+            "concurrency": concurrency,
+            "child_rounds": child_rounds,
             "conflicting": conflicting,
+            "force_unresolved_conflict": False,
+            "in_budget": in_budget,
+            "capacity_case": not in_budget,
         },
         critical=conflicting,
     )

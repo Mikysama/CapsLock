@@ -25,8 +25,10 @@ def build_collaboration(
     state_root: Path,
     client: Any,
     plugins: PluginRegistry,
+    mcp: Any | None = None,
     interaction: RunInteraction,
     repository: Any,
+    action_repository: Any | None = None,
     open_application: Any,
     memory: Any = None,
     write_coordinator: WorkspaceMutationCoordinator | None = None,
@@ -42,8 +44,10 @@ def build_collaboration(
         settings=settings,
         client=client,
         plugin_registry=plugins,
+        mcp_manager=mcp,
         interaction=interaction,
         repository=repository,
+        action_repository=action_repository,
         open_application=open_application,
     )
     service = CollaborationService(
@@ -60,6 +64,7 @@ def build_collaboration(
         ),
         mailbox_enabled=settings.agents.mailbox_enabled,
         message_ttl_seconds=settings.agents.message_ttl_seconds,
+        default_workspace_mode=settings.agents.default_workspace_mode,
     )
     runner.collaboration = service
     if memory is not None:

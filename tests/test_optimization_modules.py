@@ -55,6 +55,7 @@ def test_child_agents_receive_contract_bound_mailbox_tools() -> None:
         "read_parent_messages",
         "send_parent_message",
         "ack_parent_message",
+        "send_team_message",
     }
 
 

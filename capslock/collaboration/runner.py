@@ -20,9 +20,12 @@ from ..domain import (
 )
 from ..interaction import RunInteraction
 from ..plugins import PluginRegistry
+from ..security import redact
 from ..tooling.tools.plugins import plugin_tools
+from ..tooling.tools.mcp import mcp_tools
 from .capabilities import ChildCapabilityPolicy
 from .models import AgentTaskContract, AgentTaskState
+from .models import CapabilityKind
 from .service import ChildApprovalPending, CollaborationService
 from .workspace import ScopedWorkspacePolicy, WorkspaceSnapshot
 
@@ -43,36 +46,99 @@ class ChildAgentRunner:
         settings: Settings,
         client: Any,
         plugin_registry: PluginRegistry,
+        mcp_manager: Any | None = None,
         interaction: RunInteraction,
         repository: Any,
+        action_repository: Any | None = None,
         open_application: OpenApplication,
     ) -> None:
         self.settings = settings
         self.client = client
         self.plugin_registry = plugin_registry
+        self.mcp_manager = mcp_manager
         self.interaction = interaction
         self.repository = repository
+        self.action_repository = action_repository
         self.open_application = open_application
         self.collaboration: CollaborationService | None = None
         self.approval_broker = asyncio.Lock()
         self.memory_loader = None
+        self._suspended: dict[str, dict[str, Any]] = {}
 
     async def __call__(
         self,
         contract: AgentTaskContract,
         snapshot: WorkspaceSnapshot,
     ) -> dict[str, Any]:
+        task = await self.repository.get_task(contract.task_id)
+        worker = (
+            await self.repository.worker(str(task["assigned_worker_id"]))
+            if task is not None and task.get("assigned_worker_id") is not None
+            else None
+        )
+        child_session_id = (
+            str(worker["child_session_id"])
+            if worker is not None and worker.get("child_session_id")
+            else None
+        )
+        return await self._execute(
+            contract, snapshot, child_session_id=child_session_id
+        )
+
+    async def resume_interrupted(
+        self,
+        contract: AgentTaskContract,
+        snapshot: WorkspaceSnapshot,
+    ) -> dict[str, Any]:
+        checkpoint = await self.repository.one(
+            """SELECT c.* FROM agent_checkpoints c JOIN agent_attempts a
+               ON a.id=c.attempt_id WHERE a.task_id=? ORDER BY a.ordinal DESC LIMIT 1""",
+            (contract.task_id,),
+        )
+        if (
+            checkpoint is None
+            or not bool(checkpoint["resumable"])
+            or str(checkpoint["contract_sha256"]) != contract.digest()
+            or not checkpoint["child_session_id"]
+        ):
+            raise ValueError("Agent transcript checkpoint is not resumable")
+        return await self._execute(
+            contract,
+            snapshot,
+            child_session_id=str(checkpoint["child_session_id"]),
+            resuming=True,
+        )
+
+    async def _execute(
+        self,
+        contract: AgentTaskContract,
+        snapshot: WorkspaceSnapshot,
+        *,
+        child_session_id: str | None = None,
+        resuming: bool = False,
+    ) -> dict[str, Any]:
         child_settings, child_rounds, child_budget = self._settings(contract, snapshot)
         capability_policy = ChildCapabilityPolicy(contract)
+        if snapshot.mode == "shared_read" and any(
+            item.kind in {CapabilityKind.WORKSPACE_WRITE, CapabilityKind.COMMAND}
+            for item in contract.capabilities
+        ):
+            raise ValueError(
+                "shared_read Agents cannot receive workspace_write or command capabilities"
+            )
         allowed = capability_policy.tool_allowlist()
+        if snapshot.mode == "worktree":
+            allowed.update({"git_status", "git_diff"})
         selected_plugin_tools = self._plugin_tools(capability_policy)
+        selected_mcp_tools = self._mcp_tools(capability_policy)
         from ..tooling.tools.collaboration import child_mailbox_tools
 
         mailbox_tools = child_mailbox_tools(self._collaboration(), contract)
-        extra_tools = [*selected_plugin_tools, *mailbox_tools]
+        extra_tools = [*selected_plugin_tools, *selected_mcp_tools, *mailbox_tools]
         allowed.update(tool.name for tool in extra_tools)
         child = await self.open_application(
             workspace=snapshot.root,
+            session_id=child_session_id,
             settings=child_settings,
             client=self.client,
             child_mode=True,
@@ -84,7 +150,18 @@ class ChildAgentRunner:
             core_instructions=CHILD_AGENT_SYSTEM_PROMPT,
             runtime_controls=(self._runtime_contract(contract, bool(mailbox_tools)),),
         )
+        suspended = False
         try:
+            attempt = await self.repository.latest_attempt(contract.task_id)
+            if attempt is not None:
+                await self.repository.checkpoint_attempt(
+                    str(attempt["id"]),
+                    contract_sha256=contract.digest(),
+                    child_session_id=child.session.session_id,
+                    child_run_id=None,
+                    checkpoint={"reason": "running", "resumed": resuming},
+                    resumable=True,
+                )
             for tool in mailbox_tools:
                 await child.repositories.run_journal.add_session_permission_rule(
                     child.session.session_id,
@@ -106,6 +183,11 @@ class ChildAgentRunner:
             prompt = self._prompt(
                 contract, agent_memories, mailbox_enabled=bool(mailbox_tools)
             )
+            if resuming:
+                prompt += (
+                    "\n\nResume the interrupted task using the existing transcript. "
+                    "Revalidate current workspace state and keep the immutable contract unchanged."
+                )
             answer = ""
             usage: dict[str, object] = {}
             child_run_id = ""
@@ -125,12 +207,34 @@ class ChildAgentRunner:
             async for event in child.session.run_stream(
                 RunRequest(question=prompt, mode=RunMode.EXEC, limits=limits)
             ):
+                if not child_run_id:
+                    await self.repository.set_state(
+                        contract.task_id,
+                        AgentTaskState.RUNNING,
+                        child_run_id=event.run_id,
+                    )
+                    if attempt is not None:
+                        await self.repository.checkpoint_attempt(
+                            str(attempt["id"]),
+                            contract_sha256=contract.digest(),
+                            child_session_id=child.session.session_id,
+                            child_run_id=event.run_id,
+                            checkpoint={"reason": "running", "resumed": resuming},
+                            resumable=True,
+                        )
                 child_run_id = event.run_id
                 if event.kind is AgentEventKind.COMPLETED:
                     answer = str(event.data.get("answer", ""))
                     usage = dict(event.data.get("usage", {}))
                 elif event.kind is AgentEventKind.WAITING_APPROVAL:
-                    await self._record_pending(contract, event)
+                    self._suspended[contract.task_id] = {
+                        "child": child,
+                        "contract": contract,
+                        "snapshot": snapshot,
+                        "child_run_id": event.run_id,
+                    }
+                    suspended = True
+                    await self._record_pending(contract, event, child)
                 elif event.kind in {
                     AgentEventKind.FAILED,
                     AgentEventKind.CANCELLED,
@@ -139,32 +243,105 @@ class ChildAgentRunner:
                     raise RuntimeError(
                         str(event.data.get("error", "child Agent failed"))
                     )
-            budget = await child.queries.latest_budget(child.session.session_id)
-            output = parse_child_output(answer, contract)
-            actions = await child.queries.actions(
-                child.session.session_id,
-                run_id=child_run_id or None,
-                types={ActionType.COMMAND},
+            return await self._result(
+                child, contract, answer=answer, usage=usage, child_run_id=child_run_id
             )
-            output["checks"] = [
-                {
-                    "name": str(action.request.get("template", "")),
-                    "status": (
-                        "passed"
-                        if action.status is ActionStatus.COMPLETED
-                        and action.result_kind is ActionResultKind.EXIT_ZERO
-                        else "failed"
-                    ),
-                    "action_id": action.id,
-                }
-                for action in actions
-            ]
-            output["_usage"] = usage
-            output["_budget"] = budget.as_dict() if budget else {}
-            output["_child_run_id"] = child_run_id
-            return output
         finally:
-            await child.close()
+            if not suspended:
+                await child.close()
+
+    async def resume_approval(
+        self,
+        task_id: str,
+        *,
+        child_action_id: str,
+        approve: bool,
+    ) -> dict[str, Any]:
+        suspended = self._suspended.get(task_id)
+        if suspended is None:
+            raise ValueError("child Agent continuation is unavailable after restart")
+        child = suspended["child"]
+        contract = suspended["contract"]
+        child_run_id = str(suspended["child_run_id"])
+        coordinator = child.session.action_factory("agent-approval").for_run(
+            child_run_id
+        )
+        if approve:
+            await coordinator.approve_and_execute(child_action_id)
+        else:
+            await coordinator.reject(child_action_id)
+        await child.session.workflow.settle_approval(
+            child.session.session_id, child_run_id
+        )
+        await self.repository.set_state(task_id, AgentTaskState.RUNNING)
+        answer = ""
+        usage: dict[str, object] = {}
+        next_suspension = False
+        try:
+            async for event in child.session.resume_paused_stream(child_run_id):
+                child_run_id = event.run_id
+                if event.kind is AgentEventKind.COMPLETED:
+                    answer = str(event.data.get("answer", ""))
+                    usage = dict(event.data.get("usage", {}))
+                elif event.kind is AgentEventKind.WAITING_APPROVAL:
+                    suspended["child_run_id"] = event.run_id
+                    next_suspension = True
+                    await self._record_pending(contract, event, child)
+                elif event.kind in {
+                    AgentEventKind.FAILED,
+                    AgentEventKind.CANCELLED,
+                    AgentEventKind.STOPPED,
+                }:
+                    raise RuntimeError(
+                        str(event.data.get("error", "child Agent failed"))
+                    )
+            self._suspended.pop(task_id, None)
+            return await self._result(
+                child, contract, answer=answer, usage=usage, child_run_id=child_run_id
+            )
+        finally:
+            if not next_suspension:
+                await child.close()
+
+    async def cancel_suspended(self, task_id: str) -> None:
+        suspended = self._suspended.pop(task_id, None)
+        if suspended is not None:
+            await suspended["child"].close()
+
+    async def _result(
+        self,
+        child: Any,
+        contract: AgentTaskContract,
+        *,
+        answer: str,
+        usage: dict[str, object],
+        child_run_id: str,
+    ) -> dict[str, Any]:
+        budget = await child.queries.latest_budget(child.session.session_id)
+        output = parse_child_output(answer, contract)
+        actions = await child.queries.actions(
+            child.session.session_id,
+            run_id=child_run_id or None,
+            types={ActionType.COMMAND},
+        )
+        output["checks"] = [
+            {
+                "name": str(action.request.get("template", "")),
+                "status": (
+                    "passed"
+                    if action.status is ActionStatus.COMPLETED
+                    and action.result_kind is ActionResultKind.EXIT_ZERO
+                    else "failed"
+                ),
+                "action_id": action.id,
+            }
+            for action in actions
+        ]
+        output["_usage"] = usage
+        output["_budget"] = budget.as_dict() if budget else {}
+        output["_child_run_id"] = child_run_id
+        output["_child_session_id"] = child.session.session_id
+        return output
 
     def _settings(self, contract: AgentTaskContract, snapshot: WorkspaceSnapshot):
         child_memory = replace(
@@ -250,6 +427,22 @@ class ChildAgentRunner:
             )
         return selected
 
+    def _mcp_tools(self, policy: ChildCapabilityPolicy) -> list[Any]:
+        if self.mcp_manager is None:
+            return []
+        grants = [item for item in policy.grants if item.kind.value == "mcp"]
+        if not grants:
+            return []
+        allowed_servers = {item.scope for item in grants if item.scope is not None}
+        definitions = mcp_tools(self.mcp_manager)
+        if not allowed_servers:
+            return definitions
+        return [
+            tool
+            for tool in definitions
+            if tool.contract.tool_group in {f"mcp:{name}" for name in allowed_servers}
+        ]
+
     async def _authorize(
         self,
         contract: AgentTaskContract,
@@ -290,19 +483,66 @@ class ChildAgentRunner:
         )
         return decision
 
-    async def _record_pending(self, contract: AgentTaskContract, event) -> None:
+    async def _record_pending(
+        self, contract: AgentTaskContract, event, child: Any
+    ) -> None:
         collaboration = self._collaboration()
         await self.repository.set_state(
             contract.task_id,
             AgentTaskState.WAITING_APPROVAL,
             child_run_id=event.run_id,
         )
+        attempt = await self.repository.latest_attempt(contract.task_id)
+        if attempt is not None:
+            await self.repository.checkpoint_attempt(
+                str(attempt["id"]),
+                contract_sha256=contract.digest(),
+                child_session_id=child.session.session_id,
+                child_run_id=event.run_id,
+                checkpoint={"reason": "waiting_approval"},
+                resumable=True,
+            )
         for action_id in event.data.get("action_ids", []):
+            child_action = await child.repositories.actions.require(
+                str(action_id), session_id=child.session.session_id
+            )
+            parent_action_id = None
+            if self.action_repository is not None:
+                owner = await self.repository.one(
+                    "SELECT owner_session_id,parent_run_id FROM agent_tasks WHERE id=?",
+                    (contract.task_id,),
+                )
+                if owner is not None:
+                    proxy = await self.action_repository.create(
+                        session_id=str(owner["owner_session_id"]),
+                        run_id=str(owner["parent_run_id"]),
+                        action_type=child_action.type,
+                        summary=f"Agent {contract.task_id[:12]}: {child_action.summary}",
+                        request={
+                            "agent_approval": True,
+                            "task_id": contract.task_id,
+                            "child_action_id": child_action.id,
+                            "child_action_type": child_action.type.value,
+                            "child_request": redact(dict(child_action.request)),
+                            "contract_sha256": contract.digest(),
+                        },
+                    )
+                    parent_action_id = proxy.id
+                    await self.repository.link_approval(
+                        task_id=contract.task_id,
+                        child_action_id=child_action.id,
+                        parent_action_id=proxy.id,
+                        payload={
+                            "action_type": child_action.type.value,
+                            "request": child_action.request,
+                        },
+                    )
             await collaboration.audit_approval(
                 contract,
                 decided=False,
                 payload={
                     "action_id": str(action_id),
+                    "parent_action_id": parent_action_id,
                     "non_interactive": True,
                 },
             )
@@ -322,9 +562,7 @@ class ChildAgentRunner:
         return int(value) if value is not None else None
 
     @staticmethod
-    def _runtime_contract(
-        contract: AgentTaskContract, mailbox_enabled: bool
-    ) -> str:
+    def _runtime_contract(contract: AgentTaskContract, mailbox_enabled: bool) -> str:
         value = {
             "task_id": contract.task_id,
             "parent_run_id": contract.parent_run_id,
@@ -366,6 +604,7 @@ class ChildAgentRunner:
                             "read_parent_messages",
                             "send_parent_message",
                             "ack_parent_message",
+                            "send_team_message",
                         ],
                         "content_trust": "untrusted_data",
                     },

@@ -352,7 +352,14 @@ class SnapshotRepository(Repository):
         "plan_implementations",
         "run_governance",
         "tool_call_attempts",
+        "agent_teams",
+        "agent_workers",
         "agent_tasks",
+        "agent_task_dependencies",
+        "agent_attempts",
+        "agent_checkpoints",
+        "agent_budget_ledger",
+        "agent_approval_links",
         "agent_capabilities",
         "agent_messages",
         "agent_mailbox",
@@ -381,9 +388,29 @@ class SnapshotRepository(Repository):
                 query = """SELECT i.* FROM plan_implementations i JOIN session_plans p
                            ON p.id=i.plan_id WHERE p.session_id=? ORDER BY i.created_at"""
             elif table == "agent_tasks":
-                query = """SELECT t.* FROM agent_tasks t JOIN runs r
-                           ON r.id=t.parent_run_id WHERE r.session_id=? ORDER BY t.created_at"""
-            elif table in {"agent_capabilities", "agent_messages", "agent_mailbox", "agent_outputs"}:
+                query = """SELECT t.* FROM agent_tasks t
+                           WHERE t.owner_session_id=? ORDER BY t.created_at"""
+            elif table == "agent_workers":
+                query = """SELECT w.* FROM agent_workers w JOIN agent_teams t
+                           ON t.id=w.team_id WHERE t.session_id=? ORDER BY w.created_at"""
+            elif table == "agent_task_dependencies":
+                query = """SELECT d.* FROM agent_task_dependencies d JOIN agent_tasks t
+                           ON t.id=d.task_id WHERE t.owner_session_id=? ORDER BY d.rowid"""
+            elif table in {"agent_attempts", "agent_budget_ledger"}:
+                query = f"""SELECT x.* FROM {table} x JOIN agent_tasks t ON t.id=x.task_id
+                            WHERE t.owner_session_id=? ORDER BY x.rowid"""
+            elif table == "agent_checkpoints":
+                query = """SELECT c.* FROM agent_checkpoints c JOIN agent_attempts a ON a.id=c.attempt_id
+                           JOIN agent_tasks t ON t.id=a.task_id WHERE t.owner_session_id=? ORDER BY c.rowid"""
+            elif table == "agent_approval_links":
+                query = """SELECT l.* FROM agent_approval_links l JOIN agent_attempts a ON a.id=l.attempt_id
+                           JOIN agent_tasks t ON t.id=a.task_id WHERE t.owner_session_id=? ORDER BY l.rowid"""
+            elif table in {
+                "agent_capabilities",
+                "agent_messages",
+                "agent_mailbox",
+                "agent_outputs",
+            }:
                 query = f"""SELECT x.* FROM {table} x JOIN agent_tasks t ON t.id=x.task_id
                             JOIN runs r ON r.id=t.parent_run_id WHERE r.session_id=? ORDER BY x.rowid"""
             else:
@@ -403,6 +430,11 @@ def _decode(record: dict[str, Any]) -> dict[str, Any]:
         "limits_json",
         "history_json",
         "summary_json",
+        "profile_json",
+        "contract_json",
+        "reservation_json",
+        "usage_json",
+        "amount_json",
     ):
         if record.get(key):
             record[key.removesuffix("_json")] = json.loads(record.pop(key))

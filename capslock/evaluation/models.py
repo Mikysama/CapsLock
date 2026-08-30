@@ -46,6 +46,10 @@ class SampleResult:
     cost_usd: float
     metrics: dict[str, float | int | bool | str] = field(default_factory=dict)
     error: str | None = None
+    tool_calls: int = 0
+    compaction_events: int = 0
+    approval_events: int = 0
+    conflicts: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)

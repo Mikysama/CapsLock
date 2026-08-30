@@ -138,7 +138,7 @@ def test_backup_verification_and_tamper_rejection(tmp_path: Path, monkeypatch) -
             '{"servers":{"demo":{"env":{"TOKEN":"mcp-secret"}}}}',
             encoding="utf-8",
         )
-        assert _version(layout.database) == WORKSPACE_SCHEMA_VERSION == 17
+        assert _version(layout.database) == WORKSPACE_SCHEMA_VERSION == 18
         assert _version(layout.user.memory) == MEMORY_SCHEMA_VERSION == 5
         service = LifecycleService(layout)
         backup = service.backup_create(tmp_path / "state.clbackup")
@@ -331,9 +331,7 @@ def test_portable_import_is_idempotent_and_resets_approval(
             imported_plan,
         )
         assert (
-            target_layout.plans
-            / imported_session
-            / f"{imported_plan}.md"
+            target_layout.plans / imported_session / f"{imported_plan}.md"
         ).read_text(encoding="utf-8") == imported_plan_row["content"]
         assert first["plan_mirror_failures"] == 0
         assert first["remapped"] >= 1

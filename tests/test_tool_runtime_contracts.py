@@ -292,7 +292,7 @@ def test_mcp_stdio_reconnect_retries_only_read_only_tools(tmp_path: Path) -> Non
 
 def test_all_builtin_tools_have_output_contracts_and_selection_metadata() -> None:
     runtime = workspace_tools()
-    assert len(runtime.names) == 44
+    assert len(runtime.names) == 53
     for tool in runtime.catalog._tools.values():
         assert tool.contract.output_schema is not None
         assert tool.contract.intent_tags

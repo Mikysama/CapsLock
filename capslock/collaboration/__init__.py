@@ -1,6 +1,9 @@
 """Local, bounded parent/child Agent collaboration primitives."""
 
 from .models import (
+    AgentAttemptState,
+    AgentBudgetReservation,
+    AgentWorkerState,
     AgentMessage,
     AgentMessageKind,
     MailboxMessageKind,
@@ -11,6 +14,8 @@ from .models import (
     CapabilityKind,
     ValidatedAgentOutput,
     VerificationRequirement,
+    WorkspaceMode,
+    CollaborationEvent,
 )
 from .verifier import AgentOutputVerifier, VerificationError
 from .workspace import AgentWorkspaceManager, ScopedWorkspacePolicy, WorkspaceSnapshot
@@ -24,6 +29,9 @@ __all__ = [
     "MailboxMessageKind",
     "MailboxMessageStatus",
     "AgentOutputVerifier",
+    "AgentAttemptState",
+    "AgentBudgetReservation",
+    "AgentWorkerState",
     "AgentTaskContract",
     "AgentTaskState",
     "AgentWorkspaceManager",
@@ -36,6 +44,8 @@ __all__ = [
     "ValidatedAgentOutput",
     "VerificationError",
     "VerificationRequirement",
+    "WorkspaceMode",
+    "CollaborationEvent",
     "WorkspaceSnapshot",
     "ScopedWorkspacePolicy",
 ]

@@ -6,7 +6,7 @@ import asyncio
 import json
 import shlex
 
-from ..domain import ActionRecord, ActionStatus, RunKind
+from ..domain import ActionRecord, ActionResultKind, ActionStatus, RunKind
 from ..layout import ProjectLayout
 from ..mcp import McpRegistry
 from ..permissions import PermissionMode
@@ -60,9 +60,7 @@ async def approve_action(context: CliContext, prefix: str):
 
                 await decide_plan_request_interactively(context, plan_request)
                 if plan_request.run_id:
-                    return await _resume_paused_action(
-                        context, plan_request.run_id
-                    )
+                    return await _resume_paused_action(context, plan_request.run_id)
                 return None
             request = await context.session.resolve_permission_request(prefix)
             decision = await asyncio.to_thread(
@@ -84,6 +82,34 @@ async def approve_action(context: CliContext, prefix: str):
         )
         if answer.strip().casefold() not in {"y", "yes"}:
             context.console.print("[waiting]Action remains pending.[/]")
+            return
+        if action.request.get("agent_approval") is True:
+            collaboration = getattr(context.session, "collaboration", None)
+            if collaboration is None:
+                raise ValueError("multi-Agent collaboration is not configured")
+            await collaboration.decide_child_approval(
+                action.id,
+                session_id=context.session.session_id,
+                approve=True,
+            )
+            approved = await context.session.action_records.transition(
+                action.id, ActionStatus.APPROVED
+            )
+            running = await context.session.action_records.transition(
+                approved.id, ActionStatus.RUNNING
+            )
+            result = await context.session.action_records.transition(
+                running.id,
+                ActionStatus.COMPLETED,
+                result={"agent_continuation": "scheduled"},
+                result_kind=ActionResultKind.SUCCESS,
+            )
+            context.console.print(
+                f"[success]Agent approval scheduled:[/] {result.id[:12]}"
+            )
+            await context.session.workflow.settle_approval(
+                context.session.session_id, action.run_id
+            )
             return
         result = await coordinator.for_run(action.run_id).approve_and_execute(action.id)
         context.console.print(
@@ -108,9 +134,7 @@ async def reject_action(context: CliContext, prefix: str):
             except ValueError:
                 plan_request = None
             if plan_request is not None:
-                await context.session.decide_plan_request(
-                    plan_request.id, "reject"
-                )
+                await context.session.decide_plan_request(plan_request.id, "reject")
                 if plan_request.run_id:
                     await _resume_paused_action(context, plan_request.run_id)
                 context.console.print(
@@ -126,6 +150,15 @@ async def reject_action(context: CliContext, prefix: str):
                 f"[warning]Rejected permission request:[/] {str(request['id'])[:12]}"
             )
             return
+        if action.request.get("agent_approval") is True:
+            collaboration = getattr(context.session, "collaboration", None)
+            if collaboration is None:
+                raise ValueError("multi-Agent collaboration is not configured")
+            await collaboration.decide_child_approval(
+                action.id,
+                session_id=context.session.session_id,
+                approve=False,
+            )
         await coordinator.for_run(action.run_id).reject(action.id)
         await context.session.workflow.settle_approval(
             context.session.session_id, action.run_id
@@ -142,6 +175,42 @@ async def apply_action_decision(
     coordinator = context.session.action_factory("cli").for_run(action.run_id)
     if decision == "later":
         context.console.print(f"[waiting]Action remains pending:[/] {action.id[:12]}")
+        return
+    if action.request.get("agent_approval") is True:
+        collaboration = getattr(context.session, "collaboration", None)
+        if collaboration is None:
+            raise ValueError("multi-Agent collaboration is not configured")
+        approve = decision in {
+            "approve",
+            "approve_once",
+            "approve_session",
+            "approve_local",
+        }
+        if not approve and decision != "reject":
+            raise ValueError(f"unsupported action decision: {decision}")
+        await collaboration.decide_child_approval(
+            action.id,
+            session_id=context.session.session_id,
+            approve=approve,
+        )
+        if approve:
+            approved = await context.session.action_records.transition(
+                action.id, ActionStatus.APPROVED
+            )
+            running = await context.session.action_records.transition(
+                approved.id, ActionStatus.RUNNING
+            )
+            await context.session.action_records.transition(
+                running.id,
+                ActionStatus.COMPLETED,
+                result={"agent_continuation": "scheduled"},
+                result_kind=ActionResultKind.SUCCESS,
+            )
+        else:
+            await coordinator.reject(action.id)
+        await context.session.workflow.settle_approval(
+            context.session.session_id, action.run_id
+        )
         return
     if decision == "reject":
         await coordinator.reject(action.id)

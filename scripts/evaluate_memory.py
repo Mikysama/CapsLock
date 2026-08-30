@@ -11,7 +11,12 @@ import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from capslock.domain import MemoryPolicy, MemoryScope, MemoryType
+from capslock.domain import (
+    MemoryDurability,
+    MemoryPolicy,
+    MemoryScope,
+    MemoryType,
+)
 from capslock.memory import MemoryService
 from capslock.storage import MemoryRepositories
 
@@ -54,6 +59,12 @@ async def async_evaluate(path: Path) -> dict[str, object]:
     ]
     cases = expanded_cases(base_cases)
     passed = 0
+    hit_at_5 = 0
+    precision_sum = 0.0
+    critical_total = 0
+    critical_hits = 0
+    stale_rejection_total = 0
+    stale_rejection_passed = 0
     failures: list[str] = []
     with tempfile.TemporaryDirectory(prefix="capslock-memory-eval-") as directory:
         root = Path(directory)
@@ -81,6 +92,7 @@ async def async_evaluate(path: Path) -> dict[str, object]:
                         content=content,
                         memory_type=MemoryType.FACT,
                         scope=MemoryScope.WORKSPACE,
+                        durability=MemoryDurability.TEMPORARY,
                         expires_at=(datetime.now(UTC) - timedelta(days=1)).isoformat(),
                     )
                 for content in case.get("forgotten", []):
@@ -104,10 +116,27 @@ async def async_evaluate(path: Path) -> dict[str, object]:
                 _, hits = await memory.recall_context(
                     case["query"], run_id=f"run-{index}"
                 )
-                contents = {hit.memory.content for hit in hits}
-                ok = case["expected"] in contents and (
-                    case.get("forbidden") is None or case["forbidden"] not in contents
+                top5 = [hit.memory.content for hit in hits[:5]]
+                expected = str(case["expected"])
+                forbidden = case.get("forbidden")
+                hit = expected in top5
+                precision_sum += sum(content == expected for content in top5) / max(
+                    1, len(top5)
                 )
+                ok = hit and (forbidden is None or forbidden not in top5)
+                critical = bool(
+                    forbidden
+                    or case.get("expired")
+                    or case.get("forgotten")
+                    or case.get("other_workspace")
+                )
+                if critical:
+                    critical_total += 1
+                    critical_hits += int(ok)
+                if forbidden is not None:
+                    stale_rejection_total += 1
+                    stale_rejection_passed += int(forbidden not in top5)
+                hit_at_5 += int(hit)
                 if ok:
                     passed += 1
                 else:
@@ -118,13 +147,19 @@ async def async_evaluate(path: Path) -> dict[str, object]:
                 os.environ.pop("CAPSLOCK_HOME", None)
             else:
                 os.environ["CAPSLOCK_HOME"] = previous_home
-    rate = passed / len(cases) if cases else 0.0
     return {
         "cases": len(cases),
         "passed": passed,
-        "top5_hit_rate": rate,
-        "precision_at_5": rate,
-        "critical_recall_at_5": rate,
+        "top5_hit_rate": hit_at_5 / len(cases) if cases else 0.0,
+        "precision_at_5": precision_sum / len(cases) if cases else 0.0,
+        "critical_recall_at_5": critical_hits / critical_total
+        if critical_total
+        else 1.0,
+        "stale_rejection_rate": (
+            stale_rejection_passed / stale_rejection_total
+            if stale_rejection_total
+            else 1.0
+        ),
         "failures": failures,
     }
 
@@ -143,8 +178,8 @@ def main() -> int:
     return (
         0
         if (
-            float(result["precision_at_5"]) >= 0.90
-            and float(result["critical_recall_at_5"]) >= 0.95
+            float(result["precision_at_5"]) >= args.minimum
+            and float(result["critical_recall_at_5"]) >= max(args.minimum, 0.95)
         )
         else 1
     )

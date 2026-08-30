@@ -17,8 +17,10 @@ extensions.
 - `repositories/journal/` composes permission, tool invocation, input request, and run
   event repositories over one database connection and unchanged transactions.
 - Collaboration mailbox, artifact publication, and audit components are independent of
-  scheduling. Memory settings are independent of catalog, recall, capture, maintenance,
-  and transfer services.
+  scheduling. Persistent Agent teams use repository-owned atomic claims, attempts,
+  checkpoints, approval links, and an append-only budget ledger; session ownership and
+  contract digests are revalidated at every control boundary. Memory settings are
+  independent of catalog, recall, capture, maintenance, and transfer services.
 - Raw transcript and tool artifacts remain authoritative. Episodic FTS, context summary
   segments, and memory extraction segment caches are derived indexes with explicit
   rebuild paths; portable exports must not treat them as source records.

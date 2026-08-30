@@ -157,7 +157,7 @@ async def live(
         return 0
     client = AsyncOpenAI(api_key=api_key, base_url=base_url)
     fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
-    from capslock.tooling.tools import workspace_tools
+    from capslock.tooling.tools.builtins import workspace_tools
 
     runtime = workspace_tools(include_collaboration=False)
     schemas = runtime.schemas

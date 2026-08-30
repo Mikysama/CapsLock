@@ -30,11 +30,16 @@ class ExperimentMatrix:
                 "task_set_version": self.task_set_version,
                 "parameters": self.parameters,
                 "subsystems": self.subsystems,
+                "pricing": {
+                    "input_cost_per_million": self.input_cost_per_million,
+                    "output_cost_per_million": self.output_cost_per_million,
+                },
             }
         )[:16]
 
     def candidates(self, *, strategy: str = "oat") -> list[PolicyCandidate]:
         baseline = baseline_values()
+        _validate_candidate_values(baseline)
         candidates = [PolicyCandidate("baseline", baseline)]
         seen = {candidates[0].fingerprint}
         if strategy == "oat":
@@ -64,11 +69,30 @@ class ExperimentMatrix:
         else:
             raise ValueError("strategy must be oat or subsystem")
         for name, values in variants:
+            try:
+                _validate_candidate_values(values)
+            except ValueError:
+                # Refined subsystem products may contain incompatible values
+                # even when each individual parameter is valid.
+                continue
             candidate = PolicyCandidate(name, values)
             if candidate.fingerprint not in seen:
                 seen.add(candidate.fingerprint)
                 candidates.append(candidate)
         return candidates
+
+
+def _validate_candidate_values(values: dict[str, int | float]) -> None:
+    trigger = float(values["context.trigger_ratio"])
+    target = float(values["context.target_ratio"])
+    if not 0 < target < trigger <= 1:
+        raise ValueError(
+            "context candidate requires 0 < target_ratio < trigger_ratio <= 1"
+        )
+    children = int(values["agents.max_children"])
+    concurrency = int(values["agents.max_concurrency"])
+    if concurrency > children:
+        raise ValueError("agents candidate requires max_concurrency <= max_children")
 
 
 def load_matrix(path: Path) -> ExperimentMatrix:

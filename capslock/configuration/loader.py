@@ -122,6 +122,7 @@ def _upgrade_config(path: Path) -> None:
         agents.setdefault("max_child_tool_rounds", DEFAULT_AGENT_MAX_CHILD_TOOL_ROUNDS)
         agents.setdefault("background_enabled", True)
         agents.setdefault("mailbox_enabled", True)
+        agents.setdefault("default_workspace_mode", "snapshot")
         agents.setdefault("message_ttl_seconds", 3600)
     context = document.setdefault("context", {})
     if isinstance(context, dict):

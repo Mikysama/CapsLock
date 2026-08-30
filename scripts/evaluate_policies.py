@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import importlib
 import itertools
 import json
 import sys
@@ -25,6 +26,20 @@ from capslock.evaluation.registry import baseline_values  # noqa: E402
 from capslock.evaluation.runner import write_evaluation  # noqa: E402
 
 
+def _load_candidate_probe(spec: str | None):
+    """Load an async candidate-aware probe as ``module:callable``."""
+    if not spec:
+        return None
+    module_name, separator, attribute = spec.partition(":")
+    if not separator or not module_name or not attribute:
+        raise ValueError("--candidate-probe must use module:callable syntax")
+    module = importlib.import_module(module_name)
+    probe = getattr(module, attribute, None)
+    if not callable(probe):
+        raise ValueError(f"candidate probe is not callable: {spec}")
+    return probe
+
+
 def _candidates_from_report(path: Path) -> list[PolicyCandidate]:
     report = json.loads(path.read_text(encoding="utf-8"))
     summaries = report.get("summary", {}).get("candidates", [])
@@ -35,7 +50,7 @@ def _candidates_from_report(path: Path) -> list[PolicyCandidate]:
     ranked = sorted(
         (item for item in summaries if item.get("fingerprint") in pareto),
         key=lambda item: (
-            -float(item["success_rate"]),
+            -float(item.get("quality_success_rate", item["success_rate"])),
             float(item["median_cost_usd"]),
             float(item["latency_seconds"]["p95"]),
         ),
@@ -73,7 +88,7 @@ def _refined_candidates(path: Path, matrix) -> list[PolicyCandidate]:
         matching.sort(
             key=lambda item: (
                 not bool(item.get("feasible")),
-                -float(item.get("success_rate", 0)),
+                -float(item.get("quality_success_rate", item.get("success_rate", 0))),
                 float(item.get("median_cost_usd", 0)),
                 float(item.get("latency_seconds", {}).get("p95", 0)),
             )
@@ -119,7 +134,7 @@ def _memory_weight_candidates(path: Path, *, seed: int) -> list[PolicyCandidate]
     ]
     shortlisted.sort(
         key=lambda item: (
-            -float(item.get("success_rate", 0)),
+            -float(item.get("quality_success_rate", item.get("success_rate", 0))),
             float(item.get("median_cost_usd", 0)),
             float(item.get("latency_seconds", {}).get("p95", 0)),
         )
@@ -136,7 +151,7 @@ def _memory_weight_candidates(path: Path, *, seed: int) -> list[PolicyCandidate]
             if item.get("feasible") and item.get("fingerprint") in pareto
         ),
         key=lambda item: (
-            -float(item.get("success_rate", 0)),
+            -float(item.get("quality_success_rate", item.get("success_rate", 0))),
             float(item.get("median_cost_usd", 0)),
             float(item.get("latency_seconds", {}).get("p95", 0)),
         ),
@@ -235,6 +250,7 @@ async def async_main(args: argparse.Namespace) -> int:
         repetitions=args.repetitions,
         provider=args.provider,
         model=args.model,
+        candidate_probe=_load_candidate_probe(args.candidate_probe),
     )
     report, samples = await runner.run(tasks, candidates)
     if args.stage == "deterministic":
@@ -265,6 +281,10 @@ def main() -> int:
     parser.add_argument("--matrix", type=Path, required=True)
     parser.add_argument("--provider")
     parser.add_argument("--model")
+    parser.add_argument(
+        "--candidate-probe",
+        help="async module:callable receiving (task, candidate, provider, model)",
+    )
     parser.add_argument("--repetitions", type=int, default=1)
     parser.add_argument("--seed", type=int, default=20260828)
     parser.add_argument(

@@ -19,8 +19,6 @@ class ChildCapabilityPolicy:
             "glob_files",
             "read_file",
             "search_files",
-            "git_status",
-            "git_diff",
             "create_task",
             "list_tasks",
             "get_task",
@@ -34,7 +32,7 @@ class ChildCapabilityPolicy:
         if CapabilityKind.WEB in kinds:
             allowed.update({"web_search", "web_fetch"})
         if CapabilityKind.MCP in kinds:
-            # Concrete mcp__server__tool names are added from the parent catalog.
+            # Concrete mcp__server__tool definitions are added by ChildAgentRunner.
             allowed.add("search_tools")
         return allowed
 

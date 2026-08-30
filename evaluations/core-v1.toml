@@ -3,8 +3,10 @@ matrix_id = "core-v1"
 task_set_version = "core-v1"
 
 [pricing]
-input_cost_per_million = 0.0
-output_cost_per_million = 0.0
+# DeepSeek-V4-Flash peak cache-miss/input and output rates (USD per 1M tokens).
+# The peak cache-miss rate is a conservative upper bound for comparison.
+input_cost_per_million = 0.44
+output_cost_per_million = 1.32
 
 [parameters]
 "runtime.max_tool_rounds" = [8, 16, 24, 32, 48, 64]

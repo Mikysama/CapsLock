@@ -218,7 +218,15 @@ def normalize_imported_workflow(connection: sqlite3.Connection, import_id: str) 
         (utc_now(), import_id),
     )
     connection.execute(
-        f"UPDATE agent_tasks SET state='interrupted',finished_at=coalesce(finished_at,?),error='interrupted during export',child_workspace=NULL WHERE state IN ('created','running','waiting_approval') AND {imported('agent_tasks')}",
+        f"UPDATE agent_tasks SET state='interrupted',finished_at=coalesce(finished_at,?),error='interrupted during export',child_workspace=NULL WHERE state IN ('created','ready','claimed','running','waiting_approval') AND {imported('agent_tasks')}",
+        (utc_now(), import_id),
+    )
+    connection.execute(
+        f"UPDATE agent_attempts SET state='interrupted',finished_at=coalesce(finished_at,?),error='interrupted during export' WHERE state IN ('created','running','suspended') AND {imported('agent_attempts')}",
+        (utc_now(), import_id),
+    )
+    connection.execute(
+        f"UPDATE agent_workers SET state='interrupted',updated_at=? WHERE state IN ('starting','running','waiting_approval') AND {imported('agent_workers')}",
         (utc_now(), import_id),
     )
     connection.execute(
@@ -302,9 +310,7 @@ def rebuild_episodic_search(
                 source_id=str(row["id"]),
                 content=str(row["result_preview"]),
                 artifact_id=(
-                    str(row["artifact_id"])
-                    if row["artifact_id"] is not None
-                    else None
+                    str(row["artifact_id"]) if row["artifact_id"] is not None else None
                 ),
                 created_at=str(row["started_at"]),
             )
@@ -391,15 +397,20 @@ def _imported_artifact_content(row: sqlite3.Row, root: Path | None) -> str:
 
 def _textual_media_type(media_type: str) -> bool:
     normalized = media_type.partition(";")[0].strip().lower()
-    return normalized.startswith("text/") or normalized in {
-        "application/json",
-        "application/ld+json",
-        "application/xml",
-        "application/javascript",
-        "application/x-javascript",
-        "application/yaml",
-        "application/x-yaml",
-    } or normalized.endswith(("+json", "+xml"))
+    return (
+        normalized.startswith("text/")
+        or normalized
+        in {
+            "application/json",
+            "application/ld+json",
+            "application/xml",
+            "application/javascript",
+            "application/x-javascript",
+            "application/yaml",
+            "application/x-yaml",
+        }
+        or normalized.endswith(("+json", "+xml"))
+    )
 
 
 def rebuild_memory_fts(connection: sqlite3.Connection, memory_ids: set[str]) -> None:

@@ -24,13 +24,57 @@
       "type": "object",
       "required": ["candidates", "pareto_fingerprints", "recommendation"],
       "properties": {
-        "candidates": {"type": "array", "minItems": 1},
+        "candidates": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/candidate_summary"}
+        },
         "pareto_fingerprints": {"type": "array", "items": {"type": "string"}},
         "recommendation": {"type": ["object", "null"]}
       }
     },
     "sample_count": {"type": "integer", "minimum": 1},
     "report_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  },
+  "$defs": {
+    "candidate_summary": {
+      "type": "object",
+      "required": [
+        "name",
+        "fingerprint",
+        "values",
+        "raw_samples",
+        "raw_successes",
+        "success_rate",
+        "raw_success_rate",
+        "quality_success_rate",
+        "capacity_coverage",
+        "safe_stop_rate",
+        "provider_error_rate",
+        "approval_bypasses",
+        "unknown_execution_auto_replays",
+        "gate_failures",
+        "feasible"
+      ],
+      "properties": {
+        "name": {"type": "string"},
+        "fingerprint": {"type": "string", "minLength": 8},
+        "values": {"type": "object", "additionalProperties": {"type": "number"}},
+        "success_rate": {"type": "number", "minimum": 0, "maximum": 1},
+        "raw_samples": {"type": "integer", "minimum": 0},
+        "raw_successes": {"type": "integer", "minimum": 0},
+        "raw_success_rate": {"type": "number", "minimum": 0, "maximum": 1},
+        "quality_success_rate": {"type": "number", "minimum": 0, "maximum": 1},
+        "capacity_coverage": {"type": "number", "minimum": 0, "maximum": 1},
+        "safe_stop_rate": {"type": "number", "minimum": 0, "maximum": 1},
+        "provider_error_rate": {"type": "number", "minimum": 0, "maximum": 1},
+        "approval_bypasses": {"type": "integer", "minimum": 0},
+        "unknown_execution_auto_replays": {"type": "integer", "minimum": 0},
+        "gate_failures": {"type": "array", "items": {"type": "string"}},
+        "feasible": {"type": "boolean"}
+      },
+      "additionalProperties": true
+    }
   },
   "additionalProperties": false
 }

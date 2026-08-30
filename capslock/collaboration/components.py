@@ -37,15 +37,18 @@ class CollaborationMailbox:
         self,
         task_id: str,
         *,
-        parent_run_id: str,
+        parent_run_id: str | None = None,
+        session_id: str | None = None,
         kind: MailboxMessageKind,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
         if not self.enabled:
             raise ValueError("agent mailbox is disabled")
         task = await self.repository.get_task(task_id)
-        if task is None or str(task["parent_run_id"]) != parent_run_id:
-            raise ValueError("child task does not belong to this run")
+        if task is None or not _owns(
+            task, parent_run_id=parent_run_id, session_id=session_id
+        ):
+            raise ValueError("child task does not belong to this controller")
         if str(task["state"]) not in self.active_states:
             raise ValueError(
                 "mailbox messages can only be sent to an active child task"
@@ -60,7 +63,7 @@ class CollaborationMailbox:
             await self._cancel(task_id)
         return await self.repository.send_mailbox(
             task_id=task_id,
-            parent_run_id=parent_run_id,
+            parent_run_id=str(task["parent_run_id"]),
             sender="parent",
             recipient="child",
             kind=kind,
@@ -69,21 +72,40 @@ class CollaborationMailbox:
         )
 
     async def read_messages(
-        self, task_id: str, *, parent_run_id: str
+        self,
+        task_id: str,
+        *,
+        parent_run_id: str | None = None,
+        session_id: str | None = None,
     ) -> list[dict[str, Any]]:
         if not self.enabled:
             raise ValueError("agent mailbox is disabled")
         task = await self.repository.get_task(task_id)
-        if task is None or str(task["parent_run_id"]) != parent_run_id:
-            raise ValueError("child task does not belong to this run")
+        if task is None or not _owns(
+            task, parent_run_id=parent_run_id, session_id=session_id
+        ):
+            raise ValueError("child task does not belong to this controller")
         return await self.repository.receive_mailbox(task_id, recipient="parent")
 
-    async def acknowledge_message(self, message_id: str, *, parent_run_id: str) -> None:
+    async def acknowledge_message(
+        self,
+        message_id: str,
+        *,
+        parent_run_id: str | None = None,
+        session_id: str | None = None,
+    ) -> None:
         if not self.enabled:
             raise ValueError("agent mailbox is disabled")
         message = await self.repository.mailbox_message(message_id)
-        if message is None or str(message["parent_run_id"]) != parent_run_id:
-            raise ValueError("mailbox message does not belong to this run")
+        task = (
+            None
+            if message is None
+            else await self.repository.get_task(str(message["task_id"]))
+        )
+        if task is None or not _owns(
+            task, parent_run_id=parent_run_id, session_id=session_id
+        ):
+            raise ValueError("mailbox message does not belong to this controller")
         await self.repository.acknowledge_mailbox(message_id, recipient="parent")
 
     async def send_child_message(
@@ -126,6 +148,9 @@ class CollaborationMailbox:
         task = await self.repository.get_task(task_id)
         if task is None or str(task["parent_run_id"]) != parent_run_id:
             raise ValueError("child task does not belong to this run")
+        worker_id = task.get("assigned_worker_id")
+        if worker_id:
+            return await self.repository.receive_worker_mailbox(str(worker_id))
         return await self.repository.receive_mailbox(task_id, recipient="child")
 
     async def acknowledge_child_message(
@@ -134,10 +159,23 @@ class CollaborationMailbox:
         if not self.enabled:
             raise ValueError("agent mailbox is disabled")
         message = await self.repository.mailbox_message(message_id)
+        task = await self.repository.get_task(task_id)
+        message_task = (
+            None
+            if message is None
+            else await self.repository.get_task(str(message["task_id"]))
+        )
+        same_worker = bool(
+            task
+            and message_task
+            and task.get("assigned_worker_id")
+            and task.get("assigned_worker_id") == message_task.get("assigned_worker_id")
+        )
         if (
             message is None
-            or str(message["task_id"]) != task_id
-            or str(message["parent_run_id"]) != parent_run_id
+            or task is None
+            or (str(message["task_id"]) != task_id and not same_worker)
+            or str(task["parent_run_id"]) != parent_run_id
         ):
             raise ValueError("mailbox message does not belong to this child task")
         await self.repository.acknowledge_mailbox(message_id, recipient="child")
@@ -153,11 +191,14 @@ class CollaborationArtifactPublisher:
         task_id: str,
         artifact: dict[str, Any],
         *,
-        parent_run_id: str,
+        parent_run_id: str | None = None,
+        session_id: str | None = None,
     ) -> None:
         task = await self.repository.get_task(task_id)
-        if task is None or str(task["parent_run_id"]) != parent_run_id:
-            raise ValueError("child task does not belong to this run")
+        if task is None or not _owns(
+            task, parent_run_id=parent_run_id, session_id=session_id
+        ):
+            raise ValueError("child task does not belong to this controller")
         contract = AgentTaskContract.from_dict(json.loads(str(task["contract_json"])))
         snapshot = await self._snapshot_for(task_id)
         if not snapshot.root.is_dir():
@@ -175,16 +216,28 @@ class CollaborationArtifactPublisher:
         self.workspace_manager.publish_artifacts(
             snapshot, (artifact,), allowed_paths=contract.allowed_paths
         )
+        await self.repository.update_workspace_baseline(
+            str(snapshot.root), self.workspace_manager.baseline(snapshot)
+        )
 
     async def _snapshot_for(self, task_id: str) -> WorkspaceSnapshot:
         row = await self.repository.one(
-            "SELECT path FROM agent_workspaces WHERE task_id=?", (task_id,)
+            """SELECT path,workspace_mode,base_commit,baseline_json
+               FROM agent_workspaces WHERE task_id=?""",
+            (task_id,),
         )
         if row is None:
             raise ValueError(f"child workspace does not exist: {task_id}")
-        return WorkspaceSnapshot(
-            self.workspace_manager.parent_workspace, Path(str(row["path"]))
+        snapshot = WorkspaceSnapshot(
+            self.workspace_manager.parent_workspace,
+            Path(str(row["path"])),
+            str(row["workspace_mode"]),
+            row["base_commit"],
         )
+        self.workspace_manager.restore_baseline(
+            snapshot, json.loads(str(row["baseline_json"]))
+        )
+        return snapshot
 
 
 class CollaborationAudit:
@@ -250,6 +303,16 @@ class CollaborationAudit:
             created_at=datetime.now(UTC).isoformat(),
         )
         await self.repository.record_message(message)
+
+
+def _owns(
+    task: dict[str, Any], *, parent_run_id: str | None, session_id: str | None
+) -> bool:
+    if session_id is not None:
+        return str(task.get("owner_session_id", "")) == session_id
+    if parent_run_id is not None:
+        return str(task.get("parent_run_id", "")) == parent_run_id
+    raise ValueError("agent task ownership scope is required")
 
 
 __all__ = [

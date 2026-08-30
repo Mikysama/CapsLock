@@ -120,7 +120,12 @@ def delegation_tool() -> ToolDefinition:
 
 
 CHILD_MAILBOX_TOOL_NAMES = frozenset(
-    {"read_parent_messages", "send_parent_message", "ack_parent_message"}
+    {
+        "read_parent_messages",
+        "send_parent_message",
+        "ack_parent_message",
+        "send_team_message",
+    }
 )
 
 
@@ -151,7 +156,9 @@ def child_mailbox_tools(
                 raise ValueError("offered child artifact is not a regular file")
             size = path.stat().st_size
             if size > contract.verification_requirements.max_artifact_bytes:
-                raise ValueError("offered child artifact exceeds the contract size limit")
+                raise ValueError(
+                    "offered child artifact exceeds the contract size limit"
+                )
             payload = {
                 "path": str(path.relative_to(context.policy.root)),
                 "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
@@ -179,6 +186,18 @@ def child_mailbox_tools(
             parent_run_id=contract.parent_run_id,
         )
         return ToolOutcome.success({"acknowledged": True})
+
+    async def send_team_message(
+        _context: ExecutionContext, arguments: dict[str, Any]
+    ) -> ToolOutcome:
+        value = await collaboration.send_team_message(
+            source_task_id=contract.task_id,
+            source_parent_run_id=contract.parent_run_id,
+            recipient_agent_id=arguments.get("recipient_agent_id"),
+            broadcast=bool(arguments.get("broadcast", False)),
+            payload=dict(arguments["payload"]),
+        )
+        return ToolOutcome.success(value)
 
     return [
         define_tool(
@@ -216,6 +235,22 @@ def child_mailbox_tools(
                 "additionalProperties": False,
             },
             acknowledge_parent_message,
+            policy=ResolvedToolPolicy(context_mutation=True),
+        ),
+        define_tool(
+            "send_team_message",
+            "Send untrusted task data to one teammate or all active teammates in the same team.",
+            {
+                "type": "object",
+                "properties": {
+                    "recipient_agent_id": {"type": "string"},
+                    "broadcast": {"type": "boolean"},
+                    "payload": {"type": "object"},
+                },
+                "required": ["payload"],
+                "additionalProperties": False,
+            },
+            send_team_message,
             policy=ResolvedToolPolicy(context_mutation=True),
         ),
     ]
@@ -459,7 +494,355 @@ def agent_control_tools() -> list[ToolDefinition]:
             deferred=True,
             search_hint="publish promote child Agent artifact",
         ),
+        define_tool(
+            "create_agent_team",
+            "Create a session-scoped Agent team.",
+            {
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "required": ["name"],
+                "additionalProperties": False,
+            },
+            _create_agent_team,
+            policy=ResolvedToolPolicy(context_mutation=True),
+            deferred=True,
+            search_hint="create named Agent team",
+        ),
+        define_tool(
+            "start_agent",
+            "Start one named persistent Agent in a session team.",
+            {
+                "type": "object",
+                "properties": {
+                    "team_id": {"type": "string"},
+                    "name": {"type": "string"},
+                    "profile": {"type": "object"},
+                    "workspace_mode": {
+                        "type": "string",
+                        "enum": ["snapshot", "worktree", "shared_read"],
+                    },
+                },
+                "required": ["team_id", "name"],
+                "additionalProperties": False,
+            },
+            _start_agent,
+            policy=ResolvedToolPolicy(context_mutation=True),
+            deferred=True,
+            search_hint="start named persistent Agent worker",
+        ),
+        define_tool(
+            "create_agent_task",
+            "Create one immutable task in an Agent-team dependency graph.",
+            _team_task_schema(),
+            _create_agent_task,
+            policy=ResolvedToolPolicy(context_mutation=True),
+            deferred=True,
+            search_hint="create Agent DAG task dependency",
+        ),
+        define_tool(
+            "assign_agent_task",
+            "Atomically claim and run a ready Agent-team task.",
+            {
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                },
+                "required": ["task_id", "agent_id"],
+                "additionalProperties": False,
+            },
+            _assign_agent_task,
+            policy=ResolvedToolPolicy(context_mutation=True),
+            deferred=True,
+            search_hint="claim assign run Agent task",
+        ),
+        define_tool(
+            "follow_up_agent",
+            "Queue a new immutable task for a named persistent Agent.",
+            {
+                "type": "object",
+                "properties": {
+                    "agent_id": {"type": "string"},
+                    "objective": {"type": "string"},
+                    "input_context": {"type": "object"},
+                    "plan_task_id": {"type": "string"},
+                },
+                "required": ["agent_id", "objective"],
+                "additionalProperties": False,
+            },
+            _follow_up_agent,
+            policy=ResolvedToolPolicy(context_mutation=True),
+            deferred=True,
+            search_hint="follow up resume persistent Agent",
+        ),
+        define_tool(
+            "resume_agent",
+            "Explicitly resume an interrupted named Agent task.",
+            {
+                "type": "object",
+                "properties": {
+                    "agent_id": {"type": "string"},
+                    "task_id": {"type": "string"},
+                },
+                "required": ["agent_id"],
+                "additionalProperties": False,
+            },
+            _resume_agent,
+            policy=ResolvedToolPolicy(context_mutation=True),
+            deferred=True,
+            search_hint="resume interrupted Agent checkpoint",
+        ),
+        define_tool(
+            "get_agent_team",
+            "Inspect a session-owned Agent team, tasks, attempts, approvals, and budget ledger.",
+            {
+                "type": "object",
+                "properties": {"team_id": {"type": "string"}},
+                "required": ["team_id"],
+                "additionalProperties": False,
+            },
+            _get_agent_team,
+            policy=safe_read,
+            deferred=True,
+            search_hint="Agent team DAG status budget approvals",
+        ),
+        define_tool(
+            "stop_agent",
+            "Stop a session-owned persistent Agent and cancel its active task.",
+            {
+                "type": "object",
+                "properties": {"agent_id": {"type": "string"}},
+                "required": ["agent_id"],
+                "additionalProperties": False,
+            },
+            _stop_agent,
+            policy=ResolvedToolPolicy(context_mutation=True),
+            deferred=True,
+            search_hint="stop persistent Agent worker",
+        ),
+        define_tool(
+            "send_team_message",
+            "Send an instruction to one named Agent or broadcast within a session team.",
+            {
+                "type": "object",
+                "properties": {
+                    "team_id": {"type": "string"},
+                    "recipient_agent_id": {"type": "string"},
+                    "broadcast": {"type": "boolean"},
+                    "payload": {"type": "object"},
+                },
+                "required": ["payload"],
+                "additionalProperties": False,
+            },
+            _send_team_message,
+            policy=ResolvedToolPolicy(context_mutation=True),
+            deferred=True,
+            search_hint="message broadcast Agent teammate",
+        ),
     ]
+
+
+def _team_task_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "team_id": {"type": "string"},
+            "objective": {"type": "string"},
+            "input_context": {"type": "object"},
+            "depends_on": {"type": "array", "items": {"type": "string"}},
+            "assignee_agent_id": {"type": "string"},
+            "plan_task_id": {"type": "string"},
+            "priority": {"type": "integer"},
+            "allowed_paths": {"type": "array", "items": {"type": "string"}},
+            "capabilities": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "kind": {
+                            "type": "string",
+                            "enum": [item.value for item in CapabilityKind],
+                        },
+                        "scope": {"type": "string"},
+                        "plugin": {"type": "string"},
+                    },
+                    "required": ["kind"],
+                    "additionalProperties": False,
+                },
+            },
+            "model_profile": {"type": "string"},
+            "limits": {"type": "object"},
+            "verification_requirements": {"type": "object"},
+        },
+        "required": ["team_id", "objective"],
+        "additionalProperties": False,
+    }
+
+
+def _team_contract(
+    context: ExecutionContext, arguments: dict[str, Any]
+) -> AgentTaskContract:
+    grants = tuple(
+        CapabilityGrant(
+            CapabilityKind(str(item["kind"])),
+            scope=item.get("scope"),
+            plugin=item.get("plugin"),
+        )
+        for item in arguments.get("capabilities", ())
+    )
+    return AgentTaskContract.create(
+        context.run_id,
+        str(arguments["objective"]),
+        input_context=dict(arguments.get("input_context") or {}),
+        allowed_paths=tuple(arguments.get("allowed_paths") or ()),
+        capabilities=grants,
+        model_profile=arguments.get("model_profile"),
+        limits=dict(arguments.get("limits") or {"max_tool_rounds": 16}),
+        verification_requirements=_verification_requirements(
+            arguments.get("verification_requirements")
+        ),
+    )
+
+
+async def _create_agent_team(
+    context: ExecutionContext, arguments: dict[str, Any]
+) -> ToolOutcome:
+    if context.collaboration is None:
+        return ToolOutcome.failure("multi-Agent collaboration is not configured")
+    value = await context.collaboration.create_team(
+        context.session_id,
+        str(arguments["name"]),
+        created_by_run_id=context.run_id,
+    )
+    return ToolOutcome.success(value)
+
+
+async def _start_agent(
+    context: ExecutionContext, arguments: dict[str, Any]
+) -> ToolOutcome:
+    if context.collaboration is None:
+        return ToolOutcome.failure("multi-Agent collaboration is not configured")
+    value = await context.collaboration.start_agent(
+        session_id=context.session_id,
+        team_id=str(arguments["team_id"]),
+        name=str(arguments["name"]),
+        profile=dict(arguments.get("profile") or {}),
+        workspace_mode=(
+            str(arguments["workspace_mode"])
+            if arguments.get("workspace_mode") is not None
+            else None
+        ),
+    )
+    return ToolOutcome.success(value)
+
+
+async def _create_agent_task(
+    context: ExecutionContext, arguments: dict[str, Any]
+) -> ToolOutcome:
+    if context.collaboration is None:
+        return ToolOutcome.failure("multi-Agent collaboration is not configured")
+    contract = (
+        await _reserve_parent_budget(context, [_team_contract(context, arguments)])
+    )[0]
+    value = await context.collaboration.create_agent_task(
+        contract,
+        session_id=context.session_id,
+        team_id=str(arguments["team_id"]),
+        depends_on=tuple(str(item) for item in arguments.get("depends_on", ())),
+        worker_id=arguments.get("assignee_agent_id"),
+        plan_task_id=arguments.get("plan_task_id"),
+        priority=int(arguments.get("priority", 0)),
+    )
+    return ToolOutcome.success(value)
+
+
+async def _assign_agent_task(
+    context: ExecutionContext, arguments: dict[str, Any]
+) -> ToolOutcome:
+    if context.collaboration is None:
+        return ToolOutcome.failure("multi-Agent collaboration is not configured")
+    value = await context.collaboration.assign_agent_task(
+        str(arguments["task_id"]),
+        str(arguments["agent_id"]),
+        session_id=context.session_id,
+    )
+    return ToolOutcome.success(value)
+
+
+async def _follow_up_agent(
+    context: ExecutionContext, arguments: dict[str, Any]
+) -> ToolOutcome:
+    if context.collaboration is None:
+        return ToolOutcome.failure("multi-Agent collaboration is not configured")
+    contract = (
+        await _reserve_parent_budget(
+            context,
+            [
+                AgentTaskContract.create(
+                    context.run_id,
+                    str(arguments["objective"]),
+                    input_context=dict(arguments.get("input_context") or {}),
+                )
+            ],
+        )
+    )[0]
+    value = await context.collaboration.follow_up_agent(
+        str(arguments["agent_id"]),
+        contract,
+        session_id=context.session_id,
+        plan_task_id=arguments.get("plan_task_id"),
+    )
+    return ToolOutcome.success(value)
+
+
+async def _resume_agent(
+    context: ExecutionContext, arguments: dict[str, Any]
+) -> ToolOutcome:
+    if context.collaboration is None:
+        return ToolOutcome.failure("multi-Agent collaboration is not configured")
+    value = await context.collaboration.resume_agent(
+        str(arguments["agent_id"]),
+        session_id=context.session_id,
+        task_id=arguments.get("task_id"),
+    )
+    return ToolOutcome.success(value)
+
+
+async def _get_agent_team(
+    context: ExecutionContext, arguments: dict[str, Any]
+) -> ToolOutcome:
+    if context.collaboration is None:
+        return ToolOutcome.failure("multi-Agent collaboration is not configured")
+    value = await context.collaboration.get_team(
+        str(arguments["team_id"]), session_id=context.session_id
+    )
+    return ToolOutcome.success(value)
+
+
+async def _stop_agent(
+    context: ExecutionContext, arguments: dict[str, Any]
+) -> ToolOutcome:
+    if context.collaboration is None:
+        return ToolOutcome.failure("multi-Agent collaboration is not configured")
+    value = await context.collaboration.stop_agent(
+        str(arguments["agent_id"]), session_id=context.session_id
+    )
+    return ToolOutcome.success(value)
+
+
+async def _send_team_message(
+    context: ExecutionContext, arguments: dict[str, Any]
+) -> ToolOutcome:
+    if context.collaboration is None:
+        return ToolOutcome.failure("multi-Agent collaboration is not configured")
+    value = await context.collaboration.send_team_message(
+        session_id=context.session_id,
+        team_id=arguments.get("team_id"),
+        recipient_agent_id=arguments.get("recipient_agent_id"),
+        broadcast=bool(arguments.get("broadcast", False)),
+        payload=dict(arguments["payload"]),
+    )
+    return ToolOutcome.success(value)
 
 
 async def _send_agent_message(
@@ -469,7 +852,7 @@ async def _send_agent_message(
         return ToolOutcome.failure("multi-Agent collaboration is not configured")
     value = await context.collaboration.send_message(
         str(arguments["task_id"]),
-        parent_run_id=context.run_id,
+        session_id=context.session_id,
         kind=MailboxMessageKind(str(arguments["kind"])),
         payload=dict(arguments["payload"]),
     )
@@ -482,7 +865,7 @@ async def _read_agent_messages(
     if context.collaboration is None:
         return ToolOutcome.failure("multi-Agent collaboration is not configured")
     values = await context.collaboration.read_messages(
-        str(arguments["task_id"]), parent_run_id=context.run_id
+        str(arguments["task_id"]), session_id=context.session_id
     )
     return ToolOutcome.success({"messages": values})
 
@@ -493,7 +876,7 @@ async def _ack_agent_message(
     if context.collaboration is None:
         return ToolOutcome.failure("multi-Agent collaboration is not configured")
     await context.collaboration.acknowledge_message(
-        str(arguments["message_id"]), parent_run_id=context.run_id
+        str(arguments["message_id"]), session_id=context.session_id
     )
     return ToolOutcome.success({"acknowledged": True})
 
@@ -506,7 +889,7 @@ async def _publish_agent_artifact(
     await context.collaboration.publish_artifact(
         str(arguments["task_id"]),
         {"path": str(arguments["path"]), "sha256": str(arguments["sha256"])},
-        parent_run_id=context.run_id,
+        session_id=context.session_id,
     )
     return ToolOutcome.success({"published": True, "path": arguments["path"]})
 

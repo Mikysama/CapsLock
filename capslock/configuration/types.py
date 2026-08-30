@@ -122,6 +122,7 @@ class AgentSettings:
     background_enabled: bool = True
     mailbox_enabled: bool = True
     message_ttl_seconds: int = 3600
+    default_workspace_mode: str = "snapshot"
 
 
 @dataclass(frozen=True)

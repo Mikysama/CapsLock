@@ -24,6 +24,7 @@ from .composition import (
 from .interaction import RunInteraction
 from .layout import ProjectLayout
 from .memory import MemoryService
+from .memory.recall import RecallPolicy
 from .memory.embeddings import ExternalEmbeddingConfig
 from .observability import EventSink
 from .permissions import PermissionMode
@@ -112,6 +113,7 @@ class WorkspaceApplication:
         plugin_registry_override: PluginRegistry | None = None,
         core_instructions: str | None = None,
         runtime_controls: tuple[str, ...] = (),
+        memory_recall_policy: RecallPolicy | None = None,
     ) -> "WorkspaceApplication":
         root = workspace.resolve()
         layout = layout or ProjectLayout.discover(root)
@@ -280,6 +282,7 @@ class WorkspaceApplication:
                 source_validator=repositories.runs.completed,
                 task_repository=repositories.tasks,
                 external_embedding_profiles=external_embedding_profiles,
+                recall_policy=memory_recall_policy,
             )
             await memory.reconcile_lifecycle()
             await memory.recover_jobs()
@@ -307,8 +310,10 @@ class WorkspaceApplication:
                 state_root=layout.root / "state" / "agents",
                 client=client,
                 plugins=plugin_registry,
+                mcp=mcp_manager,
                 interaction=interaction,
                 repository=repositories.collaboration,
+                action_repository=repositories.actions,
                 open_application=cls.open,
                 memory=memory,
                 write_coordinator=write_coordinator,

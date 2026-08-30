@@ -104,7 +104,7 @@ def propose_memory_weights(
     for item in observations:
         if all(path in item.get("values", {}) for path in WEIGHT_PATHS):
             buckets.setdefault(_vector(item["values"]), []).append(
-                float(item["success_rate"])
+                float(item.get("quality_success_rate", item["success_rate"]))
             )
     observed = [
         (vector, sum(outcomes) / len(outcomes)) for vector, outcomes in buckets.items()

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 import sqlite3
@@ -19,7 +21,7 @@ async def upgrade_workspace_schema(
     if source_version is None:
         row = await (await connection.execute("PRAGMA user_version")).fetchone()
         source_version = int(row[0])
-    if source_version not in {6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}:
+    if source_version not in {6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17}:
         raise ValueError(f"unsupported workspace upgrade source: {source_version}")
     checkpoint = await connection.execute("PRAGMA wal_checkpoint(FULL)")
     await checkpoint.close()
@@ -67,31 +69,60 @@ async def upgrade_workspace_schema(
                 )
                 await connection.commit()
             await connection.executescript(_UPGRADE_WORKSPACE_SIXTEEN)
-        compaction_columns = {
+        if source_version < 17:
+            compaction_columns = {
+                str(row[1])
+                for row in await (
+                    await connection.execute("PRAGMA table_info(context_compactions)")
+                ).fetchall()
+            }
+            if "summary_policy_digest" not in compaction_columns:
+                await connection.execute(
+                    """ALTER TABLE context_compactions ADD COLUMN summary_policy_digest
+                       TEXT NOT NULL DEFAULT ''"""
+                )
+            if "result_tokens" not in compaction_columns:
+                await connection.execute(
+                    """ALTER TABLE context_compactions ADD COLUMN result_tokens
+                       INTEGER NOT NULL DEFAULT 0 CHECK(result_tokens>=0)"""
+                )
+            if "quality_status" not in compaction_columns:
+                await connection.execute(
+                    """ALTER TABLE context_compactions ADD COLUMN quality_status
+                       TEXT NOT NULL DEFAULT 'legacy'
+                       CHECK(quality_status IN
+                         ('legacy','ok','degraded','target_unreachable'))"""
+                )
+            await connection.commit()
+            await connection.executescript(_UPGRADE_WORKSPACE_SEVENTEEN)
+        agent_task_columns = {
             str(row[1])
             for row in await (
-                await connection.execute("PRAGMA table_info(context_compactions)")
+                await connection.execute("PRAGMA table_info(agent_tasks)")
             ).fetchall()
         }
-        if "summary_policy_digest" not in compaction_columns:
+        if "owner_session_id" not in agent_task_columns:
+            await connection.executescript(_UPGRADE_WORKSPACE_EIGHTEEN)
+        else:
+            # Test fixtures and development snapshots can be structurally newer
+            # than their user_version.  Keep the upgrade idempotent in that case.
+            await connection.execute("PRAGMA user_version=18")
+            await connection.commit()
+        migrated_contract_rows = await (
             await connection.execute(
-                """ALTER TABLE context_compactions ADD COLUMN summary_policy_digest
-                   TEXT NOT NULL DEFAULT ''"""
+                "SELECT id,contract_json FROM agent_tasks WHERE contract_sha256=''"
             )
-        if "result_tokens" not in compaction_columns:
+        ).fetchall()
+        for row in migrated_contract_rows:
+            canonical = json.dumps(
+                json.loads(str(row[1])), sort_keys=True, ensure_ascii=False
+            )
             await connection.execute(
-                """ALTER TABLE context_compactions ADD COLUMN result_tokens
-                   INTEGER NOT NULL DEFAULT 0 CHECK(result_tokens>=0)"""
+                "UPDATE agent_tasks SET contract_sha256=? WHERE id=?",
+                (hashlib.sha256(canonical.encode("utf-8")).hexdigest(), str(row[0])),
             )
-        if "quality_status" not in compaction_columns:
-            await connection.execute(
-                """ALTER TABLE context_compactions ADD COLUMN quality_status
-                   TEXT NOT NULL DEFAULT 'legacy'
-                   CHECK(quality_status IN
-                     ('legacy','ok','degraded','target_unreachable'))"""
-            )
-        await connection.commit()
-        await connection.executescript(_UPGRADE_WORKSPACE_SEVENTEEN)
+        if migrated_contract_rows:
+            await connection.commit()
     except BaseException:
         await connection.rollback()
         raise
@@ -909,6 +940,260 @@ INSERT INTO context_summary_segments(
 DROP TABLE context_summary_segments_v16;
 PRAGMA user_version=17;
 COMMIT;
+PRAGMA foreign_keys=ON;
+"""
+
+
+_UPGRADE_WORKSPACE_EIGHTEEN = """
+PRAGMA foreign_keys=OFF;
+PRAGMA legacy_alter_table=ON;
+BEGIN IMMEDIATE;
+CREATE TABLE IF NOT EXISTS agent_teams (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  state TEXT NOT NULL DEFAULT 'active' CHECK(state IN ('active','stopped')),
+  created_by_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL,
+  stopped_at TEXT,
+  UNIQUE(session_id,name)
+) STRICT;
+CREATE INDEX IF NOT EXISTS idx_agent_teams_session ON agent_teams(session_id,created_at);
+INSERT OR IGNORE INTO agent_teams(id,session_id,name,state,created_by_run_id,created_at)
+SELECT 'default:' || s.id,s.id,'default','active',
+       (SELECT r.id FROM runs r WHERE r.session_id=s.id ORDER BY r.started_at,r.id LIMIT 1),
+       s.created_at
+FROM sessions s;
+
+CREATE TABLE IF NOT EXISTS agent_workers (
+  id TEXT PRIMARY KEY,
+  team_id TEXT NOT NULL REFERENCES agent_teams(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  profile_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(profile_json)),
+  workspace_mode TEXT NOT NULL DEFAULT 'snapshot' CHECK(workspace_mode IN ('snapshot','worktree','shared_read')),
+  state TEXT NOT NULL DEFAULT 'starting' CHECK(state IN ('starting','idle','running','waiting_approval','interrupted','stopped')),
+  persistent INTEGER NOT NULL DEFAULT 1 CHECK(persistent IN (0,1)),
+  child_session_id TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  stopped_at TEXT,
+  UNIQUE(team_id,name)
+) STRICT;
+CREATE INDEX IF NOT EXISTS idx_agent_workers_team ON agent_workers(team_id,state,created_at);
+INSERT OR IGNORE INTO agent_workers(id,team_id,name,profile_json,workspace_mode,state,persistent,created_at,updated_at,stopped_at)
+SELECT 'legacy:' || t.id,'default:' || r.session_id,'legacy-' || substr(t.id,1,12),'{}','snapshot',
+       CASE WHEN t.state IN ('created','running','waiting_approval') THEN 'interrupted' ELSE 'stopped' END,
+       0,t.created_at,coalesce(t.finished_at,t.created_at),t.finished_at
+FROM agent_tasks t JOIN runs r ON r.id=t.parent_run_id;
+
+ALTER TABLE agent_tasks RENAME TO agent_tasks_v16;
+ALTER TABLE agent_workspaces RENAME TO agent_workspaces_v16;
+ALTER TABLE agent_capabilities RENAME TO agent_capabilities_v16;
+ALTER TABLE agent_messages RENAME TO agent_messages_v16;
+ALTER TABLE agent_mailbox RENAME TO agent_mailbox_v16;
+ALTER TABLE agent_outputs RENAME TO agent_outputs_v16;
+DROP INDEX IF EXISTS idx_agent_tasks_parent;
+DROP INDEX IF EXISTS idx_agent_messages_task;
+DROP INDEX IF EXISTS idx_agent_mailbox_delivery;
+
+CREATE TABLE agent_tasks (
+  id TEXT PRIMARY KEY,
+  parent_run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  owner_session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  team_id TEXT NOT NULL REFERENCES agent_teams(id) ON DELETE CASCADE,
+  assigned_worker_id TEXT REFERENCES agent_workers(id) ON DELETE SET NULL,
+  plan_task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+  objective TEXT NOT NULL,
+  contract_json TEXT NOT NULL CHECK(json_valid(contract_json)),
+  contract_sha256 TEXT NOT NULL,
+  priority INTEGER NOT NULL DEFAULT 0,
+  state TEXT NOT NULL CHECK(state IN ('created','blocked','ready','claimed','running','waiting_approval','completed','failed','cancelled','interrupted')),
+  child_run_id TEXT,
+  child_workspace TEXT,
+  claim_token TEXT,
+  claim_expires_at TEXT,
+  attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count>=0),
+  error TEXT,
+  created_at TEXT NOT NULL,
+  started_at TEXT,
+  finished_at TEXT
+) STRICT;
+INSERT INTO agent_tasks(
+  id,parent_run_id,owner_session_id,team_id,assigned_worker_id,plan_task_id,
+  objective,contract_json,contract_sha256,priority,state,child_run_id,child_workspace,
+  claim_token,claim_expires_at,attempt_count,error,created_at,started_at,finished_at)
+SELECT t.id,t.parent_run_id,r.session_id,'default:' || r.session_id,'legacy:' || t.id,NULL,
+       t.objective,t.contract_json,'',0,
+       CASE WHEN t.state IN ('created','running','waiting_approval') THEN 'interrupted' ELSE t.state END,
+       t.child_run_id,t.child_workspace,NULL,NULL,0,
+       CASE WHEN t.state IN ('created','running','waiting_approval')
+            THEN 'interrupted during schema upgrade' ELSE t.error END,
+       t.created_at,t.started_at,
+       CASE WHEN t.state IN ('created','running','waiting_approval')
+            THEN coalesce(t.finished_at,strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+            ELSE t.finished_at END
+FROM agent_tasks_v16 t JOIN runs r ON r.id=t.parent_run_id;
+CREATE INDEX idx_agent_tasks_parent ON agent_tasks(parent_run_id,created_at);
+CREATE INDEX idx_agent_tasks_session ON agent_tasks(owner_session_id,state,created_at);
+CREATE INDEX idx_agent_tasks_team_ready ON agent_tasks(team_id,state,priority DESC,created_at);
+
+CREATE TABLE agent_workspaces (
+  task_id TEXT PRIMARY KEY REFERENCES agent_tasks(id) ON DELETE CASCADE,
+  worker_id TEXT REFERENCES agent_workers(id) ON DELETE SET NULL,
+  workspace_mode TEXT NOT NULL DEFAULT 'snapshot' CHECK(workspace_mode IN ('snapshot','worktree','shared_read')),
+  path TEXT NOT NULL,
+  source_path TEXT NOT NULL,
+  base_commit TEXT,
+  baseline_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(baseline_json)),
+  retained INTEGER NOT NULL DEFAULT 0 CHECK(retained IN (0,1)),
+  created_at TEXT NOT NULL,
+  cleaned_at TEXT
+) STRICT;
+INSERT INTO agent_workspaces(task_id,worker_id,workspace_mode,path,source_path,base_commit,
+                             baseline_json,retained,created_at,cleaned_at)
+SELECT task_id,'legacy:' || task_id,'snapshot',path,source_path,NULL,'{}',retained,created_at,cleaned_at
+FROM agent_workspaces_v16;
+
+CREATE TABLE agent_capabilities (
+  task_id TEXT NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
+  ordinal INTEGER NOT NULL CHECK(ordinal>=0),
+  capability_json TEXT NOT NULL CHECK(json_valid(capability_json)),
+  PRIMARY KEY(task_id,ordinal)
+) STRICT;
+INSERT INTO agent_capabilities SELECT * FROM agent_capabilities_v16;
+
+CREATE TABLE agent_messages (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
+  parent_run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  team_id TEXT REFERENCES agent_teams(id) ON DELETE CASCADE,
+  worker_id TEXT REFERENCES agent_workers(id) ON DELETE SET NULL,
+  attempt_id TEXT REFERENCES agent_attempts(id) ON DELETE SET NULL,
+  sender TEXT NOT NULL,
+  recipient TEXT NOT NULL,
+  sequence INTEGER NOT NULL CHECK(sequence>=1),
+  message_kind TEXT NOT NULL,
+  payload_json TEXT NOT NULL CHECK(json_valid(payload_json)),
+  payload_sha256 TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(task_id,sequence)
+) STRICT;
+INSERT INTO agent_messages(
+  id,task_id,parent_run_id,team_id,worker_id,attempt_id,sender,recipient,sequence,
+  message_kind,payload_json,payload_sha256,created_at)
+SELECT m.id,m.task_id,m.parent_run_id,t.team_id,t.assigned_worker_id,NULL,m.sender,m.recipient,
+       m.sequence,m.message_kind,m.payload_json,m.payload_sha256,m.created_at
+FROM agent_messages_v16 m JOIN agent_tasks t ON t.id=m.task_id;
+CREATE INDEX idx_agent_messages_task ON agent_messages(task_id,sequence);
+
+CREATE TABLE agent_mailbox (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
+  parent_run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  team_id TEXT REFERENCES agent_teams(id) ON DELETE CASCADE,
+  worker_id TEXT REFERENCES agent_workers(id) ON DELETE SET NULL,
+  attempt_id TEXT REFERENCES agent_attempts(id) ON DELETE SET NULL,
+  sender TEXT NOT NULL CHECK(sender IN ('parent','child','system')),
+  recipient TEXT NOT NULL CHECK(recipient IN ('parent','child')),
+  message_kind TEXT NOT NULL CHECK(message_kind IN ('instruction','question','response','progress','artifact_offer','cancel')),
+  payload_json TEXT NOT NULL CHECK(json_valid(payload_json)),
+  payload_sha256 TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued','delivered','acknowledged','expired')),
+  created_at TEXT NOT NULL,
+  expires_at TEXT,
+  delivered_at TEXT,
+  acknowledged_at TEXT
+) STRICT;
+INSERT INTO agent_mailbox(
+  id,task_id,parent_run_id,team_id,worker_id,attempt_id,sender,recipient,message_kind,
+  payload_json,payload_sha256,status,created_at,expires_at,delivered_at,acknowledged_at)
+SELECT m.id,m.task_id,m.parent_run_id,t.team_id,t.assigned_worker_id,NULL,m.sender,m.recipient,
+       m.message_kind,m.payload_json,m.payload_sha256,m.status,m.created_at,m.expires_at,
+       m.delivered_at,m.acknowledged_at
+FROM agent_mailbox_v16 m JOIN agent_tasks t ON t.id=m.task_id;
+CREATE INDEX idx_agent_mailbox_delivery ON agent_mailbox(task_id,recipient,status,created_at);
+
+CREATE TABLE agent_outputs (
+  task_id TEXT PRIMARY KEY REFERENCES agent_tasks(id) ON DELETE CASCADE,
+  attempt_id TEXT REFERENCES agent_attempts(id) ON DELETE SET NULL,
+  state TEXT NOT NULL CHECK(state IN ('completed','failed','cancelled','interrupted')),
+  output_json TEXT NOT NULL CHECK(json_valid(output_json)),
+  verified INTEGER NOT NULL CHECK(verified IN (0,1)),
+  output_sha256 TEXT NOT NULL,
+  created_at TEXT NOT NULL
+) STRICT;
+INSERT INTO agent_outputs(task_id,attempt_id,state,output_json,verified,output_sha256,created_at)
+SELECT task_id,NULL,state,output_json,verified,output_sha256,created_at FROM agent_outputs_v16;
+
+DROP TABLE agent_outputs_v16;
+DROP TABLE agent_mailbox_v16;
+DROP TABLE agent_messages_v16;
+DROP TABLE agent_capabilities_v16;
+DROP TABLE agent_workspaces_v16;
+DROP TABLE agent_tasks_v16;
+
+CREATE TABLE IF NOT EXISTS agent_task_dependencies (
+  task_id TEXT NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
+  blocked_by_task_id TEXT NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(task_id,blocked_by_task_id),
+  CHECK(task_id<>blocked_by_task_id)
+) STRICT;
+CREATE INDEX IF NOT EXISTS idx_agent_task_dependencies_blocker ON agent_task_dependencies(blocked_by_task_id,task_id);
+CREATE TABLE IF NOT EXISTS agent_attempts (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
+  worker_id TEXT REFERENCES agent_workers(id) ON DELETE SET NULL,
+  ordinal INTEGER NOT NULL CHECK(ordinal>=1),
+  state TEXT NOT NULL CHECK(state IN ('created','running','suspended','completed','failed','cancelled','interrupted')),
+  claim_token TEXT NOT NULL UNIQUE,
+  child_run_id TEXT,
+  reservation_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(reservation_json)),
+  usage_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(usage_json)),
+  error TEXT,
+  created_at TEXT NOT NULL,
+  started_at TEXT,
+  finished_at TEXT,
+  UNIQUE(task_id,ordinal)
+) STRICT;
+CREATE INDEX IF NOT EXISTS idx_agent_attempts_task ON agent_attempts(task_id,ordinal);
+CREATE TABLE IF NOT EXISTS agent_checkpoints (
+  attempt_id TEXT PRIMARY KEY REFERENCES agent_attempts(id) ON DELETE CASCADE,
+  contract_sha256 TEXT NOT NULL,
+  child_session_id TEXT,
+  child_run_id TEXT,
+  transcript_cursor TEXT,
+  checkpoint_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(checkpoint_json)),
+  resumable INTEGER NOT NULL DEFAULT 0 CHECK(resumable IN (0,1)),
+  updated_at TEXT NOT NULL
+) STRICT;
+CREATE TABLE IF NOT EXISTS agent_budget_ledger (
+  id TEXT PRIMARY KEY,
+  team_id TEXT NOT NULL REFERENCES agent_teams(id) ON DELETE CASCADE,
+  task_id TEXT NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
+  attempt_id TEXT NOT NULL REFERENCES agent_attempts(id) ON DELETE CASCADE,
+  operation TEXT NOT NULL CHECK(operation IN ('reserve','settle','release')),
+  amount_json TEXT NOT NULL CHECK(json_valid(amount_json)),
+  idempotency_key TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS idx_agent_budget_attempt ON agent_budget_ledger(attempt_id,created_at);
+CREATE TABLE IF NOT EXISTS agent_approval_links (
+  id TEXT PRIMARY KEY,
+  attempt_id TEXT NOT NULL REFERENCES agent_attempts(id) ON DELETE CASCADE,
+  child_action_id TEXT NOT NULL,
+  parent_action_id TEXT,
+  action_sha256 TEXT NOT NULL,
+  contract_sha256 TEXT NOT NULL,
+  state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','approved','rejected','cancelled')),
+  payload_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(payload_json)),
+  created_at TEXT NOT NULL,
+  decided_at TEXT,
+  UNIQUE(attempt_id,child_action_id)
+) STRICT;
+PRAGMA user_version=18;
+COMMIT;
+PRAGMA legacy_alter_table=OFF;
 PRAGMA foreign_keys=ON;
 """
 

@@ -67,6 +67,7 @@ _GROUP_FIELDS = {
         "background_enabled",
         "mailbox_enabled",
         "message_ttl_seconds",
+        "default_workspace_mode",
     },
     "lsp": {
         "enabled",

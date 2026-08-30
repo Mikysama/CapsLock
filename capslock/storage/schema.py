@@ -2,7 +2,7 @@
 
 WORKSPACE_APPLICATION_ID = 0x434C4B32  # CLK2
 MEMORY_APPLICATION_ID = 0x434C4D32  # CLM2
-WORKSPACE_SCHEMA_VERSION = 17
+WORKSPACE_SCHEMA_VERSION = 18
 MEMORY_SCHEMA_VERSION = 5
 
 WORKSPACE_SCHEMA = """
@@ -590,24 +590,124 @@ CREATE VIRTUAL TABLE session_search USING fts5(
   tokenize='unicode61'
 );
 
+CREATE TABLE agent_teams (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  state TEXT NOT NULL DEFAULT 'active' CHECK(state IN ('active','stopped')),
+  created_by_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL,
+  stopped_at TEXT,
+  UNIQUE(session_id,name)
+) STRICT;
+CREATE INDEX idx_agent_teams_session ON agent_teams(session_id,created_at);
+CREATE TABLE agent_workers (
+  id TEXT PRIMARY KEY,
+  team_id TEXT NOT NULL REFERENCES agent_teams(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  profile_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(profile_json)),
+  workspace_mode TEXT NOT NULL DEFAULT 'snapshot' CHECK(workspace_mode IN ('snapshot','worktree','shared_read')),
+  state TEXT NOT NULL DEFAULT 'starting' CHECK(state IN ('starting','idle','running','waiting_approval','interrupted','stopped')),
+  persistent INTEGER NOT NULL DEFAULT 1 CHECK(persistent IN (0,1)),
+  child_session_id TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  stopped_at TEXT,
+  UNIQUE(team_id,name)
+) STRICT;
+CREATE INDEX idx_agent_workers_team ON agent_workers(team_id,state,created_at);
 CREATE TABLE agent_tasks (
   id TEXT PRIMARY KEY,
   parent_run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  owner_session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  team_id TEXT NOT NULL REFERENCES agent_teams(id) ON DELETE CASCADE,
+  assigned_worker_id TEXT REFERENCES agent_workers(id) ON DELETE SET NULL,
+  plan_task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
   objective TEXT NOT NULL,
   contract_json TEXT NOT NULL CHECK(json_valid(contract_json)),
-  state TEXT NOT NULL CHECK(state IN ('created','running','waiting_approval','completed','failed','cancelled','interrupted')),
+  contract_sha256 TEXT NOT NULL,
+  priority INTEGER NOT NULL DEFAULT 0,
+  state TEXT NOT NULL CHECK(state IN ('created','blocked','ready','claimed','running','waiting_approval','completed','failed','cancelled','interrupted')),
   child_run_id TEXT,
   child_workspace TEXT,
+  claim_token TEXT,
+  claim_expires_at TEXT,
+  attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count>=0),
   error TEXT,
   created_at TEXT NOT NULL,
   started_at TEXT,
   finished_at TEXT
 ) STRICT;
 CREATE INDEX idx_agent_tasks_parent ON agent_tasks(parent_run_id,created_at);
+CREATE INDEX idx_agent_tasks_session ON agent_tasks(owner_session_id,state,created_at);
+CREATE INDEX idx_agent_tasks_team_ready ON agent_tasks(team_id,state,priority DESC,created_at);
+CREATE TABLE agent_task_dependencies (
+  task_id TEXT NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
+  blocked_by_task_id TEXT NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(task_id,blocked_by_task_id),
+  CHECK(task_id<>blocked_by_task_id)
+) STRICT;
+CREATE INDEX idx_agent_task_dependencies_blocker ON agent_task_dependencies(blocked_by_task_id,task_id);
+CREATE TABLE agent_attempts (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
+  worker_id TEXT REFERENCES agent_workers(id) ON DELETE SET NULL,
+  ordinal INTEGER NOT NULL CHECK(ordinal>=1),
+  state TEXT NOT NULL CHECK(state IN ('created','running','suspended','completed','failed','cancelled','interrupted')),
+  claim_token TEXT NOT NULL UNIQUE,
+  child_run_id TEXT,
+  reservation_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(reservation_json)),
+  usage_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(usage_json)),
+  error TEXT,
+  created_at TEXT NOT NULL,
+  started_at TEXT,
+  finished_at TEXT,
+  UNIQUE(task_id,ordinal)
+) STRICT;
+CREATE INDEX idx_agent_attempts_task ON agent_attempts(task_id,ordinal);
+CREATE TABLE agent_checkpoints (
+  attempt_id TEXT PRIMARY KEY REFERENCES agent_attempts(id) ON DELETE CASCADE,
+  contract_sha256 TEXT NOT NULL,
+  child_session_id TEXT,
+  child_run_id TEXT,
+  transcript_cursor TEXT,
+  checkpoint_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(checkpoint_json)),
+  resumable INTEGER NOT NULL DEFAULT 0 CHECK(resumable IN (0,1)),
+  updated_at TEXT NOT NULL
+) STRICT;
+CREATE TABLE agent_budget_ledger (
+  id TEXT PRIMARY KEY,
+  team_id TEXT NOT NULL REFERENCES agent_teams(id) ON DELETE CASCADE,
+  task_id TEXT NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
+  attempt_id TEXT NOT NULL REFERENCES agent_attempts(id) ON DELETE CASCADE,
+  operation TEXT NOT NULL CHECK(operation IN ('reserve','settle','release')),
+  amount_json TEXT NOT NULL CHECK(json_valid(amount_json)),
+  idempotency_key TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL
+) STRICT;
+CREATE INDEX idx_agent_budget_attempt ON agent_budget_ledger(attempt_id,created_at);
+CREATE TABLE agent_approval_links (
+  id TEXT PRIMARY KEY,
+  attempt_id TEXT NOT NULL REFERENCES agent_attempts(id) ON DELETE CASCADE,
+  child_action_id TEXT NOT NULL,
+  parent_action_id TEXT,
+  action_sha256 TEXT NOT NULL,
+  contract_sha256 TEXT NOT NULL,
+  state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','approved','rejected','cancelled')),
+  payload_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(payload_json)),
+  created_at TEXT NOT NULL,
+  decided_at TEXT,
+  UNIQUE(attempt_id,child_action_id)
+) STRICT;
 CREATE TABLE agent_workspaces (
   task_id TEXT PRIMARY KEY REFERENCES agent_tasks(id) ON DELETE CASCADE,
+  worker_id TEXT REFERENCES agent_workers(id) ON DELETE SET NULL,
+  workspace_mode TEXT NOT NULL DEFAULT 'snapshot' CHECK(workspace_mode IN ('snapshot','worktree','shared_read')),
   path TEXT NOT NULL,
   source_path TEXT NOT NULL,
+  base_commit TEXT,
+  baseline_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(baseline_json)),
   retained INTEGER NOT NULL DEFAULT 0 CHECK(retained IN (0,1)),
   created_at TEXT NOT NULL,
   cleaned_at TEXT
@@ -622,6 +722,9 @@ CREATE TABLE agent_messages (
   id TEXT PRIMARY KEY,
   task_id TEXT NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
   parent_run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  team_id TEXT REFERENCES agent_teams(id) ON DELETE CASCADE,
+  worker_id TEXT REFERENCES agent_workers(id) ON DELETE SET NULL,
+  attempt_id TEXT REFERENCES agent_attempts(id) ON DELETE SET NULL,
   sender TEXT NOT NULL,
   recipient TEXT NOT NULL,
   sequence INTEGER NOT NULL CHECK(sequence>=1),
@@ -636,6 +739,9 @@ CREATE TABLE agent_mailbox (
   id TEXT PRIMARY KEY,
   task_id TEXT NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
   parent_run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  team_id TEXT REFERENCES agent_teams(id) ON DELETE CASCADE,
+  worker_id TEXT REFERENCES agent_workers(id) ON DELETE SET NULL,
+  attempt_id TEXT REFERENCES agent_attempts(id) ON DELETE SET NULL,
   sender TEXT NOT NULL CHECK(sender IN ('parent','child','system')),
   recipient TEXT NOT NULL CHECK(recipient IN ('parent','child')),
   message_kind TEXT NOT NULL CHECK(message_kind IN ('instruction','question','response','progress','artifact_offer','cancel')),
@@ -650,6 +756,7 @@ CREATE TABLE agent_mailbox (
 CREATE INDEX idx_agent_mailbox_delivery ON agent_mailbox(task_id,recipient,status,created_at);
 CREATE TABLE agent_outputs (
   task_id TEXT PRIMARY KEY REFERENCES agent_tasks(id) ON DELETE CASCADE,
+  attempt_id TEXT REFERENCES agent_attempts(id) ON DELETE SET NULL,
   state TEXT NOT NULL CHECK(state IN ('completed','failed','cancelled','interrupted')),
   output_json TEXT NOT NULL CHECK(json_valid(output_json)),
   verified INTEGER NOT NULL CHECK(verified IN (0,1)),

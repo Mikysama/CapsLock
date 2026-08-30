@@ -188,6 +188,7 @@ def agent_settings(raw: dict[str, object]) -> AgentSettings:
         background_enabled=boolean(raw.get("background_enabled", True)),
         mailbox_enabled=boolean(raw.get("mailbox_enabled", True)),
         message_ttl_seconds=int(raw.get("message_ttl_seconds", 3600)),
+        default_workspace_mode=str(raw.get("default_workspace_mode", "snapshot")),
     )
     if values.max_children < 1 or values.max_children > 32:
         raise ValueError("agents.max_children must be between 1 and 32")
@@ -199,6 +200,10 @@ def agent_settings(raw: dict[str, object]) -> AgentSettings:
         raise ValueError("agents.max_child_tool_rounds must be positive")
     if not 1 <= values.message_ttl_seconds <= 86_400:
         raise ValueError("agents.message_ttl_seconds must be between 1 and 86400")
+    if values.default_workspace_mode not in {"snapshot", "worktree", "shared_read"}:
+        raise ValueError(
+            "agents.default_workspace_mode must be snapshot, worktree, or shared_read"
+        )
     return values
 
 
