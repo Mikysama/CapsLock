@@ -374,9 +374,7 @@ def _capabilities(value: object) -> PluginCapabilities:
     templates = strings("process_templates")
     unsupported = sorted(set(templates) - PROCESS_TEMPLATES)
     if unsupported:
-        raise PluginValidationError(
-            f"unsupported process template: {unsupported[0]}"
-        )
+        raise PluginValidationError(f"unsupported process template: {unsupported[0]}")
     credentials = strings("credentials")
     for name in credentials:
         if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,127}", name):

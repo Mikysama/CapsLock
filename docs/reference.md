@@ -4,7 +4,7 @@
 
 ## 稳定契约
 
-CapsLock 2.7.6.1 支持 Linux/macOS 与 Python 3.12。当前 main 开发协议为 `permissions_version = 2`、`config_version = 10`、workspace schema 18、memory schema 5、portable archive 6、session export 6、JSONL schema 3、IDE Bridge protocol 1 和插件 manifest/protocol/grant 4。config v3-v9、workspace schema v6-v17 与 memory schema v3-v4 使用 backup-first 自动迁移。
+CapsLock 2.7.6.2 支持 Linux/macOS 与 Python 3.12。当前协议为 `permissions_version = 2`、`config_version = 13`、workspace schema 20、memory schema 6、portable archive 7、session export 7、JSONL schema 3、IDE Bridge protocol 1 和插件 manifest/protocol/grant 4。config v3-v12、workspace schema v6-v19 与 memory schema v3-v5 使用 backup-first 自动迁移。模型 Provider 只使用 OpenAI Responses API，不兼容 Chat Completions。
 
 公开运行入口为 `AgentSession.run_stream(RunRequest)`。CLI 通过应用查询面读取状态，不应依赖 repository 聚合对象。
 
@@ -69,7 +69,7 @@ Markdown 镜像位于 `.capslock/state/plans/<session-id>/<plan-id>.md`。数据
 
 `ToolContract`、`ToolDefinition` 和 `ResolvedToolPolicy` 声明输入/输出 JSON Schema、参数级只读/并发/破坏性属性、取消行为、capability、alias、intent tag、工具组与结果限制。`ToolCatalog` 保留动态发现的 last-known-good snapshot，单个无效 schema 只隔离对应工具；`ToolExecutor` 固定执行 normalize、validate、authorize、execute、输出校验和 middleware。连续的只读且并发安全调用使用有界并发执行，额度 reservation 与计数原子完成，checkpoint 仍按模型 tool-call 顺序写入。
 
-`ToolOutcome.execution_state` 为 `not_started | committed | unknown`，旧 `executed` 保持兼容。只有确定未执行的名称或参数错误可进行一次模型修复；运行时不改写路径、命令、URL或业务值，第二次失败返回 `argument_repair_exhausted`。默认 `selection_mode=shadow` 仍发送完整工具集合并记录候选召回；`full` 可回滚，`filtered` 需通过评测门槛后启用。provider 只有显式设置 `strict_tool_calls=true` 才接收 strict schema。
+`ToolOutcome.execution_state` 为 `not_started | committed | unknown`，旧 `executed` 保持兼容。只有确定未执行的名称或参数错误可进行一次模型修复；运行时不改写路径、命令、URL或业务值，第二次失败返回 `argument_repair_exhausted`。默认 `selection_mode=shadow` 仍发送完整工具集合并记录候选召回；`full` 可回滚，`filtered` 需通过评测门槛后启用。携带工具的请求要求 provider 显式设置 `strict_tool_calls=true`；摘要、Memory、Shell 分类和子 Agent 结果优先选择 `json_schema_outputs=true` 的 provider。若没有兼容候选，结构化正文会降级为由同一权威 Schema 生成的 Prompt 约束；返回后仍执行本地 Schema 与业务语义校验。严格工具调用能力缺失时仍返回 `provider_capability_unavailable`。
 
 超过 16 KiB 的结果写入 `.capslock/state/artifacts/sha256/`，单项最多 5 MiB。模型只收到脱敏预览和 artifact ID；`read_tool_artifact` 只能分块读取当前 session 的 artifact，session 删除会级联清理记录与文件。消息、Tool Result 与文本 Artifact 同时写入 session-scoped episodic FTS；每轮自动回填最多 5 条/4 KiB，`search_session_history` 可显式检索最多 20 条。隔离的可疑 Artifact 不索引正文。
 
@@ -196,9 +196,11 @@ capslock input list
 capslock input answer <REQUEST-ID> --answers-json <JSON>
 capslock input cancel <REQUEST-ID>
 capslock init [--non-interactive ...] [--update] [--check-provider]
+  [--strict-tool-calls] [--json-schema-outputs]
 capslock config validate|migrate
 capslock credentials status|set|delete
 capslock backup create|list|verify|restore
+capslock database compact --scope workspace|memory|all [--yes]
 capslock export <ARCHIVE> [--include-global-memory]
 capslock import <ARCHIVE> [--yes]
 capslock plugin|plugins install|upgrade <PATH> [--yes]
@@ -262,6 +264,7 @@ capslock trace prune [--days N]
 ToolLoop 每个模型或工具阶段写 `run_steps`。只有 completed 且带 checkpoint 的步骤可用于恢复。`resume` 创建新的 work item 和 run，记录 `parent_run_id` 与 `resume_from_step_id`，不会修改失败 run 的历史。空回答、模型错误或轮次耗尽会将当前模型 step 标为 failed。
 
 `AgentSession.run_stream(RunRequest)` 是唯一 Agent 执行 API。每次流只产生一个终止事件；同一 session 串行执行，调用方取消流时，内部执行 task 也会被取消并等待资源清理。
+`RunRequest.response_format` 可携带 strict Provider JSON Schema，并会在 complete、streaming、工具循环和暂停恢复链路中保持不变；普通用户请求留空，子 Agent Runtime 根据任务契约设置。
 
 ## 多 Agent 契约
 
@@ -271,7 +274,7 @@ worker workspace 支持 `snapshot`、`worktree`、`shared_read`。前两者记�
 
 team task 只有在全部依赖成功后才从 blocked 转为 ready，同一 worker 同时只运行一个任务；claim token 与 attempt ordinal 防止重复领取。每次 attempt 记录预算 reserve/settle/release ledger、child approval link 和 checkpoint。恢复必须复用原 attempt 与 child session/workspace，并重新验证 contract digest；只有显式 resumable checkpoint 可以恢复，未知副作用不得自动重放。子快照排除 `.git`、`.capslock`、环境文件和符号链接，并使用自己的 workspace/memory 数据库。后台任务通过 `agent_mailbox` 交换 instruction/question/response/progress/artifact offer/cancel，team message 可点对点或广播；消息先脱敏并限制为 32 KiB，读取时复验 SHA-256，状态为 queued/delivered/acknowledged/expired，正文始终视为不可信数据。`AgentOutputVerifier` 校验输出对象、allowlist 路径、必需检查、文件大小和 SHA-256；未通过的输出只返回失败诊断。
 
-workspace schema 18 使用 Agent team/worker/task/dependency/attempt/checkpoint/budget/approval/workspace/mailbox、performance span、Tool invocation、input request、session lineage、active compaction、context snapshot、episodic document、session worktree 与 Plan Mode 表保存可恢复状态、审计与验证结果，并为压缩记录 summary-policy digest、结果 token 与质量状态。portable archive 默认不包含 artifact 正文，也不包含可重建的 episodic 与摘要分段索引。
+workspace schema 20 使用 Agent team/worker/task/dependency/attempt/checkpoint/budget/approval/workspace/mailbox、performance span、Tool invocation、input request、session lineage、active compaction、episodic document、session worktree 与 Plan Mode 表保存可恢复状态、审计与验证结果。Agent capability 以校验过 digest 的 task contract 为权威来源，citation 以终态 run event 为权威来源。portable archive 默认不包含 artifact 正文，也不包含可重建的 episodic 与摘要分段索引。
 
 ## 记忆契约
 
@@ -295,9 +298,9 @@ workspace schema 18 使用 Agent team/worker/task/dependency/attempt/checkpoint/
 
 ## 数据库与布局
 
-工作区数据库使用 application ID `0x434C4B32`、schema 18，记忆数据库使用 `0x434C4D32`、schema 5。两者开启 foreign keys、WAL 和 5 秒 busy timeout；记忆库额外开启 secure delete 并设置文件权限 `0600`。workspace v18 增加持久 Agent team、任务图和恢复协议，memory v5 增加验证与生命周期字段；迁移均先 checkpoint 和备份。
+工作区数据库使用 application ID `0x434C4B32`、schema 20，记忆数据库使用 `0x434C4D32`、schema 6。两者开启 foreign keys、WAL 和 5 秒 busy timeout；记忆库额外开启 secure delete 并设置文件权限 `0600`。迁移均先 checkpoint 和备份，失败恢复原数据库；`VACUUM` 只由显式 `database compact` 命令执行。
 
-应用先读取 application ID 和 schema version，确认是当前格式或可迁移格式后才切换 WAL。workspace schema 为 18，memory schema 为 5；其他 application ID 或 schema 只报错，不修改原数据库。episodic 索引属于派生数据，导入、branch 和 rewind 后可幂等重建。
+应用先读取 application ID 和 schema version，确认是当前格式或可迁移格式后才切换 WAL。workspace schema 为 20，memory schema 为 6；其他 application ID 或 schema 只报错，不修改原数据库。episodic 索引属于派生数据，导入、branch 和 rewind 后可幂等重建。
 
 portable import 使用 archive ID 幂等记录。相同 ID 与内容跳过，同 ID 不同内容确定性重映射并重写引用。running run 转为 interrupted，approved/running action 转为 pending；导入的历史副作用不能在目标工作区执行 undo。
 

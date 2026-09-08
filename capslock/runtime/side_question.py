@@ -18,9 +18,7 @@ class _MetadataOnlyJournal:
     async def create_step(self, run_id: str, kind: RunStepKind) -> Any:
         return await self._journal.create_step(run_id, kind)
 
-    async def update_tool_invocation(
-        self, identifier: str, **values: Any
-    ) -> None:
+    async def update_tool_invocation(self, identifier: str, **values: Any) -> None:
         await self._journal.update_tool_invocation(identifier, **values)
 
     async def finish_step(
@@ -51,8 +49,12 @@ class _MetadataOnlyJournal:
         ok: bool,
         summary: str,
         duration_ms: int,
+        *,
+        invocation_id: str,
     ) -> None:
-        await self._journal.record_tool_call(run_id, name, {}, ok, "", duration_ms)
+        await self._journal.record_tool_call(
+            run_id, name, {}, ok, "", duration_ms, invocation_id=invocation_id
+        )
 
     async def store_result_replacement(self, **values: Any) -> None:
         await self._journal.store_result_replacement(

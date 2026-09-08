@@ -25,9 +25,11 @@ from ..domain import (
     ModelErrorCode,
     ModelRole,
     ModelRoutingError,
+    ProviderCapabilityUnavailable,
     RunLimits,
 )
 from ..ports import ModelAuditPort
+from ..structured_output import StrictSchemaError, prompt_schema_messages
 from ..models import SELECTABLE_MODELS
 from .model import (
     ChatModel,
@@ -63,11 +65,12 @@ class RoutePlanner:
         messages: list[dict[str, object]],
         tools: list[dict[str, object]],
         max_output_tokens: int | None = None,
+        response_format: dict[str, object] | None = None,
     ) -> RoutePlan:
         run_id = self.router._required_run()
         role = self.router._role.get()
         candidates, exclusions = self.router._candidates(
-            role, messages, tools, max_output_tokens
+            role, messages, tools, max_output_tokens, response_format
         )
         if not candidates:
             await self.router._record_failed_route(run_id, role, exclusions)
@@ -239,13 +242,20 @@ class ModelRouter:
         messages: list[dict[str, object]],
         tools: list[dict[str, object]],
         max_output_tokens: int | None = None,
+        response_format: dict[str, object] | None = None,
     ) -> ModelResponse:
-        plan = await self.planner.plan(messages, tools, max_output_tokens)
+        plan = await self.planner.plan(
+            messages, tools, max_output_tokens, response_format
+        )
         run_id, role = plan.run_id, plan.role
         previous: str | None = None
         last_error: Exception | None = None
         for configured_profile in plan.candidates:
             profile = _model_override(configured_profile, model, role)
+            provider = self.providers[profile.provider]
+            request_messages, request_format = _structured_output_request(
+                provider, messages, response_format
+            )
             effective_profile = replace(
                 profile,
                 max_output_tokens=min(
@@ -262,20 +272,24 @@ class ModelRouter:
                 continue
             decision_id, client = selection
             for attempt in range(1, self.retries + 2):
-                await self.budget_gate.check(run_id, effective_profile, messages, tools)
+                await self.budget_gate.check(
+                    run_id, effective_profile, request_messages, tools
+                )
                 call_id, started = await self.attempt_executor.start(
                     run_id, decision_id, role, profile, attempt, previous
                 )
                 try:
                     arguments: dict[str, object] = {
                         "model": profile.model,
-                        "messages": messages,
+                        "messages": request_messages,
                         "tools": tools,
                     }
                     if max_output_tokens is not None:
                         arguments["max_output_tokens"] = (
                             effective_profile.max_output_tokens
                         )
+                    if request_format is not None:
+                        arguments["response_format"] = request_format
                     response = await client.complete(**arguments)
                 except Exception as exc:
                     last_error = exc
@@ -311,13 +325,20 @@ class ModelRouter:
         messages: list[dict[str, object]],
         tools: list[dict[str, object]],
         max_output_tokens: int | None = None,
+        response_format: dict[str, object] | None = None,
     ) -> AsyncIterator[ModelDelta]:
-        plan = await self.planner.plan(messages, tools, max_output_tokens)
+        plan = await self.planner.plan(
+            messages, tools, max_output_tokens, response_format
+        )
         run_id, role = plan.run_id, plan.role
         previous: str | None = None
         last_error: Exception | None = None
         for configured_profile in plan.candidates:
             profile = _model_override(configured_profile, model, role)
+            provider = self.providers[profile.provider]
+            request_messages, request_format = _structured_output_request(
+                provider, messages, response_format
+            )
             effective_profile = replace(
                 profile,
                 max_output_tokens=min(
@@ -338,7 +359,9 @@ class ModelRouter:
                 previous = profile.name
                 continue
             for attempt in range(1, self.retries + 2):
-                await self.budget_gate.check(run_id, effective_profile, messages, tools)
+                await self.budget_gate.check(
+                    run_id, effective_profile, request_messages, tools
+                )
                 call_id, started = await self.attempt_executor.start(
                     run_id, decision_id, role, profile, attempt, previous
                 )
@@ -346,13 +369,15 @@ class ModelRouter:
                 try:
                     arguments: dict[str, object] = {
                         "model": profile.model,
-                        "messages": messages,
+                        "messages": request_messages,
                         "tools": tools,
                     }
                     if max_output_tokens is not None:
                         arguments["max_output_tokens"] = (
                             effective_profile.max_output_tokens
                         )
+                    if request_format is not None:
+                        arguments["response_format"] = request_format
                     async for delta in client.stream_complete(**arguments):
                         emitted = emitted or bool(
                             delta.content
@@ -407,10 +432,10 @@ class ModelRouter:
         messages: list[dict[str, object]],
         tools: list[dict[str, object]],
         max_output_tokens: int | None = None,
+        response_format: dict[str, object] | None = None,
     ) -> tuple[list[ModelProfileSettings], list[dict[str, str]]]:
         names = getattr(self.routing, role.value)
-        estimated = _estimate_tokens((messages, tools))
-        candidates, exclusions = [], []
+        candidates, prompt_fallbacks, exclusions = [], [], []
         override = self._run_limits.get()
         finite_usd_budget = bool(
             self.budget.max_run_usd
@@ -427,6 +452,10 @@ class ModelRouter:
                 ),
             )
             provider = self.providers[profile.provider]
+            request_messages, request_format = _structured_output_request(
+                provider, messages, response_format
+            )
+            estimated = _estimate_tokens((request_messages, tools, request_format))
             reason = None
             if estimated + profile.max_output_tokens > profile.context_window:
                 reason = "context_window"
@@ -436,11 +465,22 @@ class ModelRouter:
                 profile.input_cost_per_million or profile.output_cost_per_million
             ):
                 reason = "price_required"
+            elif tools and not provider.strict_tool_calls:
+                reason = "strict_tool_calls_unsupported"
+            elif (
+                response_format is not None
+                and response_format.get("type") == "json_schema"
+                and not provider.json_schema_outputs
+            ):
+                prompt_fallbacks.append(profile)
+                continue
             if reason:
                 exclusions.append({"profile": name, "reason": reason})
             else:
                 candidates.append(profile)
-        return candidates, exclusions
+        # Prefer provider-enforced structured output regardless of route ordering,
+        # then retain the configured order among prompt-fallback providers.
+        return candidates + prompt_fallbacks, exclusions
 
     async def _budget_gate(
         self,
@@ -610,6 +650,13 @@ class ModelRouter:
             raise ModelDataPolicyMismatch(
                 "no model satisfies the configured data policy"
             )
+        if exclusions and any(
+            item.get("reason") == "strict_tool_calls_unsupported" for item in exclusions
+        ):
+            raise ProviderCapabilityUnavailable(
+                "no model satisfies the required provider capabilities: "
+                + json.dumps(exclusions, ensure_ascii=False)
+            )
         raise ModelRoutingError(
             "no eligible model profile: " + json.dumps(exclusions, ensure_ascii=False)
         )
@@ -630,6 +677,7 @@ class _RouterModelRunSession(ModelRunSession):
         messages: list[dict[str, object]],
         tools: list[dict[str, object]],
         max_output_tokens: int | None = None,
+        response_format: dict[str, object] | None = None,
     ) -> ModelResponse:
         with self.router._bind_context(self.context):
             return await self.router.complete(
@@ -637,6 +685,7 @@ class _RouterModelRunSession(ModelRunSession):
                 messages=messages,
                 tools=tools,
                 max_output_tokens=max_output_tokens,
+                response_format=response_format,
             )
 
     async def stream_complete(
@@ -646,6 +695,7 @@ class _RouterModelRunSession(ModelRunSession):
         messages: list[dict[str, object]],
         tools: list[dict[str, object]],
         max_output_tokens: int | None = None,
+        response_format: dict[str, object] | None = None,
     ) -> AsyncIterator[ModelDelta]:
         with self.router._bind_context(self.context):
             async for delta in self.router.stream_complete(
@@ -653,6 +703,7 @@ class _RouterModelRunSession(ModelRunSession):
                 messages=messages,
                 tools=tools,
                 max_output_tokens=max_output_tokens,
+                response_format=response_format,
             ):
                 yield delta
 
@@ -675,6 +726,20 @@ class _RouterModelRunSession(ModelRunSession):
 def _estimate_tokens(value: object) -> int:
     payload = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
     return max(1, math.ceil(len(payload.encode("utf-8")) / 4))
+
+
+def _structured_output_request(
+    provider: ProviderSettings,
+    messages: list[dict[str, object]],
+    response_format: dict[str, object] | None,
+) -> tuple[list[dict[str, object]], dict[str, object] | None]:
+    if (
+        response_format is not None
+        and response_format.get("type") == "json_schema"
+        and not provider.json_schema_outputs
+    ):
+        return prompt_schema_messages(messages, response_format), None
+    return messages, response_format
 
 
 def _model_override(
@@ -713,6 +778,8 @@ def _elapsed(started: float) -> int:
 def _classify_error(exc: Exception) -> tuple[ModelErrorCode, bool]:
     status = getattr(exc, "status_code", None)
     name = type(exc).__name__.casefold()
+    if isinstance(exc, StrictSchemaError):
+        return ModelErrorCode.INVALID_REQUEST, False
     if status == 429 or "ratelimit" in name or "rate_limit" in name:
         return ModelErrorCode.RATE_LIMITED, True
     if status in {401, 403} or "authentication" in name:

@@ -30,7 +30,7 @@ def read_config_document(path: Path) -> dict[str, object]:
 
 def load_config_document(path: Path) -> dict[str, object]:
     document = read_config_document(path)
-    if document.get("config_version") in {3, 4, 5, 6, 7, 8, 9}:
+    if document.get("config_version") in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12}:
         _upgrade_config(path)
         document = read_config_document(path)
     errors = [
@@ -43,18 +43,27 @@ def load_config_document(path: Path) -> dict[str, object]:
 
 
 def _upgrade_config(path: Path) -> None:
-    """Backup and atomically upgrade a v3-v9 document without losing comments."""
+    """Backup and atomically upgrade a v3-v12 document without losing comments."""
     import tomlkit
 
     source = path.read_text(encoding="utf-8")
     document = tomlkit.parse(source)
     source_version = document.get("config_version")
-    if source_version not in {3, 4, 5, 6, 7, 8, 9}:
+    if source_version not in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12}:
         return
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     backup = path.with_name(f"{path.name}.v{source_version}-{timestamp}.bak")
     backup.write_text(source, encoding="utf-8")
-    document["config_version"] = 10
+    document["config_version"] = 13
+    document.setdefault(
+        "storage",
+        {
+            "maintenance_enabled": True,
+            "operation_retention_days": 30,
+            "audit_retention_days": 180,
+            "maintenance_interval_hours": 24,
+        },
+    )
     memory = document.setdefault("memory", {})
     if isinstance(memory, dict):
         old_enabled = bool(memory.pop("enabled", True))
@@ -81,7 +90,9 @@ def _upgrade_config(path: Path) -> None:
     if isinstance(providers, dict):
         for provider in providers.values():
             if isinstance(provider, dict):
+                provider["kind"] = "openai_responses"
                 provider.setdefault("strict_tool_calls", False)
+                provider.setdefault("json_schema_outputs", False)
     document.setdefault(
         "shell",
         {
@@ -152,7 +163,7 @@ def _upgrade_config(path: Path) -> None:
     temporary: str | None = None
     try:
         with tempfile.NamedTemporaryFile(
-            "w", encoding="utf-8", dir=path.parent, prefix=".config-v10-", delete=False
+            "w", encoding="utf-8", dir=path.parent, prefix=".config-v12-", delete=False
         ) as handle:
             temporary = handle.name
             handle.write(tomlkit.dumps(document))

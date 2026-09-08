@@ -95,6 +95,8 @@ def build_parser() -> argparse.ArgumentParser:
     initialize_parser.add_argument("--disable-memory", action="store_true")
     initialize_parser.add_argument("--update", action="store_true")
     initialize_parser.add_argument("--check-provider", action="store_true")
+    initialize_parser.add_argument("--strict-tool-calls", action="store_true")
+    initialize_parser.add_argument("--json-schema-outputs", action="store_true")
     config_parser = subparsers.add_parser("config", help="Validate configuration")
     config_commands = config_parser.add_subparsers(dest="config_command")
     validate = config_commands.add_parser("validate")
@@ -119,6 +121,13 @@ def build_parser() -> argparse.ArgumentParser:
     backup_restore = backup_commands.add_parser("restore")
     backup_restore.add_argument("archive", type=Path)
     backup_restore.add_argument("--yes", action="store_true")
+    database = subparsers.add_parser("database", help="Maintain SQLite databases")
+    database_commands = database.add_subparsers(dest="database_command")
+    compact = database_commands.add_parser("compact", help="Reclaim unused pages")
+    compact.add_argument(
+        "--scope", choices=("workspace", "memory", "all"), required=True
+    )
+    compact.add_argument("--yes", action="store_true")
     portable_export = subparsers.add_parser(
         "export", help="Create a portable data export"
     )
@@ -230,6 +239,10 @@ async def async_main(
             from .lifecycle import backup_command
 
             return await backup_command(output, layout, args)
+        if args.command == "database":
+            from .lifecycle import database_command
+
+            return await database_command(output, layout, args)
         if args.command == "export":
             from .lifecycle import export_lifecycle
 

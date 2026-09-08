@@ -20,6 +20,7 @@ class ModelErrorCode(StrEnum):
     BUDGET_EXCEEDED = "model_budget_exceeded"
     AUTHENTICATION = "model_authentication_failed"
     INVALID_REQUEST = "model_invalid_request"
+    CAPABILITY_UNAVAILABLE = "provider_capability_unavailable"
 
 
 @dataclass(frozen=True)
@@ -47,3 +48,7 @@ class ModelBudgetExceeded(ModelRoutingError):
 
 class ModelDataPolicyMismatch(ModelRoutingError):
     code = ModelErrorCode.DATA_POLICY_MISMATCH
+
+
+class ProviderCapabilityUnavailable(ModelRoutingError):
+    code = ModelErrorCode.CAPABILITY_UNAVAILABLE

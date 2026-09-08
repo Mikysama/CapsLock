@@ -208,26 +208,26 @@ class EvaluationRunner:
         try:
             request: dict[str, Any] = {
                 "model": model,
-                "messages": [
+                "input": [
                     {
                         "role": "system",
                         "content": "Answer the evaluation question with only the requested token.",
                     },
                     {"role": "user", "content": _live_prompt(task)},
                 ],
-                "max_tokens": 16,
+                "max_output_tokens": 64,
                 "temperature": 0,
             }
             request.update(_reasoning_request_options(provider, model))
-            response = await client.chat.completions.create(**request)
+            response = await client.responses.create(**request)
         finally:
             await client.close()
-        message = response.choices[0].message.content or ""
+        message = response.output_text or ""
         usage = response.usage
         return (
             _answer_matches(message, expected),
-            int(usage.prompt_tokens if usage else 0),
-            int(usage.completion_tokens if usage else 0),
+            int(usage.input_tokens if usage else 0),
+            int(usage.output_tokens if usage else 0),
         )
 
     def _manifest(
@@ -332,7 +332,7 @@ def _reasoning_request_options(provider: str, model: str) -> dict[str, Any]:
     DeepSeek reasoning models otherwise consume the small probe budget without
     producing ``message.content``. Providers can opt in explicitly with
     ``<PROVIDER>_DISABLE_THINKING=1``; the DeepSeek default covers the bundled
-    CapsLock endpoint while leaving ordinary OpenAI-compatible providers
+    CapsLock endpoint while leaving other OpenAI Responses providers
     untouched.
     """
     configured = os.environ.get(f"{provider.upper()}_DISABLE_THINKING", "")

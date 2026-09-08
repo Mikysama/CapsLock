@@ -39,8 +39,10 @@ class PromptInjectionAssessment:
 
 
 def assess_prompt_injection(value: object) -> PromptInjectionAssessment:
-    text = value if isinstance(value, str) else json.dumps(
-        value, ensure_ascii=False, default=str, sort_keys=True
+    text = (
+        value
+        if isinstance(value, str)
+        else json.dumps(value, ensure_ascii=False, default=str, sort_keys=True)
     )
     signals = tuple(
         name for name, pattern in _INJECTION_SIGNALS.items() if pattern.search(text)

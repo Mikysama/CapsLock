@@ -110,19 +110,18 @@ class ToolInvocationJournalRepository:
         delivery_status: str,
         replacement: dict[str, Any],
     ) -> None:
-        await self.execute(
-            """INSERT INTO tool_result_replacements
-               (tool_call_id,session_id,invocation_id,delivery_status,replacement_json,created_at)
-               VALUES(?,?,?,?,?,?) ON CONFLICT(tool_call_id) DO NOTHING""",
+        updated = await self.execute(
+            """UPDATE tool_invocations SET delivered_result_json=?
+               WHERE id=? AND session_id=? AND tool_call_id=?""",
             (
-                tool_call_id,
-                session_id,
-                invocation_id,
-                delivery_status,
                 json.dumps(replacement, ensure_ascii=False),
-                now(),
+                invocation_id,
+                session_id,
+                tool_call_id,
             ),
         )
+        if not updated:
+            raise ValueError("tool result delivery has no matching invocation")
 
     async def replace_tool_delivery(
         self,
@@ -316,12 +315,24 @@ class ToolInvocationJournalRepository:
         self, identifier: str, *, kind: str, checkpoint: dict[str, Any]
     ) -> None:
         status = "waiting_approval" if kind == "approval" else "waiting_input"
-        updated = await self.execute(
-            "UPDATE run_steps SET status=?,checkpoint_json=? WHERE id=? AND status='running'",
-            (status, json.dumps(checkpoint, ensure_ascii=False), identifier),
-        )
-        if not updated:
-            raise ValueError("run step is not pausable")
+        async with self.database.transaction() as connection:
+            updated = await connection.execute(
+                "UPDATE run_steps SET status=?,checkpoint_json=? WHERE id=? AND status='running'",
+                (status, json.dumps(checkpoint, ensure_ascii=False), identifier),
+            )
+            if not updated.rowcount:
+                raise ValueError("run step is not pausable")
+            await connection.execute(
+                """UPDATE run_steps AS previous SET checkpoint_json=NULL
+                   WHERE previous.run_id=(SELECT run_id FROM run_steps WHERE id=?)
+                     AND previous.id<>? AND previous.checkpoint_json IS NOT NULL
+                     AND previous.status NOT IN ('waiting_approval','waiting_input')
+                     AND NOT EXISTS (
+                       SELECT 1 FROM runs r WHERE r.resume_from_step_id=previous.id
+                     )
+                     AND previous.ordinal<(SELECT ordinal FROM run_steps WHERE id=?)""",
+                (identifier, identifier, identifier),
+            )
 
     async def update_step_checkpoint(
         self, identifier: str, checkpoint: dict[str, Any]
@@ -342,11 +353,16 @@ class ToolInvocationJournalRepository:
         ok: bool,
         summary: str,
         duration_ms: int,
+        *,
+        invocation_id: str,
     ) -> None:
         await self.execute(
-            "INSERT INTO tool_calls(run_id,name,arguments_json,ok,result_summary,duration_ms) VALUES(?,?,?,?,?,?)",
+            """INSERT INTO tool_calls(
+                 run_id,invocation_id,name,arguments_json,ok,result_summary,duration_ms
+               ) VALUES(?,?,?,?,?,?,?)""",
             (
                 run_id,
+                invocation_id,
                 name,
                 json.dumps(arguments, ensure_ascii=False),
                 int(ok),
@@ -354,13 +370,3 @@ class ToolInvocationJournalRepository:
                 duration_ms,
             ),
         )
-
-    async def record_citations(self, run_id: str, citations: list[Any]) -> None:
-        async with self.database.transaction() as connection:
-            await connection.executemany(
-                "INSERT INTO citations(run_id,citation_id,path,start_line,end_line) VALUES(?,?,?,?,?)",
-                [
-                    (run_id, item.id, str(item.path), item.start_line, item.end_line)
-                    for item in citations
-                ],
-            )

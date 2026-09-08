@@ -83,6 +83,26 @@ async def import_lifecycle(
     return 0
 
 
+async def database_command(console: Console, layout: ProjectLayout, args) -> int:
+    if args.database_command != "compact":
+        raise ValueError("unknown database command")
+    if not args.yes:
+        answer = await asyncio.to_thread(
+            console.input,
+            "Compact the selected database(s) after creating a backup? [y/N] ",
+        )
+        if answer.strip().casefold() not in {"y", "yes"}:
+            return 0
+    report = await asyncio.to_thread(LifecycleService(layout).compact, args.scope)
+    console.print(f"[success]Recovery backup:[/] {report['backup']}")
+    for item in report["databases"]:
+        console.print(
+            f"{item['scope']}: {item['before_bytes']} -> {item['after_bytes']} bytes "
+            f"(reclaimed {item['reclaimed_bytes']})"
+        )
+    return 0
+
+
 def _manifest(console: Console, manifest: dict[str, object]) -> None:
     console.print(
         f"[success]Valid {manifest.get('format')} v{manifest.get('version')}[/] "

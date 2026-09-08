@@ -998,6 +998,9 @@ def _verification_requirements(value: Any) -> VerificationRequirement:
         raise ValueError("verification required_checks must be an array of strings")
     if not isinstance(output_schema, dict):
         raise ValueError("verification output_schema must be an object")
+    from ...structured_output import child_agent_result_schema
+
+    child_agent_result_schema(output_schema)
     return VerificationRequirement(
         output_schema=output_schema,
         required_paths=tuple(required_paths),

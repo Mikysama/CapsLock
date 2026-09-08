@@ -11,6 +11,8 @@ from pathlib import Path
 
 import pytest
 
+from capslock.structured_output import child_agent_response_format
+
 from capslock.collaboration import (
     AgentOutputVerifier,
     AgentTaskContract,
@@ -365,7 +367,7 @@ def test_output_verifier_checks_allowlist_and_digest(tmp_path: Path) -> None:
         WorkspaceSnapshot(source, child),
         {
             "summary": "done",
-            "evidence": [{"path": "reports/result.md"}],
+            "evidence": [{"path": "reports/result.md", "sha256": None}],
             "artifacts": [
                 {
                     "path": "reports/result.md",
@@ -373,6 +375,7 @@ def test_output_verifier_checks_allowlist_and_digest(tmp_path: Path) -> None:
                 }
             ],
             "checks": [{"name": "pytest", "status": "passed"}],
+            "memory_proposals": None,
         },
     )
     assert output.verified is True
@@ -384,10 +387,31 @@ def test_output_verifier_checks_allowlist_and_digest(tmp_path: Path) -> None:
             WorkspaceSnapshot(source, child),
             {
                 "summary": "done",
+                "evidence": [],
                 "artifacts": [{"path": "reports/result.md", "sha256": "0" * 64}],
                 "checks": [{"name": "pytest", "status": "passed"}],
+                "memory_proposals": None,
             },
         )
+
+
+def test_child_agent_output_schema_is_provider_strict() -> None:
+    response_format = child_agent_response_format(
+        {
+            "type": "object",
+            "properties": {"result_code": {"type": "string"}},
+            "required": ["result_code"],
+            "additionalProperties": False,
+        }
+    )
+    definition = response_format["json_schema"]
+    schema = definition["schema"]
+    assert definition["strict"] is True
+    assert definition["name"] == "child_agent_result"
+    assert {"summary", "evidence", "artifacts", "checks", "result_code"} <= set(
+        schema["required"]
+    )
+    assert schema["additionalProperties"] is False
 
 
 def test_bounded_scheduler_preserves_contract_order_and_isolates_failure(
@@ -418,7 +442,13 @@ def test_bounded_scheduler_preserves_contract_order_and_isolates_failure(
                         await asyncio.wait_for(paired.wait(), timeout=1)
                     if contract.objective == "bad":
                         raise RuntimeError("isolated failure")
-                    return {"summary": contract.objective}
+                    return {
+                        "summary": contract.objective,
+                        "evidence": [],
+                        "artifacts": [],
+                        "checks": [],
+                        "memory_proposals": None,
+                    }
                 finally:
                     active -= 1
 
@@ -474,7 +504,13 @@ def test_cancel_queued_child_does_not_cancel_siblings(tmp_path: Path) -> None:
             async def runner(contract, _snapshot):
                 if contract.objective == "first":
                     await release.wait()
-                return {"summary": contract.objective}
+                return {
+                    "summary": contract.objective,
+                    "evidence": [],
+                    "artifacts": [],
+                    "checks": [],
+                    "memory_proposals": None,
+                }
 
             service = CollaborationService(
                 workspace_manager=AgentWorkspaceManager(workspace),
@@ -510,14 +546,13 @@ def test_fresh_workspace_contains_collaboration_tables(tmp_path: Path) -> None:
         )
         try:
             version = await repositories.database.fetch_one("PRAGMA user_version")
-            assert int(version[0]) == 18
+            assert int(version[0]) == 20
             tables = await repositories.database.fetch_all(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'agent_%'"
             )
             assert {str(row[0]) for row in tables} == {
                 "agent_tasks",
                 "agent_workspaces",
-                "agent_capabilities",
                 "agent_messages",
                 "agent_mailbox",
                 "agent_outputs",
@@ -545,7 +580,6 @@ def test_non_current_collaboration_schema_is_rejected(tmp_path: Path) -> None:
         for table in (
             "agent_outputs",
             "agent_messages",
-            "agent_capabilities",
             "agent_workspaces",
             "agent_tasks",
         ):
@@ -608,7 +642,13 @@ def test_concurrency_limit_is_shared_across_delegate_calls(tmp_path: Path) -> No
                     first_started.set()
                     await release.wait()
                 active -= 1
-                return {"summary": contract.objective}
+                return {
+                    "summary": contract.objective,
+                    "evidence": [],
+                    "artifacts": [],
+                    "checks": [],
+                    "memory_proposals": None,
+                }
 
             service = CollaborationService(
                 workspace_manager=AgentWorkspaceManager(workspace),
@@ -649,6 +689,10 @@ def test_background_agent_usage_is_added_to_parent_session_statistics(
             async def runner(_contract, _snapshot):
                 return {
                     "summary": "done",
+                    "evidence": [],
+                    "artifacts": [],
+                    "checks": [],
+                    "memory_proposals": None,
                     "_usage": {
                         "input_tokens": 7,
                         "output_tokens": 3,
@@ -696,7 +740,13 @@ def test_session_owner_can_control_background_task_across_runs(tmp_path: Path) -
 
             async def runner(_contract, _snapshot):
                 await release.wait()
-                return {"summary": "done"}
+                return {
+                    "summary": "done",
+                    "evidence": [],
+                    "artifacts": [],
+                    "checks": [],
+                    "memory_proposals": None,
+                }
 
             service = CollaborationService(
                 workspace_manager=AgentWorkspaceManager(workspace),
@@ -842,7 +892,14 @@ def test_interrupted_agent_resumes_same_attempt_and_child_session(
         async def resume_interrupted(self, contract, _snapshot):
             self.resumed.append(contract.task_id)
             await self.release.wait()
-            return {"summary": "resumed", "_child_run_id": "child-run-2"}
+            return {
+                "summary": "resumed",
+                "evidence": [],
+                "artifacts": [],
+                "checks": [],
+                "memory_proposals": None,
+                "_child_run_id": "child-run-2",
+            }
 
     async def scenario() -> None:
         workspace = tmp_path / "project"
@@ -973,12 +1030,15 @@ def test_persistent_worker_persists_artifact_baseline_between_followups(
                 (snapshot.root / "report.md").write_text(content, encoding="utf-8")
                 return {
                     "summary": content,
+                    "evidence": [],
                     "artifacts": [
                         {
                             "path": "report.md",
                             "sha256": hashlib.sha256(content.encode()).hexdigest(),
                         }
                     ],
+                    "checks": [],
+                    "memory_proposals": None,
                 }
 
             service = CollaborationService(

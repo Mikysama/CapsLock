@@ -264,7 +264,16 @@ def test_candidate_extraction_review_and_adoption(
                                     "type": "preference",
                                     "scope": "workspace",
                                     "confidence": 0.95,
-                                    "direct": True,
+                                    "durability": "durable",
+                                    "sources": [
+                                        {
+                                            "kind": "message",
+                                            "id": "run:run:user",
+                                            "quote": "I prefer tabs",
+                                            "direct": True,
+                                            "verified": False,
+                                        }
+                                    ],
                                 }
                             ]
                         }

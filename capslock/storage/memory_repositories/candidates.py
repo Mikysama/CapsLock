@@ -18,12 +18,8 @@ from .core import Repository, timestamp
 
 
 _SELECT_CANDIDATE = """SELECT c.*,
- (SELECT message_id FROM memory_candidate_sources WHERE candidate_id=c.id ORDER BY id LIMIT 1) AS source_message_id,
- (SELECT evidence_id FROM memory_candidate_sources WHERE candidate_id=c.id ORDER BY id LIMIT 1) AS source_evidence_id,
- (SELECT quote FROM memory_candidate_sources WHERE candidate_id=c.id ORDER BY id LIMIT 1) AS source_quote,
- coalesce((SELECT direct FROM memory_candidate_sources WHERE candidate_id=c.id ORDER BY id LIMIT 1),0) AS source_direct,
- coalesce((SELECT verified FROM memory_candidate_sources WHERE candidate_id=c.id ORDER BY id LIMIT 1),0) AS source_verified
- FROM memory_candidates c"""
+ NULL AS source_message_id,NULL AS source_evidence_id,NULL AS source_quote,
+ 0 AS source_direct,0 AS source_verified FROM memory_candidates c"""
 
 
 class CandidateRepository(Repository):
@@ -220,10 +216,7 @@ class CandidateRepository(Repository):
         row = await self.one(_SELECT_CANDIDATE + " WHERE c.id=?", (candidate_id,))
         if row is None:
             return None
-        item = _candidate(row)
-        from dataclasses import replace
-
-        return replace(item, sources=await self.sources(item.id))
+        return _with_sources(_candidate(row), await self.sources(candidate_id))
 
     async def require(self, candidate_id: str) -> MemoryCandidateInfo:
         item = await self.get(candidate_id)
@@ -244,10 +237,8 @@ class CandidateRepository(Repository):
             raise ValueError("candidate id prefix is ambiguous")
         if not rows:
             raise ValueError("memory candidate does not exist in this session")
-        from dataclasses import replace
-
         item = _candidate(rows[0])
-        return replace(item, sources=await self.sources(item.id))
+        return _with_sources(item, await self.sources(item.id))
 
     async def list(
         self,
@@ -263,13 +254,37 @@ class CandidateRepository(Repository):
             query += " AND c.status IN ('pending','conflict')"
         query += " ORDER BY c.created_at LIMIT ?"
         values.append(limit)
-        output = []
-        from dataclasses import replace
-
-        for row in await self.all(query, tuple(values)):
-            item = _candidate(row)
-            output.append(replace(item, sources=await self.sources(item.id)))
-        return output
+        candidates = [_candidate(row) for row in await self.all(query, tuple(values))]
+        if not candidates:
+            return []
+        rows = []
+        identifiers = [item.id for item in candidates]
+        for start in range(0, len(identifiers), 900):
+            batch = identifiers[start : start + 900]
+            placeholders = ",".join("?" for _ in batch)
+            rows.extend(
+                await self.all(
+                    f"""SELECT candidate_id,message_id,evidence_id,quote,direct,verified
+                        FROM memory_candidate_sources
+                        WHERE candidate_id IN ({placeholders})
+                        ORDER BY candidate_id,id""",
+                    tuple(batch),
+                )
+            )
+        grouped: dict[str, list[MemoryCandidateSourceInfo]] = {}
+        for row in rows:
+            grouped.setdefault(str(row["candidate_id"]), []).append(
+                MemoryCandidateSourceInfo(
+                    row["message_id"],
+                    row["evidence_id"],
+                    str(row["quote"]),
+                    bool(row["direct"]),
+                    bool(row["verified"]),
+                )
+            )
+        return [
+            _with_sources(item, tuple(grouped.get(item.id, ()))) for item in candidates
+        ]
 
     async def decide(
         self,
@@ -353,4 +368,22 @@ def _candidate(row) -> MemoryCandidateInfo:
         verification_status=str(row["verification_status"]),
         instruction_like=bool(row["instruction_like"]),
         calibration_version=row["calibration_version"],
+    )
+
+
+def _with_sources(
+    item: MemoryCandidateInfo,
+    sources: tuple[MemoryCandidateSourceInfo, ...],
+) -> MemoryCandidateInfo:
+    from dataclasses import replace
+
+    first = sources[0] if sources else None
+    return replace(
+        item,
+        sources=sources,
+        source_message_id=first.message_id if first else None,
+        source_evidence_id=first.evidence_id if first else None,
+        source_quote=first.quote if first else None,
+        direct=first.direct if first else False,
+        verified=first.verified if first else False,
     )

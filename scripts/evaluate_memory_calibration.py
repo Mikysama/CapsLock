@@ -35,9 +35,17 @@ def evaluate() -> dict[str, float | int]:
         )
         decisions.append((case, adopt))
         calibration_error += abs(probability - float(bool(case["supported"])))
-    eligible = [item for item in decisions if item[0]["supported"] and not item[0]["instruction_like"]]
+    eligible = [
+        item
+        for item in decisions
+        if item[0]["supported"] and not item[0]["instruction_like"]
+    ]
     adopted = [item for item in decisions if item[1]]
-    true_adopted = [item for item in adopted if item[0]["supported"] and not item[0]["instruction_like"]]
+    true_adopted = [
+        item
+        for item in adopted
+        if item[0]["supported"] and not item[0]["instruction_like"]
+    ]
     return {
         "cases": len(cases),
         "automatic_precision": len(true_adopted) / len(adopted) if adopted else 1.0,
@@ -49,7 +57,13 @@ def evaluate() -> dict[str, float | int]:
 def main() -> int:
     result = evaluate()
     print(json.dumps(result, indent=2))
-    return 0 if result["automatic_precision"] >= 0.98 and result["supported_recall"] >= 0.90 and result["ece"] <= 0.05 else 1
+    return (
+        0
+        if result["automatic_precision"] >= 0.98
+        and result["supported_recall"] >= 0.90
+        and result["ece"] <= 0.05
+        else 1
+    )
 
 
 if __name__ == "__main__":

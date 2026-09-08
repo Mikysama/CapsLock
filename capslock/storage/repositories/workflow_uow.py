@@ -454,6 +454,17 @@ class WorkflowUnitOfWork(Repository):
                 ),
             )
             await connection.execute(
+                """UPDATE run_steps AS previous SET checkpoint_json=NULL
+                   WHERE previous.run_id=? AND previous.id<>?
+                     AND previous.checkpoint_json IS NOT NULL
+                     AND previous.status NOT IN ('waiting_approval','waiting_input')
+                     AND NOT EXISTS (
+                       SELECT 1 FROM runs r WHERE r.resume_from_step_id=previous.id
+                     )
+                     AND previous.ordinal<?""",
+                (run_id, str(step["id"]), int(step["ordinal"])),
+            )
+            await connection.execute(
                 "UPDATE runs SET status='running',finished_at=NULL WHERE id=?",
                 (run_id,),
             )

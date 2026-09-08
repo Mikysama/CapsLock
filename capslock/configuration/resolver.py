@@ -45,6 +45,7 @@ from .types import (
     RoutingSettings,
     RuntimeSettings,
     ShellSettings,
+    StorageSettings,
     ToolSettings,
     WebSettings,
     WorktreeSettings,
@@ -70,10 +71,16 @@ def resolve_settings(
     if document:
         providers, models, routing = model_routes(document)
     else:
+        base_url = os.environ.get("CAPSLOCK_BASE_URL", "https://api.deepseek.com")
+        model_name = os.environ.get("CAPSLOCK_MODEL", "deepseek-v4-flash")
+        official_deepseek = base_url.rstrip("/") in {
+            "https://api.deepseek.com",
+            "https://api.deepseek.com/v1",
+        } and model_name.startswith("deepseek-v4-")
         provider = ProviderSettings(
             name="default",
-            kind="openai_compatible",
-            base_url=os.environ.get("CAPSLOCK_BASE_URL", "https://api.deepseek.com"),
+            kind="openai_responses",
+            base_url=base_url,
             api_key=os.environ.get("CAPSLOCK_API_KEY"),
             timeout_seconds=float(
                 os.environ.get(
@@ -82,11 +89,17 @@ def resolve_settings(
             ),
             data_policy="provider:default",
             credential_ref="env:CAPSLOCK_API_KEY",
+            strict_tool_calls=boolean(
+                os.environ.get("CAPSLOCK_STRICT_TOOL_CALLS", official_deepseek)
+            ),
+            json_schema_outputs=boolean(
+                os.environ.get("CAPSLOCK_JSON_SCHEMA_OUTPUTS", official_deepseek)
+            ),
         )
         profile = ModelProfileSettings(
             name="default",
             provider=provider.name,
-            model=os.environ.get("CAPSLOCK_MODEL", "deepseek-v4-flash"),
+            model=model_name,
             context_window=128_000,
             max_output_tokens=8_192,
             input_cost_per_million=float(
@@ -269,6 +282,18 @@ def resolve_settings(
             policy=str(group("memory").get("policy", "automatic")),
             database=layout.user.memory,
             temporary_ttl_days=int(group("memory").get("temporary_ttl_days", 7)),
+        ),
+        storage=StorageSettings(
+            maintenance_enabled=boolean(
+                group("storage").get("maintenance_enabled", True)
+            ),
+            operation_retention_days=int(
+                group("storage").get("operation_retention_days", 30)
+            ),
+            audit_retention_days=int(group("storage").get("audit_retention_days", 180)),
+            maintenance_interval_hours=int(
+                group("storage").get("maintenance_interval_hours", 24)
+            ),
         ),
         providers=providers,
         models=models,

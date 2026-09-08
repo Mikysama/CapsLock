@@ -257,7 +257,11 @@ def _capabilities_from_record(value: object) -> PluginCapabilities:
 
     def items(name: str) -> tuple[str, ...]:
         raw = value.get(name, [])
-        return tuple(item for item in raw if isinstance(item, str)) if isinstance(raw, list) else ()
+        return (
+            tuple(item for item in raw if isinstance(item, str))
+            if isinstance(raw, list)
+            else ()
+        )
 
     return PluginCapabilities(
         items("workspace_read"),

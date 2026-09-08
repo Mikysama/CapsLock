@@ -61,7 +61,9 @@ class HostCapabilityBroker:
                 raise PolicyError("network capability requires a URL")
             validated = await asyncio.to_thread(validate_public_url, url)
             host = urlsplit(validated).hostname or ""
-            if not any(_host_matches(host, scope) for scope in self.grant.network_hosts):
+            if not any(
+                _host_matches(host, scope) for scope in self.grant.network_hosts
+            ):
                 raise PolicyError("network host is outside the workspace grant")
             return await self._callback(self.callbacks.network, params)
         if kind == "process":
@@ -104,7 +106,9 @@ class HostCapabilityBroker:
         writing: bool = False,
     ) -> Path:
         raw = params.get("path")
-        if not isinstance(raw, str) or not any(fnmatch.fnmatch(raw, scope) for scope in scopes):
+        if not isinstance(raw, str) or not any(
+            fnmatch.fnmatch(raw, scope) for scope in scopes
+        ):
             raise PolicyError("workspace path is outside the workspace grant")
         return (
             self.policy.writable_file(raw, create=not self.policy.resolve(raw).exists())

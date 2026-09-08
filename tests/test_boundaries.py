@@ -373,6 +373,9 @@ def test_settings_use_explicit_groups(
     layout = ProjectLayout.discover(tmp_path)
     settings = Settings.load(tmp_path, layout=layout)
     assert settings.model_config.model == "test-model"
+    assert settings.providers["default"].kind == "openai_responses"
+    assert settings.providers["default"].strict_tool_calls is False
+    assert settings.providers["default"].json_schema_outputs is False
     assert settings.runtime.max_tool_rounds == 9
     assert settings.command.command_timeout_seconds > 0
     assert settings.web.web_max_redirects >= 0
@@ -383,6 +386,38 @@ def test_settings_use_explicit_groups(
     asyncio.run(client.close())
     with pytest.raises(AttributeError):
         getattr(settings, "model")
+
+
+def test_official_deepseek_environment_enables_responses_capabilities(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CAPSLOCK_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("CAPSLOCK_API_KEY", "secret")
+    monkeypatch.setenv("CAPSLOCK_BASE_URL", "https://api.deepseek.com/v1")
+    monkeypatch.setenv("CAPSLOCK_MODEL", "deepseek-v4-flash")
+
+    settings = Settings.load(tmp_path)
+
+    provider = settings.providers["default"]
+    assert provider.kind == "openai_responses"
+    assert provider.strict_tool_calls is True
+    assert provider.json_schema_outputs is True
+
+
+def test_custom_responses_environment_requires_explicit_capabilities(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CAPSLOCK_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("CAPSLOCK_API_KEY", "secret")
+    monkeypatch.setenv("CAPSLOCK_BASE_URL", "https://models.example.test/v1")
+    monkeypatch.setenv("CAPSLOCK_MODEL", "deepseek-v4-flash")
+
+    settings = Settings.load(tmp_path)
+
+    provider = settings.providers["default"]
+    assert provider.kind == "openai_responses"
+    assert provider.strict_tool_calls is False
+    assert provider.json_schema_outputs is False
 
 
 def test_toml_settings_are_read_from_their_explicit_groups(

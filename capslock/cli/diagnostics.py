@@ -307,7 +307,9 @@ async def doctor(
                         "ok" if provider.api_key else "error",
                         "provider",
                         f"Provider {name}",
-                        f"{provider.kind}; credential={'available' if provider.api_key else 'missing'}; policy={provider.data_policy}",
+                        f"{provider.kind}; credential={'available' if provider.api_key else 'missing'}; "
+                        f"policy={provider.data_policy}; strict_tools={provider.strict_tool_calls}; "
+                        f"json_schema={provider.json_schema_outputs}",
                     )
                 )
             if args.network and settings.model_config.api_key:

@@ -25,12 +25,14 @@ class CapabilityClient:
         identifier = f"cap_{uuid.uuid4().hex}"
         future = asyncio.get_running_loop().create_future()
         self.channel.pending[identifier] = future
-        await self.channel.send({
-            "protocol_version": PROTOCOL_VERSION,
-            "id": identifier,
-            "method": "capability_request",
-            "params": {"capability": capability, **params},
-        })
+        await self.channel.send(
+            {
+                "protocol_version": PROTOCOL_VERSION,
+                "id": identifier,
+                "method": "capability_request",
+                "params": {"capability": capability, **params},
+            }
+        )
         try:
             response = await future
         finally:
@@ -51,18 +53,24 @@ class ProgressReporter:
         self.channel = channel
 
     async def report(
-        self, *, message: str, completed: float | None = None, total: float | None = None
+        self,
+        *,
+        message: str,
+        completed: float | None = None,
+        total: float | None = None,
     ) -> None:
-        await self.channel.send({
-            "protocol_version": PROTOCOL_VERSION,
-            "method": "progress",
-            "params": {
-                "request_id": self.request_id,
-                "message": str(message)[:4096],
-                "completed": completed,
-                "total": total,
-            },
-        })
+        await self.channel.send(
+            {
+                "protocol_version": PROTOCOL_VERSION,
+                "method": "progress",
+                "params": {
+                    "request_id": self.request_id,
+                    "message": str(message)[:4096],
+                    "completed": completed,
+                    "total": total,
+                },
+            }
+        )
 
 
 class _Channel:

@@ -36,7 +36,13 @@ def load_keybindings(path: Path | None) -> KeybindingSettings:
     for action, value in raw.items():
         if action not in DEFAULT_BINDINGS:
             raise ValueError(f"unsupported keybinding action: {action}")
-        values = (value,) if isinstance(value, str) else tuple(value) if isinstance(value, list) else ()
+        values = (
+            (value,)
+            if isinstance(value, str)
+            else tuple(value)
+            if isinstance(value, list)
+            else ()
+        )
         if not values or not all(isinstance(item, str) and item for item in values):
             raise ValueError(f"invalid keybinding for {action}")
         bindings[action] = values

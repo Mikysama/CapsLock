@@ -4,6 +4,38 @@
 
 ## [Unreleased]
 
+## [2.7.6.2] - 2026-09-08
+
+### Added
+
+- 新增 External Eval v1：以固定上游 revision、版本化 manifest、内容哈希、隐藏测试隔离和官方 grader 编排 SWE-bench Verified、SetupBench 与 Terminal-Bench 系列，并支持可验证的 sync、run、resume、grade 和 report。
+- 新增有间隔限制的 operation/audit 数据保留维护，以及 backup-first 的 `capslock database compact --scope workspace|memory|all` 显式 SQLite 页面回收。
+- 新增上下文摘要、Memory、Shell 分类、子 Agent 结果和 strict function calling 共用的权威 JSON Schema 定义与 Provider 请求构造器。
+
+### Changed
+
+- config 升至 13；模型传输统一为 OpenAI Responses API，并移除 Chat Completions 请求路径。Provider 显式声明 `json_schema_outputs` 与 `strict_tool_calls`；结构化正文优先使用 `text.format` strict JSON Schema，无兼容 Provider 时降级为由同一权威 Schema 生成的 Prompt 约束。
+- 上下文摘要的 `source_refs` 与 `source_map` 改由 Runtime 根据当前分段确定性生成；模型只生成语义摘要，不能再通过幻觉或混淆 map/reduce ID 造成越界引用。
+- 摘要 prompt policy 升级为 v4，旧 policy 的 active compaction 不再直接复用；v1/v2/v3 持久摘要格式继续兼容。
+- 上下文摘要、Memory、Shell 分类和子 Agent 结果优先请求 Provider JSON Schema 结构化输出；Provider 未声明支持时降级为 Prompt 格式约束，返回后仍使用同一 Schema 做本地校验。
+- workspace schema 升至 20、memory schema 升至 6；移除可由权威记录替代的 context snapshot、citation、tool-result replacement 和 Agent capability 副本，补充 Tool invocation delivery 与高频查询索引，并统一显式列映射迁移。
+- 流式文本 delta 在持久化前按事件边界合并，历史 checkpoint 只保留 resume 指针与当前 pause 所需记录，降低长会话数据库写放大和重复状态。
+
+### Fixed
+
+- 修复摘要响应通过 Provider 计费后又因 Schema 或来源校验失败时，将实际 input/output token 错误记录为 0 的问题；现在包括修复尝试在内的所有已完成调用都会累计到 compaction 记录。
+- 摘要修复提示现在包含具体校验错误，连续失败时会持久化逐次原因；fallback 与合法摘要的 Runtime 后处理都会扫描整个分段，确定性恢复被模型遗漏的用户纠正、决策和精确标识符，避免 middle 位置事实因首尾截取而丢失。
+- 修复工具结果 delivery、Agent workspace/capability、Plan revision、Memory job/recall 与 lifecycle 导入路径上的重复存储、查询放大和不稳定顺序问题。
+
+### Compatibility
+
+- config v3-v12、workspace schema v6-v19 与 memory schema v3-v5 均执行 backup-first 原子迁移；当前 Provider kind 只接受 `openai_responses`，不提供 Chat Completions 运行时回退。
+- portable archive 7、session export 7、JSONL schema 3、permissions 2、IDE Bridge protocol 1 与 plugin protocol 4 是本版本稳定协议。
+
+### Validation
+
+- 完成 DeepSeek V4 Flash Responses API 的 strict JSON Schema complete/streaming 与 strict function-call roundtrip 冒烟；全量 pytest、Ruff、compileall 和差异完整性检查通过。
+
 ## [2.7.6.1] - 2026-08-29
 
 ### Added

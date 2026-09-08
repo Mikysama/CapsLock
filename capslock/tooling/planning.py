@@ -20,42 +20,32 @@ class PlanningBoundaryMiddleware:
         del arguments
         planning = context.planning
         active = bool(
-            planning is not None
-            and await planning.is_active(context.session_id)
+            planning is not None and await planning.is_active(context.session_id)
         )
         visibility = tool.contract.plan_visibility
         if active and visibility is PlanToolVisibility.HIDDEN:
             return _denied("tool is unavailable while Plan Mode is active")
         if visibility is PlanToolVisibility.CONTROL:
-            allowed = (
-                tool.name == "enter_plan_mode" and not active
-            ) or (
+            allowed = (tool.name == "enter_plan_mode" and not active) or (
                 active
-                and tool.name
-                in {"get_plan", "update_plan", "submit_plan", "ask_user"}
+                and tool.name in {"get_plan", "update_plan", "submit_plan", "ask_user"}
             )
             if not allowed:
-                return _denied(
-                    "plan control tool is unavailable in the current state"
-                )
+                return _denied("plan control tool is unavailable in the current state")
         return None
 
     async def authorize(self, tool, arguments, policy, context):
         del arguments
         planning = context.planning
         active = bool(
-            planning is not None
-            and await planning.is_active(context.session_id)
+            planning is not None and await planning.is_active(context.session_id)
         )
         visibility = tool.contract.plan_visibility
 
         if visibility is PlanToolVisibility.CONTROL:
-            allowed = (
-                tool.name == "enter_plan_mode" and not active
-            ) or (
+            allowed = (tool.name == "enter_plan_mode" and not active) or (
                 active
-                and tool.name
-                in {"get_plan", "update_plan", "submit_plan", "ask_user"}
+                and tool.name in {"get_plan", "update_plan", "submit_plan", "ask_user"}
             )
             if allowed:
                 context.runtime_state["planning_control_authorized"] = True

@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://capslock.local/schemas/external-run-manifest-v1.json",
+  "type": "object",
+  "required": [
+    "schema_version", "run_id", "suite", "suite_revision", "profile",
+    "task_ids_sha256", "capslock_commit", "capslock_wheel_sha256", "model_track",
+    "provider", "model", "prompt_sha256", "permission_profile", "limits",
+    "repetition_count", "started_at", "environment", "pricing",
+    "quarantine_sha256", "quarantine_count", "manifest_hash"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "run_id": {"type": "string", "minLength": 1},
+    "suite": {"type": "string", "minLength": 1},
+    "suite_revision": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "profile": {"enum": ["smoke", "core", "full"]},
+    "task_ids_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "capslock_commit": {"type": "string", "minLength": 1},
+    "capslock_wheel_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "model_track": {"enum": ["flash", "pro"]},
+    "provider": {"type": "string", "minLength": 1},
+    "model": {"type": "string", "minLength": 1},
+    "prompt_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "permission_profile": {"const": "external-standard-v1"},
+    "limits": {"type": "object"},
+    "repetition_count": {"type": "integer", "minimum": 1},
+    "started_at": {"type": "string", "format": "date-time"},
+    "environment": {"type": "object"},
+    "pricing": {"type": "object"},
+    "quarantine_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "quarantine_count": {"type": "integer", "minimum": 0},
+    "manifest_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  },
+  "additionalProperties": false
+}

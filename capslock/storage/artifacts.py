@@ -222,12 +222,17 @@ def _episodic_content(record: ToolArtifact, content: bytes) -> str:
 
 def _textual_media_type(media_type: str) -> bool:
     normalized = media_type.partition(";")[0].strip().lower()
-    return normalized.startswith("text/") or normalized in {
-        "application/json",
-        "application/ld+json",
-        "application/xml",
-        "application/javascript",
-        "application/x-javascript",
-        "application/yaml",
-        "application/x-yaml",
-    } or normalized.endswith(("+json", "+xml"))
+    return (
+        normalized.startswith("text/")
+        or normalized
+        in {
+            "application/json",
+            "application/ld+json",
+            "application/xml",
+            "application/javascript",
+            "application/x-javascript",
+            "application/yaml",
+            "application/x-yaml",
+        }
+        or normalized.endswith(("+json", "+xml"))
+    )

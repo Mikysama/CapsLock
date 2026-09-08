@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from capslock.configuration.loader import load_config_document
+from capslock.configuration import CONFIG_VERSION
 from capslock.permissions import PermissionMode
 from capslock.mcp.manager import McpManager
 from capslock.ports.mcp import ManagedMcpTool
@@ -129,6 +130,28 @@ def test_invalid_output_preserves_execution_truth(tmp_path: Path) -> None:
     assert result.outcome.status is ToolOutcomeStatus.FAILED
     assert result.outcome.executed
     assert result.outcome.error_code == "invalid_tool_output"
+
+
+def test_dynamic_tool_with_non_strict_schema_is_quarantined() -> None:
+    async def execute(context, arguments):
+        return ToolOutcome.success({})
+
+    core = define_tool("core", "Core.", {"type": "object"}, execute)
+    incompatible = define_tool(
+        "dynamic",
+        "Dynamic.",
+        {"$ref": "#/$defs/input", "$defs": {"input": {"type": "object"}}},
+        execute,
+    )
+    catalog = ToolCatalog([core])
+
+    catalog.configure_dynamic(lambda: [incompatible])
+    asyncio.run(catalog.refresh_dynamic())
+
+    assert catalog.names == {"core"}
+    diagnostic = catalog.pop_refresh_diagnostics()[0]
+    assert diagnostic["code"] == "strict_schema_incompatible"
+    assert diagnostic["tool"] == "dynamic"
 
 
 def test_complete_interrupt_finishes_side_effect_before_return(tmp_path: Path) -> None:
@@ -673,7 +696,11 @@ def test_shell_deterministic_hard_denies_and_model_threshold() -> None:
         assert assess_shell(command).behavior == "ask"
 
     class Model:
+        def __init__(self):
+            self.requests = []
+
         async def complete(self, **values):
+            self.requests.append(values)
             return ModelResponse(
                 ModelMessage(
                     '{"behavior":"allow","confidence":0.94,"reason":"looks safe"}'
@@ -681,7 +708,8 @@ def test_shell_deterministic_hard_denies_and_model_threshold() -> None:
                 ModelUsage(9, 4),
             )
 
-    classifier = ModelShellClassifier(Model(), model_name="fast", threshold=0.95)
+    model = Model()
+    classifier = ModelShellClassifier(model, model_name="fast", threshold=0.95)
     result = asyncio.run(
         classifier.classify(
             command="custom-build", cwd=".", sandbox="default", parsed=("custom-build",)
@@ -690,6 +718,11 @@ def test_shell_deterministic_hard_denies_and_model_threshold() -> None:
     assert result.behavior == "ask"
     assert result.audit["honored"] is False
     assert result.audit["input_tokens"] == 9
+    assert (
+        model.requests[0]["response_format"]["json_schema"]["name"]
+        == "shell_classification"
+    )
+    assert "Return JSON" not in model.requests[0]["messages"][1]["content"]
 
 
 def test_config_document_is_backed_up_and_upgraded_atomically(tmp_path: Path) -> None:
@@ -709,12 +742,66 @@ reasoning = ["main"]
         encoding="utf-8",
     )
     document = load_config_document(path)
-    assert document["config_version"] == 10
+    assert document["config_version"] == CONFIG_VERSION
+    assert document["providers"]["main"]["kind"] == "openai_responses"
     assert document["tools"]["schema_budget_tokens"] == 8000
     assert document["tools"]["selection_mode"] == "shadow"
     assert document["tools"]["max_argument_repair_attempts"] == 1
     assert document["providers"]["main"]["strict_tool_calls"] is False
+    assert document["providers"]["main"]["json_schema_outputs"] is False
     assert document["shell"]["classifier_threshold"] == 0.95
     backups = list(tmp_path.glob("config.toml.*.bak"))
     assert len(backups) == 1
     assert "config_version = 3" in backups[0].read_text(encoding="utf-8")
+
+
+def test_previous_config_migrates_provider_to_responses_and_preserves_capabilities(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        """config_version = 12
+[providers.main]
+kind = "openai_compatible"
+base_url = "https://example.invalid"
+credential = "env:CAPSLOCK_TEST_KEY"
+strict_tool_calls = true
+[models.main]
+provider = "main"
+model = "test"
+[routing]
+reasoning = ["main"]
+""",
+        encoding="utf-8",
+    )
+
+    document = load_config_document(path)
+
+    assert document["config_version"] == CONFIG_VERSION
+    assert document["providers"]["main"]["kind"] == "openai_responses"
+    assert document["providers"]["main"]["strict_tool_calls"] is True
+    assert document["providers"]["main"]["json_schema_outputs"] is False
+    assert len(list(tmp_path.glob("config.toml.v12-*.bak"))) == 1
+
+
+def test_current_config_rejects_chat_completions_provider_kind(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        f"""config_version = {CONFIG_VERSION}
+[providers.main]
+kind = "openai_compatible"
+base_url = "https://example.invalid"
+credential = "env:CAPSLOCK_TEST_KEY"
+[models.main]
+provider = "main"
+model = "test"
+[routing]
+reasoning = ["main"]
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ValueError, match="unsupported provider kind: openai_compatible"
+    ):
+        load_config_document(path)

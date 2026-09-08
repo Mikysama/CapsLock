@@ -10,6 +10,8 @@ from capslock.configuration import ContextSettings
 from capslock.runtime.context import (
     ContextBudgetExceeded,
     ContextBudgetManager,
+    SUMMARY_POLICY_DIGEST,
+    _complete_with_limit,
     _fallback_summary,
 )
 from capslock.runtime.model import ModelMessage, ModelResponse, ModelUsage
@@ -27,9 +29,17 @@ SUMMARY = {
     "failures": [],
     "evidence": [],
     "pending": [],
-    "summary_version": 2,
+    "user_feedback": [],
+    "current_work": [],
+    "code_symbols": [],
+    "verification": [],
+    "omissions": [],
+    "working_set": [],
+    "summary_version": 3,
     "source_refs": [],
     "retrieval_hints": [],
+    "source_map": {},
+    "degraded": False,
 }
 
 
@@ -281,6 +291,263 @@ def test_hierarchical_summary_reuses_unchanged_segment_digests() -> None:
     assert input_tokens == output_tokens == 0
 
 
+def test_summary_provenance_is_rebuilt_from_the_current_segment() -> None:
+    manager = ContextBudgetManager(
+        sessions=SimpleNamespace(),
+        compactions=NoCompactions(),
+        settings=ContextSettings(),
+        context_window=4_000,
+        max_output_tokens=500,
+        model_profile="test",
+        model_name="test",
+        tool_schemas=[],
+    )
+    model = FakeChatModel(
+        answer(
+            json.dumps({**SUMMARY, "source_refs": ["outside-segment"]}),
+            input_tokens=11,
+            output_tokens=7,
+        )
+    )
+
+    summary, input_tokens, output_tokens = asyncio.run(
+        manager._summarize(
+            [{"id": 41, "role": "user", "content": "retain this"}], model
+        )
+    )
+
+    assert len(model.requests) == 1
+    assert (input_tokens, output_tokens) == (11, 7)
+    response_format = model.requests[0]["response_format"]
+    assert response_format["type"] == "json_schema"
+    assert response_format["json_schema"]["strict"] is True
+    assert summary["source_refs"] == ["41"]
+    assert summary["source_map"]["/goal"] == ["41"]
+
+
+def test_runtime_adds_missing_current_summary_provenance_fields() -> None:
+    manager = ContextBudgetManager(
+        sessions=SimpleNamespace(),
+        compactions=NoCompactions(),
+        settings=ContextSettings(),
+        context_window=4_000,
+        max_output_tokens=500,
+        model_profile="test",
+        model_name="test",
+        tool_schemas=[],
+    )
+    current_summary_without_provenance = {
+        **SUMMARY,
+        "summary_version": 3,
+        "user_feedback": [],
+        "current_work": [],
+        "code_symbols": [],
+        "verification": [],
+        "omissions": [],
+        "working_set": [],
+        "degraded": False,
+    }
+    current_summary_without_provenance.pop("source_refs")
+    model = FakeChatModel(answer(json.dumps(current_summary_without_provenance)))
+
+    summary, _, _ = asyncio.run(
+        manager._summarize(
+            [{"id": 73, "role": "user", "content": "retain this"}], model
+        )
+    )
+
+    assert summary["source_refs"] == ["73"]
+    assert summary["source_map"]["/goal"] == ["73"]
+
+
+def test_failed_summary_persists_usage_from_every_rejected_response(tmp_path) -> None:
+    async def scenario() -> None:
+        repositories = await WorkspaceRepositories.open(
+            tmp_path / "state.sqlite3", workspace=tmp_path
+        )
+        try:
+            session, prepared = await workspace_run(repositories, "usage")
+            manager = ContextBudgetManager(
+                sessions=repositories.sessions,
+                compactions=repositories.compactions,
+                settings=ContextSettings(),
+                context_window=4_000,
+                max_output_tokens=500,
+                model_profile="test",
+                model_name="test",
+                tool_schemas=[],
+            )
+            model = FakeChatModel(
+                answer("{}", input_tokens=11, output_tokens=7),
+                answer("{}", input_tokens=13, output_tokens=5),
+            )
+
+            record = await manager.get_or_create_compaction(
+                session_id=session.id,
+                run_id=prepared.run.id,
+                older=[{"id": 1, "role": "user", "content": "history"}],
+                summarizer=model,
+            )
+
+            assert record.quality_status == "degraded"
+            assert record.input_tokens == 24
+            assert record.output_tokens == 12
+            assert len(model.requests) == 2
+            assert "failed validation" in str(
+                model.requests[1]["messages"][-1]["content"]
+            )
+            assert "attempt 1" in record.summary["omissions"][0]
+            assert "attempt 2" in record.summary["omissions"][0]
+        finally:
+            await repositories.close()
+
+    asyncio.run(scenario())
+
+
+def test_fallback_scans_entire_segment_for_corrections_and_identifiers() -> None:
+    entries = [
+        {"id": index, "role": "user", "content": f"routine filler {index}"}
+        for index in range(30)
+    ]
+    entries[15] = {
+        "id": 15,
+        "role": "user",
+        "content": (
+            "Critical user correction: the permanent deployment code is "
+            "CAPSLOCK_MIDDLE_CANARY_15_X7Q9."
+        ),
+    }
+
+    summary = _fallback_summary(entries, reason="schema mismatch")
+
+    assert any(
+        "CAPSLOCK_MIDDLE_CANARY_15_X7Q9" in item for item in summary["user_feedback"]
+    )
+    assert summary["degraded"] is True
+
+
+def test_runtime_restores_critical_fact_omitted_by_valid_model_summary() -> None:
+    manager = ContextBudgetManager(
+        sessions=SimpleNamespace(),
+        compactions=NoCompactions(),
+        settings=ContextSettings(),
+        context_window=4_000,
+        max_output_tokens=500,
+        model_profile="test",
+        model_name="test",
+        tool_schemas=[],
+    )
+    entries = [
+        {"id": index, "role": "user", "content": f"routine filler {index}"}
+        for index in range(30)
+    ]
+    entries[15] = {
+        "id": 15,
+        "role": "user",
+        "content": (
+            "Critical user correction: the permanent deployment code is "
+            "CAPSLOCK_MIDDLE_CANARY_15_X7Q9."
+        ),
+    }
+    model = FakeChatModel(answer(json.dumps(SUMMARY)))
+
+    summary, _, _ = asyncio.run(manager._summarize(entries, model))
+
+    assert any(
+        "CAPSLOCK_MIDDLE_CANARY_15_X7Q9" in item for item in summary["user_feedback"]
+    )
+    assert summary["degraded"] is False
+
+
+def test_provider_json_schema_capability_never_falls_back() -> None:
+    class JsonObjectOnlyModel:
+        def __init__(self) -> None:
+            self.formats = []
+
+        async def complete(self, **request):
+            response_format = request.get("response_format")
+            self.formats.append(
+                response_format.get("type")
+                if isinstance(response_format, dict)
+                else None
+            )
+            if response_format and response_format.get("type") == "json_schema":
+                raise TypeError("response_format json_schema is unsupported")
+            return answer("{}")
+
+    model = JsonObjectOnlyModel()
+    request = {
+        "summarizer": model,
+        "model": "json-object-only-test-model",
+        "messages": [],
+        "max_output_tokens": 100,
+        "response_format": {"type": "json_schema"},
+    }
+
+    with pytest.raises(TypeError, match="json_schema is unsupported"):
+        asyncio.run(_complete_with_limit(**request))
+
+    assert model.formats == ["json_schema"]
+
+
+def test_active_compaction_from_an_old_prompt_policy_is_not_reused(tmp_path) -> None:
+    async def scenario() -> None:
+        repositories = await WorkspaceRepositories.open(
+            tmp_path / "state.sqlite3", workspace=tmp_path
+        )
+        try:
+            session, historical = await workspace_run(repositories, "history")
+            message_id = await repositories.sessions.append_message(
+                session.id, historical.run.id, "user", "short history"
+            )
+            old = await repositories.compactions.create(
+                session_id=session.id,
+                run_id=historical.run.id,
+                summary=SUMMARY,
+                first_message_id=message_id,
+                last_message_id=message_id,
+                source_compaction_id=None,
+                input_tokens=3,
+                output_tokens=2,
+                source_tokens=10,
+                target_tokens=1_000,
+                model_profile="test",
+                source_digest="old-source",
+                summary_policy_digest="old-policy",
+                activate=True,
+            )
+            current = await workflow_service(repositories).prepare(
+                session.id, "current question"
+            )
+            manager = ContextBudgetManager(
+                sessions=repositories.sessions,
+                compactions=repositories.compactions,
+                settings=ContextSettings(),
+                context_window=10_000,
+                max_output_tokens=500,
+                model_profile="test",
+                model_name="test",
+                tool_schemas=[],
+            )
+            model = Summarizer()
+
+            result = await manager.build(
+                session.id,
+                "current question",
+                run_id=current.run.id,
+                instructions="system",
+                summarizer=model,
+            )
+
+            assert old.summary_policy_digest != SUMMARY_POLICY_DIGEST
+            assert result.compaction_id is None
+            assert not model.requests
+        finally:
+            await repositories.close()
+
+    asyncio.run(scenario())
+
+
 def test_summary_focus_is_separate_bounded_policy_and_output_is_capped() -> None:
     manager = ContextBudgetManager(
         sessions=SimpleNamespace(),
@@ -305,6 +572,10 @@ def test_summary_focus_is_separate_bounded_policy_and_output_is_capped() -> None
     assert "ignore schema" not in request["messages"][0]["content"]
     assert "summary-focus-json" in request["messages"][1]["content"]
     assert "\\u003c/summary-focus-json\\u003e" in request["messages"][1]["content"]
+    assert "source_refs must be empty arrays" not in request["messages"][0]["content"]
+    schema = request["response_format"]["json_schema"]["schema"]
+    assert schema["properties"]["source_refs"]["maxItems"] == 0
+    assert "Preserve exact identifiers, codes" in request["messages"][0]["content"]
 
 
 def test_focus_policy_does_not_reuse_the_default_segment_cache() -> None:

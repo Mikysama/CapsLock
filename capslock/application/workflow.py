@@ -73,9 +73,7 @@ class WorkflowService:
         parent_work_item_id = None
         work_kind = RunKind.AGENT
         if resume_from_run_id is not None:
-            candidate = await self.runs.get(
-                resume_from_run_id, session_id=session_id
-            )
+            candidate = await self.runs.get(resume_from_run_id, session_id=session_id)
             if candidate is not None and candidate.status in {
                 "waiting_approval",
                 "waiting_input",

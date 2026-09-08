@@ -1,6 +1,6 @@
 # 当前运行内核与安全边界
 
-本文描述 CapsLock 2.7.6.1 之后的当前开发边界。产品在本机运行，支持直接能力工具、类型化斜杠命令、可审批 Action、AST 分析与沙箱保护的通用 Shell、session 隔离后台进程、受管理的本地/远程 MCP、LSP、IDE 上下文桥、受控仓库指令，以及单层但可持久化恢复的本机 Agent team；不提供远程控制、后台 daemon、跨机器 Agent 或第三方可执行 Hook。
+本文描述 CapsLock 2.7.6.2 的当前开发边界。产品在本机运行，支持直接能力工具、类型化斜杠命令、可审批 Action、AST 分析与沙箱保护的通用 Shell、session 隔离后台进程、受管理的本地/远程 MCP、LSP、IDE 上下文桥、受控仓库指令，以及单层但可持久化恢复的本机 Agent team；不提供远程控制、后台 daemon、跨机器 Agent 或第三方可执行 Hook。
 
 ## 模块边界
 
@@ -19,11 +19,11 @@
 
 只有确定 `not_started` 的 `invalid_tool_arguments` 与 `unsupported_tool` 可进入参数修复轮。修复预算由 `max_argument_repair_attempts` 控制，允许 0、1 或 2；已知工具只暴露原工具，未知名称按名称、别名、描述和参数字段提供最多三个候选。运行时不静默重写路径、命令、URL或业务参数。修复轮正常消耗 token、tool round 和 tool call 预算，预算耗尽后返回 `argument_repair_exhausted` 并解除工具限制。`unknown`、`committed`、权限拒绝和业务执行失败禁止参数修复。
 
-工具选择默认处于 `shadow`：模型仍看到完整目录，runtime 记录候选集合、实际调用召回和混淆信息；`filtered` 只有在评测门槛满足后才用于真实裁剪，`full` 是回滚开关。声明 `strict_tool_calls=true` 的 provider 接收 required+nullable 的 strict schema，调用执行前移除表示未提供可选字段的 `null`；未声明支持的 provider 保持宽松 schema。单项超过 16 KiB 时使用 content-addressed artifact，批次结果受聚合预算限制。旧大型 Tool Result 只有在 Artifact 持久化成功后才能从模型上下文替换；失败必须保留原文并返回 `context_budget_exceeded`。
+工具选择默认处于 `shadow`：模型仍看到完整目录，runtime 记录候选集合、实际调用召回和混淆信息；`filtered` 只有在评测门槛满足后才用于真实裁剪，`full` 是回滚开关。携带工具的请求只选择 `strict_tool_calls=true` 的 provider，并发送 required+nullable strict schema；结构化正文优先选择 `json_schema_outputs=true` 的 provider，无兼容候选时将同一权威 Schema 注入系统 Prompt。调用结果继续由本地 Schema 和语义规则复核；严格工具调用能力缺失时仍 fail closed。单项超过 16 KiB 时使用 content-addressed artifact，批次结果受聚合预算限制。旧大型 Tool Result 只有在 Artifact 持久化成功后才能从模型上下文替换；失败必须保留原文并返回 `context_budget_exceeded`。
 
 ## 上下文、摘要与 episodic retrieval
 
-原始 transcript、Tool Result 和 Artifact 是事实来源；compaction summary、FTS 和分段缓存均为可重建派生数据。workspace schema 18 继续使用 session-scoped `episodic_documents` 与 FTS5 保存来源 ID、run、类型和分块序号，并为 compaction 记录 summary-policy digest、结果 token 与质量状态。文本 Artifact 按 8 KiB 分块，二进制或 prompt-injection quarantine 只索引安全元数据。每轮自动召回最多 5 条、合计 4 KiB，并以不可信 `episodic_recall` section 注入；显式 `search_session_history` 最多返回 20 条，深度读取仍通过 `read_tool_artifact`。
+原始 transcript、Tool Result 和 Artifact 是事实来源；compaction summary、FTS 和分段缓存均为可重建派生数据。workspace schema 20 使用 session-scoped `episodic_documents` 与 FTS5 保存来源 ID、run、类型和分块序号，并为 compaction 记录 summary-policy digest、结果 token 与质量状态。文本 Artifact 按 8 KiB 分块，二进制或 prompt-injection quarantine 只索引安全元数据。每轮自动召回最多 5 条、合计 4 KiB，并以不可信 `episodic_recall` section 注入；显式 `search_session_history` 最多返回 20 条，深度读取仍通过 `read_tool_artifact`。
 
 摘要按完整 turn/tool round 和 token 预算进行 map-reduce；超大单条消息继续分片，不允许对整体来源执行字符级截断。summary v3 保留来源覆盖、逐项 source map、用户反馈、当前工作、代码符号、验证状态、降级说明与引用式 working set，v1/v2 继续只读兼容。每个 map 分段按 source digest、模型 profile 与 summary-policy digest 缓存；focus 是独立的低优先级策略，不能改变 schema、安全或来源要求。文件及 Skill 正文不会因恢复自动注入。portable export 不包含 episodic 或摘要分段缓存；升级、导入、branch 和 rewind 必须幂等重建索引。
 
@@ -69,7 +69,7 @@ worker workspace 支持 `snapshot`、`worktree` 和 `shared_read`。snapshot/wor
 
 ## 当前数据协议
 
-当前格式为 config 10、workspace schema 18、memory schema 5、portable archive 6、session export 6、JSONL schema 3、IDE Bridge protocol 1 和 plugin protocol 4。workspace 启动支持 backup-first 的 v6-v17→v18 升级；schema 18 将旧 Agent task/mailbox 数据迁入默认 team，并新增 worker、dependency、attempt、checkpoint、budget ledger、approval link 与 workspace baseline。重建表的迁移必须显式列出源、目标字段，禁止依赖物理列顺序。memory schema v3-v4 与 config v3-v9 自动备份并升级。迁移失败保留原库和备份，不继续部分升级。
+当前格式为 config 13、workspace schema 20、memory schema 6、portable archive 7、session export 7、JSONL schema 3、IDE Bridge protocol 1 和 plugin protocol 4。workspace 启动支持 backup-first 的 v6-v19→v20 升级；模型传输只使用 OpenAI Responses API，旧配置中的 Provider 会迁移为 `kind="openai_responses"`，不存在 Chat Completions 回退。重建表的迁移必须显式列出源、目标字段，禁止依赖物理列顺序。memory schema v3-v5 与 config v3-v12 自动备份并升级。迁移失败保留原库和备份，不继续部分升级。
 
 ## 发布门禁
 

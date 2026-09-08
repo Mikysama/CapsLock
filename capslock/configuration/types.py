@@ -42,6 +42,7 @@ class ProviderSettings:
     data_policy: str
     credential_ref: str | None = None
     strict_tool_calls: bool = False
+    json_schema_outputs: bool = False
 
 
 @dataclass(frozen=True)
@@ -201,6 +202,14 @@ class MemorySettings:
     policy: str = "automatic"
     database: Path | None = None
     temporary_ttl_days: int = 7
+
+
+@dataclass(frozen=True)
+class StorageSettings:
+    maintenance_enabled: bool = True
+    operation_retention_days: int = 30
+    audit_retention_days: int = 180
+    maintenance_interval_hours: int = 24
 
 
 @dataclass(frozen=True)

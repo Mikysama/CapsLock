@@ -24,6 +24,7 @@ from .types import (
     RoutingSettings,
     RuntimeSettings,
     ShellSettings,
+    StorageSettings,
     ToolSettings,
     WebSettings,
     WorktreeSettings,
@@ -45,6 +46,7 @@ class Settings:
     mcp: McpSettings
     permission_mode: str
     memory: MemorySettings = MemorySettings()
+    storage: StorageSettings = StorageSettings()
     agents: AgentSettings = AgentSettings()
     lsp: LspSettings = LspSettings()
     documents: DocumentSettings = DocumentSettings()

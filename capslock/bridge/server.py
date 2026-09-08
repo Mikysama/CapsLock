@@ -149,9 +149,7 @@ class IdeBridgeServer:
                 "path": selection_path,
                 "text": text,
                 "start_line": start_line,
-                "end_line": max(
-                    start_line, int(selection.get("end_line", start_line))
-                ),
+                "end_line": max(start_line, int(selection.get("end_line", start_line))),
                 "version": int(selection.get("version", 0)),
             }
         diagnostics = params.get("diagnostics", [])

@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://capslock.local/schemas/external-suite-manifest-v1.json",
+  "type": "object",
+  "required": [
+    "schema_version", "suite", "upstream_repo", "upstream_revision",
+    "dataset_revisions", "adapter", "artifact_kind", "license", "core_split",
+    "full_split", "excluded_splits", "resource_classes", "created_at", "lock_hash"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "suite": {"type": "string", "minLength": 1},
+    "upstream_repo": {"type": "string", "pattern": "^https://"},
+    "upstream_revision": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "dataset_revisions": {
+      "type": "object",
+      "additionalProperties": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
+    },
+    "adapter": {"type": "string", "minLength": 1},
+    "artifact_kind": {"enum": ["git_patch", "environment_state"]},
+    "license": {"type": "string", "minLength": 1},
+    "core_split": {"type": "string"},
+    "full_split": {"type": "string"},
+    "excluded_splits": {"type": "array", "items": {"type": "string"}},
+    "resource_classes": {"type": "array", "items": {"type": "string"}},
+    "task_count": {"type": "integer", "minimum": 1},
+    "task_ids_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "task_manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "grader_config_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "lock_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  },
+  "dependentRequired": {
+    "task_count": ["task_ids_sha256", "task_manifest_sha256", "grader_config_sha256"]
+  },
+  "additionalProperties": false
+}

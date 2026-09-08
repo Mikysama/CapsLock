@@ -1,0 +1,116 @@
+schema_version = 1
+
+[defaults]
+core_seed = 20260906
+core_size_per_suite = 60
+core_repetitions = 3
+full_repetitions = 1
+max_tool_rounds = 32
+max_tool_calls = 256
+max_tokens = 100000
+max_duration_seconds = 3600
+
+[models.flash]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+base_url = "https://api.deepseek.com"
+credential_env = "DEEPSEEK_API_KEY"
+input_cost_per_million = 0.44
+output_cost_per_million = 1.32
+
+[models.pro]
+provider = "deepseek"
+model = "deepseek-v4-pro"
+base_url = "https://api.deepseek.com"
+credential_env = "DEEPSEEK_API_KEY"
+# Update these values from the provider price sheet before a scored run.
+input_cost_per_million = 0.0
+output_cost_per_million = 0.0
+
+[suites.swebench_verified]
+adapter = "swebench_verified"
+artifact_kind = "git_patch"
+upstream_repo = "https://github.com/SWE-bench/SWE-bench.git"
+upstream_revision = "02e7a74ffd0b707aab73d203fe87bdc7c76afc8e"
+license = "MIT"
+dataset_ids = ["SWE-bench/SWE-bench_Verified"]
+dataset_revision = "resolve-at-sync"
+core_split = "test"
+full_split = "test"
+core_size = 60
+full_size = 500
+harness_probe = ["swebench", "--help"]
+resource_classes = ["linux-amd64-cpu"]
+
+[suites.swebench_live]
+adapter = "swebench_live"
+artifact_kind = "git_patch"
+upstream_repo = "https://github.com/microsoft/SWE-bench-Live.git"
+upstream_revision = "9b4b11c5d77365107e91bc19d7a3aebbe8da76b7"
+license = "MIT"
+dataset_ids = ["SWE-bench-Live/SWE-bench-Live", "SWE-bench-Live/MultiLang"]
+dataset_revision = "resolve-at-sync"
+core_split = "anchor+fresh"
+full_split = "python-full+multilang"
+excluded_splits = ["windows"]
+core_size = 60
+harness_probe = ["python3", "-m", "evaluation.evaluation", "--help"]
+resource_classes = ["linux-amd64-cpu"]
+
+[suites.multi_swe_bench]
+adapter = "multi_swe_bench"
+artifact_kind = "git_patch"
+upstream_repo = "https://github.com/multi-swe-bench/multi-swe-bench.git"
+upstream_revision = "24f493f8a103e72312ded4f6b9c89f081d69cb09"
+license = "Apache-2.0"
+dataset_ids = ["ByteDance-Seed/Multi-SWE-bench-flash", "ByteDance-Seed/Multi-SWE-bench"]
+dataset_revision = "resolve-at-sync"
+core_split = "flash"
+full_split = "full"
+core_size = 60
+full_size = 1632
+harness_probe = ["python3", "-m", "multi_swe_bench.harness.run_evaluation", "--help"]
+resource_classes = ["linux-amd64-cpu"]
+
+[suites.featurebench]
+adapter = "featurebench"
+artifact_kind = "git_patch"
+upstream_repo = "https://github.com/LiberCoders/FeatureBench.git"
+upstream_revision = "d4f6efcb903138bc7bd73fc0857cee99baed453a"
+license = "MIT"
+dataset_ids = ["LiberCoders/FeatureBench"]
+dataset_revision = "resolve-at-sync"
+core_split = "fast-v1.1"
+full_split = "full-v1.1"
+core_size = 60
+full_size = 200
+harness_probe = ["fb", "--help"]
+resource_classes = ["linux-amd64-cpu", "linux-amd64-gpu-modal"]
+
+[suites.terminal_bench]
+adapter = "terminal_bench"
+artifact_kind = "environment_state"
+upstream_repo = "https://github.com/harbor-framework/terminal-bench.git"
+upstream_revision = "83c7a6172d629c6575b785ab12c8db787bb2e323"
+license = "Apache-2.0"
+dataset_revision = "resolve-at-sync"
+core_split = "4.0.0"
+full_split = "4.0.0"
+core_size = 60
+full_size = 66
+harness_probe = ["harbor", "--help"]
+resource_classes = ["linux-amd64-cpu", "linux-amd64-multicontainer", "linux-amd64-gpu-modal"]
+
+[suites.setupbench]
+adapter = "setupbench"
+artifact_kind = "environment_state"
+upstream_repo = "https://github.com/microsoft/SetupBench.git"
+upstream_revision = "041a412f01348c2a6f8b1b6a910138fe01885aee"
+license = "MIT"
+dataset_revision = "resolve-at-sync"
+core_split = "full"
+full_split = "full"
+core_size = 60
+full_size = 93
+harness_probe = ["python3", "setupbench/evaluation_harness.py", "--help"]
+resource_classes = ["linux-amd64-cpu"]

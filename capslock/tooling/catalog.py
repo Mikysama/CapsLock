@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from difflib import SequenceMatcher
 from typing import Any
 
+from ..structured_output import StrictSchemaError, strict_provider_schema
 from .contracts import PlanToolVisibility, ToolContract, ToolDefinition
 
 
@@ -37,7 +38,9 @@ class ToolCatalog:
         self._dynamic_provider: Any = None
         self._dynamic_names: set[str] = set()
         self._refresh_diagnostics: list[dict[str, str]] = []
-        self._replace(tools, increment=False)
+        self._replace(
+            self._provider_compatible(tools, quarantine=False), increment=False
+        )
 
     def _replace(
         self, tools: Iterable[ToolDefinition], *, increment: bool = True
@@ -56,7 +59,7 @@ class ToolCatalog:
             self._generation += 1
 
     def refresh(self, tools: Iterable[ToolDefinition]) -> ToolCatalogSnapshot:
-        self._replace(tools)
+        self._replace(self._provider_compatible(tools, quarantine=False))
         self._discovered.intersection_update(self._tools)
         return self.snapshot()
 
@@ -65,7 +68,7 @@ class ToolCatalog:
         provider: Callable[[], Any],
         initial: Iterable[ToolDefinition] = (),
     ) -> None:
-        dynamic = tuple(initial)
+        dynamic = self._provider_compatible(initial, quarantine=True)
         self._dynamic_provider = provider
         self._dynamic_names = {item.name for item in dynamic}
         self._replace([*self._tools.values(), *dynamic])
@@ -82,7 +85,7 @@ class ToolCatalog:
             dynamic = self._dynamic_provider()
             if inspect.isawaitable(dynamic):
                 dynamic = await dynamic
-            values = tuple(dynamic)
+            values = self._provider_compatible(dynamic, quarantine=True)
             dynamic_names = {item.name for item in values}
             self._replace([*current, *values])
         except asyncio.CancelledError:
@@ -99,6 +102,31 @@ class ToolCatalog:
         self._dynamic_names = dynamic_names
         self._discovered.intersection_update(self._tools)
         return self.snapshot()
+
+    def _provider_compatible(
+        self,
+        tools: Iterable[ToolDefinition],
+        *,
+        quarantine: bool,
+    ) -> tuple[ToolDefinition, ...]:
+        compatible: list[ToolDefinition] = []
+        for tool in tools:
+            try:
+                strict_provider_schema(tool.contract.input_schema)
+            except StrictSchemaError as exc:
+                if not quarantine:
+                    raise
+                self._refresh_diagnostics.append(
+                    {
+                        "code": exc.code,
+                        "tool": tool.name,
+                        "error": str(exc),
+                        "error_type": type(exc).__name__,
+                    }
+                )
+                continue
+            compatible.append(tool)
+        return tuple(compatible)
 
     @property
     def refresh_diagnostics(self) -> tuple[dict[str, str], ...]:

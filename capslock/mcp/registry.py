@@ -137,10 +137,17 @@ class McpRegistry:
                     if value.startswith(("env:", "keyring:"))
                     else value
                 )
-                if key.casefold() in {"authorization", "proxy-authorization"} and not value.startswith(("env:", "keyring:")):
-                    raise PolicyError("remote MCP authorization must use a credential reference")
+                if key.casefold() in {
+                    "authorization",
+                    "proxy-authorization",
+                } and not value.startswith(("env:", "keyring:")):
+                    raise PolicyError(
+                        "remote MCP authorization must use a credential reference"
+                    )
                 if not resolved:
-                    raise ValueError(f"MCP server {name} credential for {key} is missing")
+                    raise ValueError(
+                        f"MCP server {name} credential for {key} is missing"
+                    )
                 resolved_headers[key] = resolved
         else:
             resolved_headers = {}

@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import uuid
-
-from ...storage.repositories.core import now
 from ...runtime.prompts import PromptSection, PromptTrust
 from ..commands import CommandOutcome
 from .support import get_repositories, get_ui
@@ -35,10 +32,6 @@ async def context_info(context, parts: list[str], raw: str) -> CommandOutcome:
         *({"role": item["role"], "content": item["content"]} for item in entries),
     ]
     breakdown = manager.breakdown(messages, bundle)
-    message_tokens = breakdown.history
-    system_tokens = breakdown.system
-    tool_tokens = breakdown.tools
-    compaction_tokens = breakdown.compaction
     total = breakdown.total
     budget = context.session.context_budget.input_budget
     trigger = int(budget * context.session.context_budget.settings.trigger_ratio)
@@ -80,22 +73,4 @@ async def context_info(context, parts: list[str], raw: str) -> CommandOutcome:
         f"{context.session.context_budget.last_micro_compaction_saved_tokens} tokens"
     )
     await get_ui(context).show("Context", "\n".join(lines))
-    await repositories.database.execute(
-        """INSERT INTO context_snapshots(id,session_id,compaction_id,system_tokens,tool_tokens,
-           message_tokens,memory_tokens,compaction_tokens,total_tokens,input_budget,trigger_tokens,stable,created_at)
-           VALUES(?,?,?,?,?,?,0,?,?,?,?,1,?)""",
-        (
-            f"ctx_{uuid.uuid4().hex}",
-            context.session.session_id,
-            active.id if active else None,
-            system_tokens,
-            tool_tokens,
-            message_tokens,
-            compaction_tokens,
-            total,
-            budget,
-            trigger,
-            now(),
-        ),
-    )
     return CommandOutcome()

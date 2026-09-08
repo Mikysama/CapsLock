@@ -156,6 +156,9 @@ async def live(
         print(serialized, end="")
         return 0
     client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+    from capslock.runtime import AsyncOpenAIResponsesModel
+
+    model_client = AsyncOpenAIResponsesModel(client)
     fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
     from capslock.tooling.tools.builtins import workspace_tools
 
@@ -172,21 +175,21 @@ async def live(
                 },
                 {"role": "user", "content": item["prompt"]},
             ]
-            response = await client.chat.completions.create(
+            response = await model_client.complete(
                 model=model,
                 messages=messages,
                 tools=schemas,
-                max_tokens=128,
+                max_output_tokens=128,
             )
-            assistant = response.choices[0].message
-            calls = list(assistant.tool_calls or ())
+            assistant = response.message
+            calls = list(assistant.tool_calls)
             first = calls[0] if calls else None
-            selected = first.function.name if first is not None else None
+            selected = first.name if first is not None else None
             arguments: dict[str, object] = {}
             schema_valid = False
             if first is not None:
                 try:
-                    decoded = json.loads(first.function.arguments)
+                    decoded = json.loads(first.arguments)
                     if isinstance(decoded, dict):
                         arguments = decoded
                         contract = runtime.contract(selected)
@@ -209,8 +212,8 @@ async def live(
                             "id": call.id,
                             "type": "function",
                             "function": {
-                                "name": call.function.name,
-                                "arguments": call.function.arguments,
+                                "name": call.name,
+                                "arguments": call.arguments,
                             },
                         }
                         for call in calls
@@ -231,13 +234,13 @@ async def live(
                         ),
                     }
                 )
-            final = await client.chat.completions.create(
+            final = await model_client.complete(
                 model=model,
                 messages=messages,
                 tools=schemas,
-                max_tokens=128,
+                max_output_tokens=128,
             )
-            text = final.choices[0].message.content or ""
+            text = final.message.content or ""
             first_usage, final_usage = response.usage, final.usage
             samples.append(
                 {
@@ -255,12 +258,10 @@ async def live(
                     ),
                     "latency_seconds": round(time.monotonic() - started, 4),
                     "input_tokens": int(
-                        (first_usage.prompt_tokens if first_usage else 0)
-                        + (final_usage.prompt_tokens if final_usage else 0)
+                        first_usage.input_tokens + final_usage.input_tokens
                     ),
                     "output_tokens": int(
-                        (first_usage.completion_tokens if first_usage else 0)
-                        + (final_usage.completion_tokens if final_usage else 0)
+                        first_usage.output_tokens + final_usage.output_tokens
                     ),
                 }
             )

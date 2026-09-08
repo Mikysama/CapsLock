@@ -34,7 +34,9 @@ async def deterministic() -> dict[str, object]:
     results = []
     with tempfile.TemporaryDirectory(prefix="capslock-context-eval-") as temporary:
         root = Path(temporary)
-        repositories = await WorkspaceRepositories.open(root / "state.db", workspace=root)
+        repositories = await WorkspaceRepositories.open(
+            root / "state.db", workspace=root
+        )
         try:
             for position in fixture["positions"]:
                 for kind in fixture["kinds"]:
@@ -62,7 +64,9 @@ async def deterministic() -> dict[str, object]:
                         )
                     else:
                         store = ToolArtifactStore(
-                            root / "artifacts", repositories.database, repositories.episodic
+                            root / "artifacts",
+                            repositories.database,
+                            repositories.episodic,
                         )
                         await store.put(
                             session_id=session.id,
@@ -73,11 +77,15 @@ async def deterministic() -> dict[str, object]:
                         "CapsLock canary", session_id=session.id, limit=5
                     )
                     passed = any(canary in hit.content for hit in hits)
-                    results.append({"position": position, "kind": kind, "passed": passed})
+                    results.append(
+                        {"position": position, "kind": kind, "passed": passed}
+                    )
         finally:
             await repositories.close()
     by_position = {
-        position: sum(item["passed"] for item in results if item["position"] == position)
+        position: sum(
+            item["passed"] for item in results if item["position"] == position
+        )
         / sum(1 for item in results if item["position"] == position)
         for position in fixture["positions"]
     }
@@ -97,13 +105,17 @@ async def live(model: str) -> dict[str, object]:
     fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
     client = AsyncOpenAI(
         api_key=os.environ.get("OPENAI_API_KEY") or os.environ.get("CAPSLOCK_API_KEY"),
-        base_url=os.environ.get("OPENAI_BASE_URL") or os.environ.get("CAPSLOCK_BASE_URL"),
+        base_url=os.environ.get("OPENAI_BASE_URL")
+        or os.environ.get("CAPSLOCK_BASE_URL"),
     )
     samples = []
     try:
         for position in fixture["positions"]:
             prompt = "\n".join(
-                [*_positioned(str(fixture["canary"]), position), str(fixture["question"])]
+                [
+                    *_positioned(str(fixture["canary"]), position),
+                    str(fixture["question"]),
+                ]
             )
             response = await client.responses.create(model=model, input=prompt)
             text = response.output_text
@@ -116,7 +128,9 @@ async def live(model: str) -> dict[str, object]:
     finally:
         await client.close()
     by_position = {
-        position: float(next(item["passed"] for item in samples if item["position"] == position))
+        position: float(
+            next(item["passed"] for item in samples if item["position"] == position)
+        )
         for position in fixture["positions"]
     }
     return {
@@ -130,13 +144,20 @@ async def live(model: str) -> dict[str, object]:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=("deterministic", "live"), default="deterministic")
+    parser.add_argument(
+        "--mode", choices=("deterministic", "live"), default="deterministic"
+    )
     parser.add_argument("--model", default="gpt-4.1-mini")
     args = parser.parse_args()
     result = asyncio.run(live(args.model) if args.mode == "live" else deterministic())
     print(json.dumps(result, ensure_ascii=False, indent=2))
     minimum = 1.0 if args.mode == "deterministic" else 0.95
-    return 0 if min(result["by_position"].values()) >= minimum and result["position_gap"] <= 0.05 else 1
+    return (
+        0
+        if min(result["by_position"].values()) >= minimum
+        and result["position_gap"] <= 0.05
+        else 1
+    )
 
 
 if __name__ == "__main__":

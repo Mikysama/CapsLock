@@ -21,7 +21,11 @@ from ..domain import (
 
 class WorkflowPort(Protocol):
     async def enqueue(
-        self, session_id: str, question: str, *, parent_work_item_id: str | None = None,
+        self,
+        session_id: str,
+        question: str,
+        *,
+        parent_work_item_id: str | None = None,
         kind: RunKind = RunKind.AGENT,
     ) -> WorkItemInfo: ...
     async def prepare(
@@ -56,7 +60,11 @@ class WorkflowPort(Protocol):
 
 class WorkItemRepositoryPort(Protocol):
     async def enqueue(
-        self, session_id: str, question: str, *, parent_work_item_id: str | None = None,
+        self,
+        session_id: str,
+        question: str,
+        *,
+        parent_work_item_id: str | None = None,
         kind: RunKind = RunKind.AGENT,
     ) -> WorkItemInfo: ...
     async def require(self, item_id: str) -> WorkItemInfo: ...
@@ -168,8 +176,9 @@ class RunJournal(Protocol):
         ok: bool,
         summary: str,
         duration_ms: int,
+        *,
+        invocation_id: str,
     ) -> None: ...
-    async def record_citations(self, run_id: str, citations: list[Any]) -> None: ...
 
 
 class TaskPort(Protocol):
@@ -178,7 +187,9 @@ class TaskPort(Protocol):
     async def get(
         self, task_id: str, *, session_id: str | None = None
     ) -> TaskInfo | None: ...
-    async def update(self, task_id: str, session_id: str, **values: Any) -> TaskInfo: ...
+    async def update(
+        self, task_id: str, session_id: str, **values: Any
+    ) -> TaskInfo: ...
     async def replace(
         self, session_id: str, items: list[str], *, run_id: str | None = None
     ) -> list[TaskInfo]: ...

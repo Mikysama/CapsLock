@@ -91,7 +91,7 @@ class RunEventBus:
     async def flush(self) -> None:
         async with self._lock:
             self._raise_failure()
-            pending, self._pending = self._pending, []
+            pending, self._pending = _coalesce_durable_events(self._pending), []
             self._pending_bytes = 0
             timer, self._timer = self._timer, None
             if timer is not None and timer is not asyncio.current_task():
@@ -215,3 +215,29 @@ def _context_payload(data: dict[str, object]) -> dict[str, object]:
             "source": source if source in {"estimate", "provider"} else "estimate",
         },
     }
+
+
+def _coalesce_durable_events(events: list[AgentEvent]) -> list[AgentEvent]:
+    output: list[AgentEvent] = []
+    coalescible = {AgentEventKind.TEXT_DELTA, AgentEventKind.THINKING}
+    for item in events:
+        if output and item.kind in coalescible and output[-1].kind is item.kind:
+            previous = output[-1]
+            output[-1] = AgentEvent(
+                item.sequence,
+                item.timestamp,
+                item.session_id,
+                item.run_id,
+                item.work_item_id,
+                item.kind,
+                {
+                    **item.data,
+                    "text": str(previous.data.get("text", ""))
+                    + str(item.data.get("text", "")),
+                },
+                item.event_id,
+                item.trace_id,
+            )
+        else:
+            output.append(item)
+    return output

@@ -36,7 +36,6 @@ from ..domain import (
     StopReason,
     WorkItemStatus,
 )
-from ..evidence import Evidence
 from ..external import assess_prompt_injection
 from ..instructions import InstructionLoader
 from ..interaction import RunInteraction
@@ -449,6 +448,7 @@ class AgentSession:
         limits: RunLimits | None,
         authorize_limit: Callable[[BudgetSnapshot], Awaitable[bool]] | None,
         memory_mode: MemoryRunMode,
+        response_format: dict[str, object] | None,
         consumer: Callable[[AgentEvent], Awaitable[None]],
     ) -> None:
         normalized = question.strip()
@@ -684,6 +684,7 @@ class AgentSession:
                     chat_model=model_session,
                     compact_context=compact_context,
                     usage_observer=observe_context_usage,
+                    response_format=response_format,
                 )
             except asyncio.CancelledError:
                 loop_status = "cancelled"
@@ -716,9 +717,6 @@ class AgentSession:
             )
             assistant_message_id = await self.sessions.append_message(
                 self.session_id, run_id, "assistant", text
-            )
-            await self.journal.record_citations(
-                run_id, [item for item in citations if isinstance(item, Evidence)]
             )
             pending = await self.action_records.list(
                 self.session_id,

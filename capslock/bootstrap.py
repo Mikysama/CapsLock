@@ -33,11 +33,12 @@ from .policy import WorkspacePolicy
 from .plugins import PluginProcessClient, PluginRegistry
 from .lsp import LspManager
 from .mcp import McpManager
-from .runtime import AgentSession, AsyncOpenAIChatModel, ModelRouter
+from .runtime import AgentSession, AsyncOpenAIResponsesModel, ModelRouter
 from .runtime.agent import INSTRUCTIONS
 from .shell import ModelShellClassifier, SessionProcessManager
 from .skills import SkillRegistry, SkillService
 from .storage.memory_repositories import MemoryRepositories
+from .storage.retention import run_retention_maintenance
 from .storage.repositories import WorkspaceRepositories
 from .workspace_writes import WorkspaceMutationCoordinator
 from .storage.artifacts import ToolArtifactStore
@@ -129,6 +130,11 @@ class WorkspaceApplication:
             )
             resources.push_async_callback(repositories.close)
             resources.push_async_callback(memory_repositories.close)
+            await run_retention_maintenance(
+                repositories.database,
+                memory_repositories.database,
+                settings.storage,
+            )
             if settings.observability.enabled:
                 await repositories.performance.prune(
                     days=settings.observability.retention_days,
@@ -227,18 +233,14 @@ class WorkspaceApplication:
             )
             raw_clients = client if isinstance(client, dict) else {"default": client}
             adapters = {
-                name: AsyncOpenAIChatModel(
+                name: AsyncOpenAIResponsesModel(
                     item,
                     max_output_tokens={
                         profile.model: profile.max_output_tokens
                         for profile in (settings.models or {}).values()
                         if profile.provider == name
                     },
-                    strict_tools=(
-                        (settings.providers or {})[name].strict_tool_calls
-                        if name in (settings.providers or {})
-                        else False
-                    ),
+                    strict_tools=True,
                 )
                 for name, item in raw_clients.items()
             }

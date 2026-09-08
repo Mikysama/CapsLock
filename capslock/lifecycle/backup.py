@@ -44,16 +44,18 @@ class BackupService:
         return self.layout.user.home / "backups" / identity
 
     def create(self, destination: Path | None = None) -> Path:
+        with self.io.locks():
+            return self.create_under_lock(destination)
+
+    def create_under_lock(self, destination: Path | None = None) -> Path:
+        """Create a backup while the caller already owns lifecycle locks."""
         self.directory.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
         target = destination or self.directory / f"capslock-{stamp}.clbackup"
         target = target.expanduser().resolve()
         if target.exists():
             raise FileExistsError(f"backup already exists: {target}")
-        with (
-            self.io.locks(),
-            tempfile.TemporaryDirectory(prefix="capslock-backup-") as raw,
-        ):
+        with tempfile.TemporaryDirectory(prefix="capslock-backup-") as raw:
             stage = Path(raw)
             missing: list[str] = []
             self.io.snapshot_database(

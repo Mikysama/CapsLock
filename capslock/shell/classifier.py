@@ -8,6 +8,12 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from ..structured_output import (
+    SHELL_CLASSIFICATION_SCHEMA,
+    json_schema_response_format,
+    validate_structured_response,
+)
+
 
 @dataclass(frozen=True)
 class ShellClassification:
@@ -36,8 +42,7 @@ class ModelShellClassifier:
             "parsed": list(parsed),
         }
         prompt = (
-            "Classify this command only within a no-network OS sandbox. Return JSON "
-            'with behavior="allow" or "ask", confidence 0..1, and a short reason. '
+            "Classify this command only within a no-network OS sandbox. "
             "Never allow privilege escalation, device access, sandbox escape, or uncertain targets.\n"
             + json.dumps(payload, ensure_ascii=False, sort_keys=True)
         )
@@ -54,8 +59,17 @@ class ModelShellClassifier:
                         {"role": "user", "content": prompt},
                     ],
                     tools=[],
+                    response_format=json_schema_response_format(
+                        "shell_classification", SHELL_CLASSIFICATION_SCHEMA
+                    ),
                 )
-            raw = json.loads(str(response.message.content or ""))
+            raw = validate_structured_response(
+                response.message.content,
+                json_schema_response_format(
+                    "shell_classification", SHELL_CLASSIFICATION_SCHEMA
+                ),
+                schema=SHELL_CLASSIFICATION_SCHEMA,
+            )
             behavior = str(raw["behavior"])
             confidence = float(raw["confidence"])
             reason = str(raw["reason"])[:1024]

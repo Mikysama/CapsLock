@@ -76,6 +76,7 @@ def test_non_current_config_is_rejected_and_init_is_noninteractive(
     assert result == 0
     generated = read_config_document(fresh / ".capslock" / "config.toml")
     assert generated["config_version"] == CONFIG_VERSION
+    assert generated["providers"]["primary"]["kind"] == "openai_responses"
     assert generated["providers"]["primary"]["credential"] == "env:CAPSLOCK_API_KEY"
     assert "test-secret" not in (fresh / ".capslock" / "config.toml").read_text()
 
@@ -138,8 +139,8 @@ def test_backup_verification_and_tamper_rejection(tmp_path: Path, monkeypatch) -
             '{"servers":{"demo":{"env":{"TOKEN":"mcp-secret"}}}}',
             encoding="utf-8",
         )
-        assert _version(layout.database) == WORKSPACE_SCHEMA_VERSION == 18
-        assert _version(layout.user.memory) == MEMORY_SCHEMA_VERSION == 5
+        assert _version(layout.database) == WORKSPACE_SCHEMA_VERSION == 20
+        assert _version(layout.user.memory) == MEMORY_SCHEMA_VERSION == 6
         service = LifecycleService(layout)
         backup = service.backup_create(tmp_path / "state.clbackup")
         assert service.verify(backup)["format"] == "capslock-backup"

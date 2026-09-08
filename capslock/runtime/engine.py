@@ -25,6 +25,7 @@ class RunRequest:
     limits: RunLimits | None = None
     authorize_limit: Callable[[BudgetSnapshot], Awaitable[bool]] | None = None
     memory_mode: MemoryRunMode = MemoryRunMode.DEFAULT
+    response_format: dict[str, object] | None = None
 
 
 RunConsumer = Callable[[AgentEvent], Awaitable[None]]
@@ -61,6 +62,7 @@ class RunEngine:
                         limits=request.limits,
                         authorize_limit=request.authorize_limit,
                         memory_mode=request.memory_mode,
+                        response_format=request.response_format,
                         consumer=consume,
                     )
                 finally:

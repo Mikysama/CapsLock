@@ -3,7 +3,7 @@
 from .agent import AgentRuntimeError, AgentSession
 from .engine import MemoryRunMode, RunEngine, RunRequest
 from .model import (
-    AsyncOpenAIChatModel,
+    AsyncOpenAIResponsesModel,
     ChatModel,
     ModelDelta,
     ModelMessage,
@@ -22,7 +22,7 @@ from .prompts import PromptBundle, PromptSection, PromptTrust
 __all__ = [
     "AgentRuntimeError",
     "AgentSession",
-    "AsyncOpenAIChatModel",
+    "AsyncOpenAIResponsesModel",
     "ChatModel",
     "ModelDelta",
     "ModelMessage",

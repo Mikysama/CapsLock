@@ -2,8 +2,8 @@
 
 WORKSPACE_APPLICATION_ID = 0x434C4B32  # CLK2
 MEMORY_APPLICATION_ID = 0x434C4D32  # CLM2
-WORKSPACE_SCHEMA_VERSION = 18
-MEMORY_SCHEMA_VERSION = 5
+WORKSPACE_SCHEMA_VERSION = 20
+MEMORY_SCHEMA_VERSION = 6
 
 WORKSPACE_SCHEMA = """
 CREATE TABLE database_metadata (
@@ -87,7 +87,6 @@ CREATE TABLE run_steps (
   error TEXT,
   UNIQUE(run_id,ordinal)
 ) STRICT;
-CREATE INDEX idx_run_steps_run ON run_steps(run_id,ordinal);
 CREATE TABLE run_events (
   id INTEGER PRIMARY KEY,
   run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
@@ -158,6 +157,7 @@ CREATE TABLE tasks (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 ) STRICT;
+CREATE INDEX idx_tasks_session_order ON tasks(session_id,position,created_at);
 CREATE TABLE task_dependencies (
   task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
   blocked_by_task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
@@ -175,6 +175,7 @@ CREATE TABLE sources (
   fetched_at TEXT NOT NULL,
   suspicious INTEGER NOT NULL DEFAULT 0 CHECK(suspicious IN (0,1))
 ) STRICT;
+CREATE INDEX idx_sources_session_time ON sources(session_id,fetched_at);
 CREATE TABLE tool_calls (
   id INTEGER PRIMARY KEY,
   run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
@@ -182,8 +183,10 @@ CREATE TABLE tool_calls (
   arguments_json TEXT NOT NULL CHECK(json_valid(arguments_json)),
   ok INTEGER NOT NULL CHECK(ok IN (0,1)),
   result_summary TEXT NOT NULL,
-  duration_ms INTEGER NOT NULL CHECK(duration_ms>=0)
+  duration_ms INTEGER NOT NULL CHECK(duration_ms>=0),
+  invocation_id TEXT REFERENCES tool_invocations(id) ON DELETE SET NULL
 ) STRICT;
+CREATE UNIQUE INDEX idx_tool_calls_invocation ON tool_calls(invocation_id);
 CREATE TABLE tool_invocations (
   id TEXT PRIMARY KEY,
   run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
@@ -208,9 +211,12 @@ CREATE TABLE tool_invocations (
   started_at TEXT NOT NULL,
   finished_at TEXT,
   duration_ms INTEGER CHECK(duration_ms IS NULL OR duration_ms>=0),
+  delivered_result_json TEXT CHECK(delivered_result_json IS NULL OR json_valid(delivered_result_json)),
   UNIQUE(run_id,sequence)
 ) STRICT;
-CREATE INDEX idx_tool_invocations_run ON tool_invocations(run_id,sequence);
+CREATE UNIQUE INDEX idx_tool_invocations_call ON tool_invocations(run_id,tool_call_id);
+CREATE INDEX idx_tool_invocations_working_set
+  ON tool_invocations(session_id,name,status,finished_at DESC,sequence DESC);
 CREATE TABLE tool_input_requests (
   id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -322,7 +328,6 @@ CREATE TABLE plan_revisions (
   UNIQUE(plan_id,ordinal),
   UNIQUE(plan_id,sha256)
 ) STRICT;
-CREATE INDEX idx_plan_revisions_plan ON plan_revisions(plan_id,ordinal);
 CREATE TABLE plan_requests (
   id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -356,14 +361,6 @@ CREATE TABLE tool_discoveries (
   catalog_generation INTEGER NOT NULL CHECK(catalog_generation>=1),
   created_at TEXT NOT NULL,
   PRIMARY KEY(session_id,tool_name)
-) STRICT;
-CREATE TABLE tool_result_replacements (
-  tool_call_id TEXT PRIMARY KEY,
-  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-  invocation_id TEXT REFERENCES tool_invocations(id) ON DELETE SET NULL,
-  delivery_status TEXT NOT NULL CHECK(delivery_status IN ('artifact','truncated','delivery_failed')),
-  replacement_json TEXT NOT NULL CHECK(json_valid(replacement_json)),
-  created_at TEXT NOT NULL
 ) STRICT;
 CREATE TABLE context_compactions (
   id TEXT PRIMARY KEY,
@@ -471,31 +468,6 @@ CREATE TABLE session_context_state (
   active_compaction_id TEXT REFERENCES context_compactions(id) ON DELETE SET NULL,
   updated_at TEXT NOT NULL
 ) STRICT;
-CREATE TABLE context_snapshots (
-  id TEXT PRIMARY KEY,
-  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-  run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
-  compaction_id TEXT REFERENCES context_compactions(id) ON DELETE SET NULL,
-  system_tokens INTEGER NOT NULL DEFAULT 0 CHECK(system_tokens>=0),
-  tool_tokens INTEGER NOT NULL DEFAULT 0 CHECK(tool_tokens>=0),
-  message_tokens INTEGER NOT NULL DEFAULT 0 CHECK(message_tokens>=0),
-  memory_tokens INTEGER NOT NULL DEFAULT 0 CHECK(memory_tokens>=0),
-  compaction_tokens INTEGER NOT NULL DEFAULT 0 CHECK(compaction_tokens>=0),
-  total_tokens INTEGER NOT NULL CHECK(total_tokens>=0),
-  input_budget INTEGER NOT NULL CHECK(input_budget>0),
-  trigger_tokens INTEGER NOT NULL CHECK(trigger_tokens>=0),
-  stable INTEGER NOT NULL DEFAULT 1 CHECK(stable IN (0,1)),
-  created_at TEXT NOT NULL
-) STRICT;
-CREATE INDEX idx_context_snapshots_session ON context_snapshots(session_id,created_at);
-CREATE TABLE citations (
-  id INTEGER PRIMARY KEY,
-  run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-  citation_id TEXT NOT NULL,
-  path TEXT NOT NULL,
-  start_line INTEGER NOT NULL CHECK(start_line>=1),
-  end_line INTEGER NOT NULL CHECK(end_line>=start_line)
-) STRICT;
 CREATE TABLE workspace_settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -581,7 +553,6 @@ CREATE TABLE IF NOT EXISTS tool_call_attempts (
   finished_at TEXT,
   UNIQUE(run_id,sequence)
 ) STRICT;
-CREATE INDEX IF NOT EXISTS idx_tool_call_attempts_run ON tool_call_attempts(run_id,sequence);
 CREATE VIRTUAL TABLE session_search USING fts5(
   session_id UNINDEXED,
   kind UNINDEXED,
@@ -665,7 +636,6 @@ CREATE TABLE agent_attempts (
   finished_at TEXT,
   UNIQUE(task_id,ordinal)
 ) STRICT;
-CREATE INDEX idx_agent_attempts_task ON agent_attempts(task_id,ordinal);
 CREATE TABLE agent_checkpoints (
   attempt_id TEXT PRIMARY KEY REFERENCES agent_attempts(id) ON DELETE CASCADE,
   contract_sha256 TEXT NOT NULL,
@@ -687,6 +657,7 @@ CREATE TABLE agent_budget_ledger (
   created_at TEXT NOT NULL
 ) STRICT;
 CREATE INDEX idx_agent_budget_attempt ON agent_budget_ledger(attempt_id,created_at);
+CREATE INDEX idx_agent_budget_team ON agent_budget_ledger(team_id,created_at);
 CREATE TABLE agent_approval_links (
   id TEXT PRIMARY KEY,
   attempt_id TEXT NOT NULL REFERENCES agent_attempts(id) ON DELETE CASCADE,
@@ -700,6 +671,7 @@ CREATE TABLE agent_approval_links (
   decided_at TEXT,
   UNIQUE(attempt_id,child_action_id)
 ) STRICT;
+CREATE INDEX idx_agent_approval_links_parent ON agent_approval_links(parent_action_id);
 CREATE TABLE agent_workspaces (
   task_id TEXT PRIMARY KEY REFERENCES agent_tasks(id) ON DELETE CASCADE,
   worker_id TEXT REFERENCES agent_workers(id) ON DELETE SET NULL,
@@ -712,12 +684,8 @@ CREATE TABLE agent_workspaces (
   created_at TEXT NOT NULL,
   cleaned_at TEXT
 ) STRICT;
-CREATE TABLE agent_capabilities (
-  task_id TEXT NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
-  ordinal INTEGER NOT NULL CHECK(ordinal>=0),
-  capability_json TEXT NOT NULL CHECK(json_valid(capability_json)),
-  PRIMARY KEY(task_id,ordinal)
-) STRICT;
+CREATE INDEX idx_agent_workspaces_worker_open
+  ON agent_workspaces(worker_id,cleaned_at,created_at);
 CREATE TABLE agent_messages (
   id TEXT PRIMARY KEY,
   task_id TEXT NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
@@ -734,7 +702,6 @@ CREATE TABLE agent_messages (
   created_at TEXT NOT NULL,
   UNIQUE(task_id,sequence)
 ) STRICT;
-CREATE INDEX idx_agent_messages_task ON agent_messages(task_id,sequence);
 CREATE TABLE agent_mailbox (
   id TEXT PRIMARY KEY,
   task_id TEXT NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
@@ -754,6 +721,8 @@ CREATE TABLE agent_mailbox (
   acknowledged_at TEXT
 ) STRICT;
 CREATE INDEX idx_agent_mailbox_delivery ON agent_mailbox(task_id,recipient,status,created_at);
+CREATE INDEX idx_agent_mailbox_worker_delivery
+  ON agent_mailbox(worker_id,recipient,status,created_at);
 CREATE TABLE agent_outputs (
   task_id TEXT PRIMARY KEY REFERENCES agent_tasks(id) ON DELETE CASCADE,
   attempt_id TEXT REFERENCES agent_attempts(id) ON DELETE SET NULL,
@@ -791,6 +760,7 @@ CREATE TABLE performance_spans (
 ) STRICT;
 CREATE INDEX idx_performance_spans_trace ON performance_spans(trace_id,created_at);
 CREATE INDEX idx_performance_spans_name ON performance_spans(category,name,created_at);
+CREATE INDEX idx_performance_spans_created ON performance_spans(created_at);
 """
 
 MEMORY_SCHEMA = """
@@ -944,6 +914,8 @@ CREATE TABLE memory_candidate_sources (
   created_at TEXT NOT NULL,
   CHECK(message_id IS NOT NULL OR evidence_id IS NOT NULL)
 ) STRICT;
+CREATE INDEX idx_memory_candidate_sources_candidate
+  ON memory_candidate_sources(candidate_id,id);
 CREATE TABLE memory_sources (
   id INTEGER PRIMARY KEY,
   memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
@@ -993,7 +965,10 @@ CREATE TABLE memory_jobs (
   started_at TEXT,
   completed_at TEXT
 ) STRICT;
-CREATE INDEX idx_memory_jobs_ready ON memory_jobs(status,available_at,created_at);
+CREATE INDEX idx_memory_jobs_claim
+  ON memory_jobs(status,workspace_key,job_type,created_at,available_at);
+CREATE INDEX idx_memory_jobs_history
+  ON memory_jobs(workspace_key,status,created_at DESC);
 CREATE TABLE memory_review_proposals (
   id TEXT PRIMARY KEY,
   workspace_key TEXT NOT NULL,
@@ -1033,6 +1008,8 @@ CREATE TABLE memory_recalls (
   query_hash TEXT NOT NULL,
   created_at TEXT NOT NULL
 ) STRICT;
+CREATE INDEX idx_memory_recalls_session_latest
+  ON memory_recalls(workspace_key,session_id,created_at DESC);
 CREATE TABLE memory_recall_items (
   run_id TEXT NOT NULL REFERENCES memory_recalls(run_id) ON DELETE CASCADE,
   memory_id TEXT NOT NULL,
@@ -1058,6 +1035,8 @@ CREATE TABLE memory_accesses (
   PRIMARY KEY(memory_id,revision,workspace_key,session_id,run_id),
   FOREIGN KEY(memory_id,revision) REFERENCES memory_revisions(memory_id,revision) ON DELETE CASCADE
 ) STRICT;
+CREATE INDEX idx_memory_accesses_session
+  ON memory_accesses(workspace_key,session_id,run_id,memory_id,revision);
 CREATE TABLE memory_audit (
   id INTEGER PRIMARY KEY,
   memory_id TEXT,

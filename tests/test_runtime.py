@@ -27,7 +27,7 @@ from capslock.observability import EventSink
 from capslock.permissions import PermissionMode
 from capslock.planning import PlanningService
 from capslock.policy import WorkspacePolicy
-from capslock.runtime import AgentSession, AsyncOpenAIChatModel, RunRequest
+from capslock.runtime import AgentSession, AsyncOpenAIResponsesModel, RunRequest
 from capslock.runtime.model import (
     ModelMessage,
     ModelResponse,
@@ -885,30 +885,22 @@ def test_tool_loop_can_use_two_argument_repairs_when_configured(tmp_path: Path) 
 
 def test_async_openai_stream_exposes_reasoning_and_answer_separately() -> None:
     async def scenario() -> None:
+        captured = {}
         chunks = [
             SimpleNamespace(
-                choices=[
-                    SimpleNamespace(
-                        delta=SimpleNamespace(
-                            reasoning_content="inspect the repository",
-                            content=None,
-                            tool_calls=(),
-                        )
-                    )
-                ],
-                usage=None,
+                type="response.reasoning_text.delta",
+                delta="inspect the repository",
             ),
             SimpleNamespace(
-                choices=[
-                    SimpleNamespace(
-                        delta=SimpleNamespace(
-                            reasoning_content=None,
-                            content="final answer",
-                            tool_calls=(),
-                        )
-                    )
-                ],
-                usage=None,
+                type="response.output_text.delta",
+                delta="final answer",
+            ),
+            SimpleNamespace(
+                type="response.completed",
+                delta=None,
+                response=SimpleNamespace(
+                    usage=SimpleNamespace(input_tokens=3, output_tokens=2)
+                ),
             ),
         ]
 
@@ -921,22 +913,104 @@ def test_async_openai_stream_exposes_reasoning_and_answer_separately() -> None:
                     raise StopAsyncIteration
                 return chunks.pop(0)
 
-        class Completions:
+        class Responses:
             async def create(self, **kwargs):
+                captured.update(kwargs)
                 return Stream()
 
-        client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
+        client = SimpleNamespace(responses=Responses())
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {"name": "result", "schema": {"type": "object"}},
+        }
         deltas = [
             item
-            async for item in AsyncOpenAIChatModel(client).stream_complete(
-                model="test", messages=[], tools=[]
+            async for item in AsyncOpenAIResponsesModel(client).stream_complete(
+                model="test",
+                messages=[],
+                tools=[],
+                response_format=response_format,
             )
         ]
         assert [item.reasoning for item in deltas] == [
             "inspect the repository",
             "",
+            "",
         ]
-        assert [item.content for item in deltas] == ["", "final answer"]
+        assert [item.content for item in deltas] == ["", "final answer", ""]
+        assert deltas[-1].usage == ModelUsage(3, 2)
+        assert captured["text"]["format"] == {
+            "type": "json_schema",
+            "name": "result",
+            "strict": True,
+            "schema": {"type": "object"},
+        }
+        assert captured["input"] == []
+        assert captured["stream"] is True
+
+    asyncio.run(scenario())
+
+
+def test_async_openai_responses_stream_exposes_function_calls() -> None:
+    async def scenario() -> None:
+        events = [
+            SimpleNamespace(
+                type="response.output_item.added",
+                output_index=1,
+                delta=None,
+                item=SimpleNamespace(
+                    type="function_call",
+                    call_id="call-1",
+                    id="item-1",
+                    name="read",
+                    arguments="",
+                ),
+            ),
+            SimpleNamespace(
+                type="response.function_call_arguments.delta",
+                output_index=1,
+                delta='{"path":',
+            ),
+            SimpleNamespace(
+                type="response.function_call_arguments.delta",
+                output_index=1,
+                delta='"README.md"}',
+            ),
+            SimpleNamespace(
+                type="response.completed",
+                delta=None,
+                response=SimpleNamespace(
+                    usage=SimpleNamespace(input_tokens=8, output_tokens=4)
+                ),
+            ),
+        ]
+
+        class Stream:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if not events:
+                    raise StopAsyncIteration
+                return events.pop(0)
+
+        class Responses:
+            async def create(self, **kwargs):
+                return Stream()
+
+        deltas = [
+            item
+            async for item in AsyncOpenAIResponsesModel(
+                SimpleNamespace(responses=Responses())
+            ).stream_complete(model="test", messages=[], tools=[])
+        ]
+        assert deltas[0].tool_index == 1
+        assert deltas[0].tool_call_id == "call-1"
+        assert deltas[0].tool_name == "read"
+        assert "".join(item.tool_arguments for item in deltas) == (
+            '{"path":"README.md"}'
+        )
+        assert deltas[-1].usage == ModelUsage(8, 4)
 
     asyncio.run(scenario())
 
@@ -945,23 +1019,32 @@ def test_async_openai_strict_tools_require_nullable_optional_fields() -> None:
     async def scenario() -> None:
         captured = {}
 
-        class Completions:
+        class Responses:
             async def create(self, **kwargs):
                 captured.update(kwargs)
-                message = SimpleNamespace(
-                    content="done",
-                    tool_calls=(),
-                    reasoning_content=None,
-                    reasoning=None,
-                )
                 return SimpleNamespace(
-                    choices=[SimpleNamespace(message=message)], usage=None
+                    output=[],
+                    output_text="done",
+                    usage=SimpleNamespace(input_tokens=1, output_tokens=1),
                 )
 
-        client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
-        await AsyncOpenAIChatModel(client, strict_tools=True).complete(
+        client = SimpleNamespace(responses=Responses())
+        await AsyncOpenAIResponsesModel(client).complete(
             model="test",
-            messages=[],
+            messages=[
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "old-call",
+                            "type": "function",
+                            "function": {"name": "read", "arguments": '{"path":"a"}'},
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "old-call", "content": "result"},
+            ],
             tools=[
                 {
                     "type": "function",
@@ -980,7 +1063,9 @@ def test_async_openai_strict_tools_require_nullable_optional_fields() -> None:
                 }
             ],
         )
-        function = captured["tools"][0]["function"]
+        function = captured["tools"][0]
+        assert function["type"] == "function"
+        assert function["name"] == "read"
         assert function["strict"] is True
         assert function["parameters"]["additionalProperties"] is False
         assert function["parameters"]["required"] == ["path", "limit"]
@@ -988,6 +1073,89 @@ def test_async_openai_strict_tools_require_nullable_optional_fields() -> None:
             "integer",
             "null",
         ]
+        assert captured["input"] == [
+            {
+                "type": "function_call",
+                "call_id": "old-call",
+                "name": "read",
+                "arguments": '{"path":"a"}',
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "old-call",
+                "output": "result",
+            },
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_async_openai_rejects_non_strict_tool_schema_before_provider_call() -> None:
+    async def scenario() -> None:
+        called = False
+
+        class Responses:
+            async def create(self, **kwargs):
+                nonlocal called
+                called = True
+                raise AssertionError(kwargs)
+
+        client = SimpleNamespace(responses=Responses())
+        with pytest.raises(ValueError, match="strict_schema_incompatible"):
+            await AsyncOpenAIResponsesModel(client).complete(
+                model="test",
+                messages=[],
+                tools=[
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "bad",
+                            "description": "bad",
+                            "parameters": {"$ref": "#/$defs/input"},
+                        },
+                    }
+                ],
+            )
+        assert called is False
+
+    asyncio.run(scenario())
+
+
+def test_async_openai_forwards_provider_response_format() -> None:
+    async def scenario() -> None:
+        captured = {}
+
+        class Responses:
+            async def create(self, **kwargs):
+                captured.update(kwargs)
+                return SimpleNamespace(
+                    output=[],
+                    output_text='{"ok":true}',
+                    usage=SimpleNamespace(input_tokens=2, output_tokens=1),
+                )
+
+        client = SimpleNamespace(responses=Responses())
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {"name": "result", "schema": {"type": "object"}},
+        }
+        result = await AsyncOpenAIResponsesModel(client).complete(
+            model="test",
+            messages=[],
+            tools=[],
+            response_format=response_format,
+        )
+
+        assert captured["text"]["format"] == {
+            "type": "json_schema",
+            "name": "result",
+            "strict": True,
+            "schema": {"type": "object"},
+        }
+        assert "response_format" not in captured
+        assert "messages" not in captured
+        assert result.message.content == '{"ok":true}'
+        assert result.usage == ModelUsage(2, 1)
 
     asyncio.run(scenario())
 

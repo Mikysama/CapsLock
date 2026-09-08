@@ -140,6 +140,7 @@ class ModelStepExecutor:
         emit: Callable[[AgentEventKind, dict[str, Any]], Awaitable[None]],
         governor: RunGovernor | None,
         tool_schemas: list[dict[str, object]] | None = None,
+        response_format: dict[str, object] | None = None,
         usage_observer: Callable[
             [list[dict[str, object]], list[dict[str, object]], int], Awaitable[None]
         ]
@@ -159,6 +160,7 @@ class ModelStepExecutor:
                 model=self.model,
                 messages=messages,
                 tools=active_schemas,
+                response_format=response_format,
             )
             timeout = governor.remaining_seconds() if governor else None
             async with asyncio.timeout(timeout):
@@ -457,6 +459,7 @@ class ToolLoop:
             [list[dict[str, object]], list[dict[str, object]], int], Awaitable[None]
         ]
         | None = None,
+        response_format: dict[str, object] | None = None,
     ) -> ToolLoopResult:
         active_model = chat_model or self.chat_model
         evidence, source_ids, memories = {}, set(), {}
@@ -554,6 +557,7 @@ class ToolLoop:
                 governor=governor,
                 tool_schemas=selected_schemas,
                 usage_observer=usage_observer,
+                response_format=response_format,
             )
             input_tokens += usage.input_tokens
             output_tokens += usage.output_tokens

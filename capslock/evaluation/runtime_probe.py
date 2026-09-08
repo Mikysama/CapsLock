@@ -20,9 +20,9 @@ from .models import EvaluationTask, PolicyCandidate
 from .runner import _answer_matches, _expected_answer, _live_prompt
 
 
-class _CompletionsProxy:
-    def __init__(self, completions: Any) -> None:
-        self._completions = completions
+class _ResponsesProxy:
+    def __init__(self, responses: Any) -> None:
+        self._responses = responses
 
     async def create(self, **kwargs: Any) -> Any:
         extra = kwargs.get("extra_body")
@@ -34,12 +34,7 @@ class _CompletionsProxy:
             thinking = {}
             extra["thinking"] = thinking
         thinking.setdefault("type", "disabled")
-        return await self._completions.create(**kwargs)
-
-
-class _ChatProxy:
-    def __init__(self, chat: Any) -> None:
-        self.completions = _CompletionsProxy(chat.completions)
+        return await self._responses.create(**kwargs)
 
 
 class _ThinkingDisabledClient:
@@ -47,7 +42,7 @@ class _ThinkingDisabledClient:
 
     def __init__(self, client: AsyncOpenAI) -> None:
         self._client = client
-        self.chat = _ChatProxy(client.chat)
+        self.responses = _ResponsesProxy(client.responses)
 
 
 class WorkspaceRuntimeCandidateProbe:

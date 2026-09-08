@@ -2,7 +2,7 @@
 
 CapsLock 是一个本机工作区 Agent，用于读取和修改代码、检索证据、运行受沙箱保护的 Shell、查询代码语义，以及按审批策略访问 Web、MCP 和本地插件。Tool Runtime v2 将工具契约、参数级策略、可恢复暂停、调度、富结果与审计统一到异步执行链。
 
-当前源码版本标识为 `2.7.6.1`；main 开发协议已升级为 workspace schema 18。2.7.6.1 集中管理运行轮数、超时、并发、上下文、循环检测、Memory 与子 Agent 默认值，并增加版本化行为指标评测、可注入 Memory 召回策略和最多两轮参数修复；当前 main 进一步加入 session 级持久 Agent team、任务依赖图、可恢复 attempt 与 candidate-aware Runtime 评测。生产默认值仍未因评测自动改变。当前协议为 workspace schema 18、memory schema 5、portable archive 6、session export 6 和 config 10。稳定版本边界见 [2.7.6.1 发布说明](docs/releases/v2.7.6.1.md)，开发边界见 [current](docs/development/v2/current.md)。
+当前源码版本标识为 `2.7.6.2`。本版本将模型传输统一为 OpenAI Responses API，以 Provider strict JSON Schema 约束摘要、Memory、Shell 分类和子 Agent 输出，并保留同一 Schema 驱动的 Prompt 降级与本地校验；同时加入外部基准评测、数据库保留/显式压缩，并将可恢复状态收敛到 workspace schema 20、memory schema 6。当前协议还包括 portable archive 7、session export 7 和 config 13。稳定版本边界见 [2.7.6.2 发布说明](docs/releases/v2.7.6.2.md)，开发边界见 [current](docs/development/v2/current.md)。
 
 正式支持矩阵：Linux/macOS，Python 3.12。发布 CI 会在两个操作系统组合中执行测试、构建、依赖审计和安装冒烟。
 
@@ -73,6 +73,7 @@ printf '%s\n' "总结最近的改动" | capslock exec --json
 - `capslock input list|answer|cancel`：列出、回答或取消非交互运行留下的持久化用户输入请求。
 - `capslock init`、`config validate`、`credentials status|set|delete`：初始化、配置和凭据治理。
 - `capslock backup create|list|verify|restore`：本机状态回滚快照。
+- `capslock database compact --scope workspace|memory|all [--yes]`：备份并显式回收 SQLite 空闲页。
 - `capslock export` / `capslock import`：创建或安全合并 portable 数据包。
 - `capslock doctor [--json|--strict|--network|--fix]`：检查配置、凭据、数据库、MCP、Skill 与生命周期 journal。
 - `capslock trace list|show|summary|prune`：查看或清理只保存在本机的脱敏性能 span。
@@ -301,24 +302,27 @@ Inspect relevant files and return an evidence-backed summary.
 
 ## 配置
 
-配置根必须包含 `config_version = 10`。config v3-v9 会在原子备份后自动迁移；其他非当前格式拒绝加载。多模型使用 provider、credential reference、profile 和角色路由：
+配置根必须包含 `config_version = 13`。config v3-v12 会在原子备份后自动迁移；其他非当前格式拒绝加载。模型传输只使用 OpenAI Responses API，不保留 Chat Completions 回退。多模型使用 provider、credential reference、profile 和角色路由。携带工具的请求只会路由到 `strict_tool_calls=true` 的 provider；结构化正文优先路由到 `json_schema_outputs=true` 的 provider，若没有兼容候选则自动使用同一权威 Schema 的 Prompt 约束，并继续执行 Runtime 本地校验：
 
 ```toml
-config_version = 10
+config_version = 13
 
 [providers.primary]
-kind = "openai_compatible"
+kind = "openai_responses"
 base_url = "https://api.deepseek.com"
 credential = "env:CAPSLOCK_API_KEY"
 timeout_seconds = 60
 data_policy = "primary-provider"
-strict_tool_calls = false
+strict_tool_calls = true
+json_schema_outputs = true
 
 [providers.backup]
-kind = "openai_compatible"
+kind = "openai_responses"
 base_url = "https://api.example.com/v1"
 credential = "keyring:backup-model"
 data_policy = "primary-provider" # 只有相同策略才允许自动降级
+strict_tool_calls = true
+json_schema_outputs = true
 
 [models.main]
 provider = "primary"
@@ -330,7 +334,7 @@ output_cost_per_million = 0
 
 [models.backup]
 provider = "backup"
-model = "compatible-chat-model"
+model = "responses-model"
 context_window = 128000
 max_output_tokens = 8192
 input_cost_per_million = 1
@@ -446,7 +450,15 @@ manual_write_enabled = true
 maintenance_enabled = true
 policy = "automatic"
 temporary_ttl_days = 7
+
+[storage]
+maintenance_enabled = true
+operation_retention_days = 30
+audit_retention_days = 180
+maintenance_interval_hours = 24
 ```
+
+初始化时可用 `capslock init --strict-tool-calls --json-schema-outputs` 显式声明这两项能力；交互式初始化会逐项询问。旧配置迁移后两项未知能力保持 `false`，需由用户按 Provider 实际支持情况开启。
 
 自动、checkpoint 与 `/compact` 使用同一条 token-aware 压缩管线。最近历史按完整 user turn 与 API-safe tool round 保留，最多 6 turn/32K token，并始终保留最新完整 turn；超过 16 KiB 的旧 Tool Result 只有在 Artifact 写入成功后才外置。summary v3 记录用户纠正、当前工作、代码符号、验证状态、文件/Skill 引用及逐项来源映射；工作集只保存路径、digest、行区间和 invocation 引用，不自动重新注入文件或 Skill 正文。摘要生成失败会纠错一次，再生成带 `degraded`/`omissions` 和恢复提示的确定性摘要；只有最终仍超过模型硬输入预算才中止。
 
@@ -464,7 +476,7 @@ CapsLock 只接受 canonical 布局：
 - 计划镜像：`.capslock/state/plans/<session-id>/<plan-id>.md`
 - 用户记忆：`${CAPSLOCK_HOME:-~/.capslock}/state/memory.sqlite3`
 
-工作区库和记忆库使用不同的 SQLite `application_id`。当前 workspace schema 为 18，memory schema 为 5；workspace schema v6-v17 与 memory schema v3-v4 在 WAL checkpoint 和 SQLite backup 后事务升级。schema 18 保存 Agent team、worker、任务依赖、attempt/checkpoint、预算 ledger、审批关联和 workspace baseline。portable archive 与 session export 当前为 version 6，portable archive 读取兼容 version 3/4/5。旧 application ID、其他非当前 schema 或未知已有表均拒绝启动。
+工作区库和记忆库使用不同的 SQLite `application_id`。当前 workspace schema 为 20，memory schema 为 6；workspace schema v6-v19 与 memory schema v3-v5 在 WAL checkpoint 和 SQLite backup 后事务升级。schema 20 合并流式事件和 checkpoint 存储，移除可由权威数据替代的快照表，并保留 Agent 恢复、安全审计与状态机数据。portable archive 与 session export 当前为 version 7，portable archive 读取兼容 version 3–6。旧 application ID、其他非当前 schema 或未知已有表均拒绝启动。
 
 ## 架构
 

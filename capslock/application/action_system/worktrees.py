@@ -20,9 +20,7 @@ class WorkspaceExecutionScope:
         self.control_root = control_root.resolve()
         self.active_root = policy.root
         self.policy = policy
-        self._listener: (
-            Callable[[Path, WorkspacePolicy], Awaitable[None]] | None
-        ) = None
+        self._listener: Callable[[Path, WorkspacePolicy], Awaitable[None]] | None = None
 
     def bind(
         self, listener: Callable[[Path, WorkspacePolicy], Awaitable[None]]
@@ -57,7 +55,9 @@ class WorktreeActionHandler:
         self.max_per_session = max_per_session
         self.process_manager = process_manager
 
-    async def propose(self, action_type: ActionType, payload: dict[str, Any]) -> ActionProposal:
+    async def propose(
+        self, action_type: ActionType, payload: dict[str, Any]
+    ) -> ActionProposal:
         excluded = payload.get("_exclude_action")
         await self._preflight(
             exclude_action=str(excluded) if isinstance(excluded, str) else None
@@ -99,9 +99,15 @@ class WorktreeActionHandler:
         discard = bool(payload.get("discard_changes", False))
         path = Path(str(row["path"]))
         dirty = bool((await _git(path, "status", "--porcelain")).strip())
-        unmerged = bool((await _git(path, "log", "--oneline", f"{row['base_commit']}..HEAD")).strip())
+        unmerged = bool(
+            (
+                await _git(path, "log", "--oneline", f"{row['base_commit']}..HEAD")
+            ).strip()
+        )
         if action == "remove" and (dirty or unmerged) and not discard:
-            raise ValueError("worktree has uncommitted or unmerged changes; set discard_changes=true")
+            raise ValueError(
+                "worktree has uncommitted or unmerged changes; set discard_changes=true"
+            )
         request = {
             "worktree_id": str(row["id"]),
             "path": str(path),
@@ -124,18 +130,38 @@ class WorktreeActionHandler:
         if action.type is ActionType.WORKTREE_CREATE:
             path = Path(str(request["path"]))
             path.parent.mkdir(parents=True, exist_ok=True)
-            await _git(self.scope.control_root, "worktree", "add", "-b", str(request["branch"]), str(path), str(request["base_commit"]))
-            await self.database.execute("UPDATE session_worktrees SET active=0 WHERE session_id=?", (self.session_id,))
+            await _git(
+                self.scope.control_root,
+                "worktree",
+                "add",
+                "-b",
+                str(request["branch"]),
+                str(path),
+                str(request["base_commit"]),
+            )
+            await self.database.execute(
+                "UPDATE session_worktrees SET active=0 WHERE session_id=?",
+                (self.session_id,),
+            )
             await self.database.execute(
                 "INSERT INTO session_worktrees(id,session_id,path,branch,base_commit,active,status,created_at) VALUES(?,?,?,?,?,1,'active',?)",
-                (str(request["worktree_id"]), self.session_id, str(path), str(request["branch"]), str(request["base_commit"]), now()),
+                (
+                    str(request["worktree_id"]),
+                    self.session_id,
+                    str(path),
+                    str(request["branch"]),
+                    str(request["base_commit"]),
+                    now(),
+                ),
             )
             await self.scope.switch(path)
         else:
             path = Path(str(request["path"])).resolve()
             expected_root = (self.state_root / "worktrees" / self.session_id).resolve()
             if not path.is_relative_to(expected_root):
-                raise ValueError("refusing to exit a worktree not owned by this session")
+                raise ValueError(
+                    "refusing to exit a worktree not owned by this session"
+                )
             await self.scope.switch(self.scope.control_root)
             operation = str(request["operation"])
             if operation == "remove":
@@ -144,7 +170,9 @@ class WorktreeActionHandler:
                     arguments.append("--force")
                 arguments.append(str(path))
                 await _git(self.scope.control_root, *arguments)
-                await _git(self.scope.control_root, "branch", "-D", str(request["branch"]))
+                await _git(
+                    self.scope.control_root, "branch", "-D", str(request["branch"])
+                )
                 status = "removed"
             else:
                 status = "kept"
@@ -153,7 +181,10 @@ class WorktreeActionHandler:
                 (status, now(), str(request["worktree_id"]), self.session_id),
             )
         return ActionExecution(
-            {"active_workspace": str(self.scope.active_root), "operation": request["operation"]},
+            {
+                "active_workspace": str(self.scope.active_root),
+                "operation": request["operation"],
+            },
             ActionResultKind.SUCCESS,
         )
 
@@ -171,7 +202,10 @@ class WorktreeActionHandler:
             action_query += " AND id!=?"
             action_values.append(exclude_action)
         action_query += " LIMIT 1"
-        if await self.database.fetch_one(action_query, tuple(action_values)) is not None:
+        if (
+            await self.database.fetch_one(action_query, tuple(action_values))
+            is not None
+        ):
             raise ValueError("cannot switch worktrees while another Action is pending")
         active_agent = await self.database.fetch_one(
             """SELECT 1 FROM agent_tasks t JOIN runs r ON r.id=t.parent_run_id
@@ -206,13 +240,18 @@ class WorktreeActionHandler:
 
 async def _git(cwd: Path, *arguments: str) -> str:
     process = await asyncio.create_subprocess_exec(
-        "git", "-C", str(cwd), *arguments,
+        "git",
+        "-C",
+        str(cwd),
+        *arguments,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
     stdout, stderr = await process.communicate()
     if process.returncode:
-        raise ValueError(stderr.decode("utf-8", "replace").strip() or "Git worktree command failed")
+        raise ValueError(
+            stderr.decode("utf-8", "replace").strip() or "Git worktree command failed"
+        )
     return stdout.decode("utf-8", "replace")
 
 
@@ -221,8 +260,6 @@ def _slug(value: str) -> str:
     return (normalized or "work")[:40]
 
 
-def _preserve_manual_approval(
-    source: dict[str, Any], target: dict[str, Any]
-) -> None:
+def _preserve_manual_approval(source: dict[str, Any], target: dict[str, Any]) -> None:
     if source.get("force_manual_approval") is True:
         target["force_manual_approval"] = True

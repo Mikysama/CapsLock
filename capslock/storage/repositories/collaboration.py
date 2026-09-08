@@ -179,11 +179,6 @@ class CollaborationRepository(Repository):
                     timestamp,
                 ),
             )
-            for ordinal, capability in enumerate(contract.capabilities):
-                await connection.execute(
-                    "INSERT INTO agent_capabilities(task_id,ordinal,capability_json) VALUES(?,?,?)",
-                    (contract.task_id, ordinal, json.dumps(capability.as_dict())),
-                )
             if workspace_path is not None:
                 await connection.execute(
                     """INSERT INTO agent_workspaces(

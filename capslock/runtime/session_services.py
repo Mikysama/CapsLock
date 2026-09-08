@@ -314,7 +314,12 @@ class RunExecutionCoordinator:
         async for event in self.engine.run_stream(request):
             yield event
 
-    async def resume_paused_stream(self, run_id: str) -> AsyncIterator[AgentEvent]:
+    async def resume_paused_stream(
+        self,
+        run_id: str,
+        *,
+        response_format: dict[str, object] | None = None,
+    ) -> AsyncIterator[AgentEvent]:
         run = await self.runs.require(run_id, session_id=self.session_id)
         if run.status not in {"waiting_approval", "waiting_input"}:
             raise ValueError("run is not waiting for a resumable tool invocation")
@@ -323,6 +328,7 @@ class RunExecutionCoordinator:
                 question=run.question,
                 resume_from_run_id=run.id,
                 mode=RunMode.INTERACTIVE,
+                response_format=response_format,
             )
         ):
             yield event

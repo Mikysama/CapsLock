@@ -59,20 +59,33 @@ class RunEventJournalRepository:
         checkpoint: dict[str, Any] | None = None,
         error: str | None = None,
     ) -> RunStepInfo:
-        updated = await self.execute(
-            "UPDATE run_steps SET status=?,checkpoint_json=?,finished_at=?,error=? WHERE id=? AND status='running'",
-            (
-                status.value,
-                json.dumps(checkpoint, ensure_ascii=False)
-                if checkpoint is not None
-                else None,
-                now(),
-                error,
-                step_id,
-            ),
-        )
-        if not updated:
-            raise ValueError("run step is not running")
+        async with self.database.transaction() as connection:
+            updated = await connection.execute(
+                "UPDATE run_steps SET status=?,checkpoint_json=?,finished_at=?,error=? WHERE id=? AND status='running'",
+                (
+                    status.value,
+                    json.dumps(checkpoint, ensure_ascii=False)
+                    if checkpoint is not None
+                    else None,
+                    now(),
+                    error,
+                    step_id,
+                ),
+            )
+            if not updated.rowcount:
+                raise ValueError("run step is not running")
+            if checkpoint is not None:
+                await connection.execute(
+                    """UPDATE run_steps AS previous SET checkpoint_json=NULL
+                       WHERE previous.run_id=(SELECT run_id FROM run_steps WHERE id=?)
+                         AND previous.id<>? AND previous.checkpoint_json IS NOT NULL
+                         AND previous.status NOT IN ('waiting_approval','waiting_input')
+                         AND NOT EXISTS (
+                           SELECT 1 FROM runs r WHERE r.resume_from_step_id=previous.id
+                         )
+                         AND previous.ordinal<(SELECT ordinal FROM run_steps WHERE id=?)""",
+                    (step_id, step_id, step_id),
+                )
         return await self.require_step(step_id)
 
     async def require_step(self, step_id: str) -> RunStepInfo:

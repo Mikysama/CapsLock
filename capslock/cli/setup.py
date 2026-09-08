@@ -27,6 +27,8 @@ from ..credentials import (
 )
 from ..layout import ProjectLayout
 from ..permissions import PermissionMode
+from ..runtime import AsyncOpenAIResponsesModel
+from ..structured_output import json_schema_response_format
 
 
 async def initialize(console: Console, workspace: Path, args) -> int:
@@ -43,14 +45,26 @@ async def initialize(console: Console, workspace: Path, args) -> int:
     credential = args.credential or "env:CAPSLOCK_API_KEY"
     permission = args.permission_mode or "approve_for_me"
     memory_enabled = not args.disable_memory
+    strict_tool_calls = bool(getattr(args, "strict_tool_calls", False))
+    json_schema_outputs = bool(getattr(args, "json_schema_outputs", False))
     if interactive:
         provider = _ask(console, "Provider name", provider)
-        base_url = _ask(console, "OpenAI-compatible base URL", base_url)
+        base_url = _ask(console, "OpenAI Responses base URL", base_url)
         model = _ask(console, "Model", model)
         credential = _ask(
             console, "Credential reference (env:NAME or keyring:NAME)", credential
         )
         permission = _ask(console, "Permission mode", permission)
+    deepseek_default = _is_official_deepseek_model(base_url, model)
+    strict_tool_calls = strict_tool_calls or deepseek_default
+    json_schema_outputs = json_schema_outputs or deepseek_default
+    if interactive:
+        strict_tool_calls = _ask_bool(
+            console, "Provider supports strict tool calls", strict_tool_calls
+        )
+        json_schema_outputs = _ask_bool(
+            console, "Provider supports strict JSON Schema outputs", json_schema_outputs
+        )
     parse_reference(credential)
     PermissionMode.parse(permission)
     if credential.startswith("keyring:") and interactive:
@@ -68,6 +82,8 @@ async def initialize(console: Console, workspace: Path, args) -> int:
         permission=PermissionMode.parse(permission).value,
         memory_enabled=memory_enabled,
         tavily_credential=args.tavily_credential,
+        strict_tool_calls=strict_tool_calls,
+        json_schema_outputs=json_schema_outputs,
     )
     # Validate the exact generated document before replacing user state.
     import tomllib
@@ -99,6 +115,16 @@ async def initialize(console: Console, workspace: Path, args) -> int:
         backup.write_bytes(path.read_bytes())
     write_config(path, content)
     console.print(f"[success]Initialized:[/] {path}")
+    if not strict_tool_calls:
+        console.print(
+            "[warning]strict_tool_calls remains disabled. Requests with tools will "
+            "fail closed.[/]"
+        )
+    if not json_schema_outputs:
+        console.print(
+            "[warning]json_schema_outputs remains disabled. Structured outputs will "
+            "use Prompt constraints with Runtime validation.[/]"
+        )
     settings = Settings.load(workspace, layout=layout)
     if args.check_provider:
         console.print(
@@ -110,10 +136,43 @@ async def initialize(console: Console, workspace: Path, args) -> int:
             timeout=settings.model_config.timeout_seconds,
         )
         try:
-            await client.chat.completions.create(
+            response_format = None
+            if json_schema_outputs:
+                response_format = json_schema_response_format(
+                    "provider_health",
+                    {
+                        "type": "object",
+                        "properties": {"ok": {"type": "boolean"}},
+                        "required": ["ok"],
+                        "additionalProperties": False,
+                    },
+                )
+            tools = (
+                [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "provider_health_probe",
+                            "description": "A schema-only capability probe; do not call it.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {},
+                                "required": [],
+                                "additionalProperties": False,
+                            },
+                        },
+                    }
+                ]
+                if strict_tool_calls
+                else []
+            )
+            adapter = AsyncOpenAIResponsesModel(client, strict_tools=strict_tool_calls)
+            await adapter.complete(
                 model=settings.model_config.model,
-                messages=[{"role": "user", "content": "Reply OK"}],
-                max_tokens=1,
+                messages=[{"role": "user", "content": "Report provider health."}],
+                tools=tools,
+                max_output_tokens=128,
+                response_format=response_format,
             )
         finally:
             await client.close()
@@ -210,10 +269,12 @@ def _initial_config(**values: object) -> str:
     document.add("config_version", CONFIG_VERSION)
     providers = tomlkit.table(is_super_table=True)
     provider = tomlkit.table()
-    provider.add("kind", "openai_compatible")
+    provider.add("kind", "openai_responses")
     provider.add("base_url", values["base_url"])
     provider.add("credential", values["credential"])
     provider.add("data_policy", f"provider:{values['provider']}")
+    provider.add("strict_tool_calls", bool(values["strict_tool_calls"]))
+    provider.add("json_schema_outputs", bool(values["json_schema_outputs"]))
     providers.add(str(values["provider"]), provider)
     document.add("providers", providers)
     models = tomlkit.table(is_super_table=True)
@@ -235,6 +296,15 @@ def _initial_config(**values: object) -> str:
             "manual_write_enabled": memory_enabled,
             "maintenance_enabled": memory_enabled,
             "policy": "automatic" if memory_enabled else "off",
+        },
+    )
+    document.add(
+        "storage",
+        {
+            "maintenance_enabled": True,
+            "operation_retention_days": 30,
+            "audit_retention_days": 180,
+            "maintenance_interval_hours": 24,
         },
     )
     document.add(
@@ -288,3 +358,23 @@ def _initial_config(**values: object) -> str:
 def _ask(console: Console, label: str, default: str) -> str:
     value = console.input(f"{label} [{default}]: ").strip()
     return value or default
+
+
+def _ask_bool(console: Console, label: str, default: bool) -> bool:
+    suffix = "Y/n" if default else "y/N"
+    value = console.input(f"{label} [{suffix}]: ").strip().casefold()
+    if not value:
+        return default
+    if value in {"y", "yes", "true", "1"}:
+        return True
+    if value in {"n", "no", "false", "0"}:
+        return False
+    raise ValueError(f"{label} must be yes or no")
+
+
+def _is_official_deepseek_model(base_url: str, model: str) -> bool:
+    normalized = base_url.rstrip("/")
+    return normalized in {
+        "https://api.deepseek.com",
+        "https://api.deepseek.com/v1",
+    } and model.startswith("deepseek-v4-")

@@ -1,6 +1,6 @@
 # CapsLock v2 开发者文档
 
-本目录记录 CapsLock v2 的架构、开发过程、安全边界与发布验证。当前稳定版本为 `2.7.6.1`；main 开发协议为 Tool Runtime v2、permissions v2、config 10、workspace schema 18、memory schema 5 和 plugin protocol 4。
+本目录记录 CapsLock v2 的架构、开发过程、安全边界与发布验证。当前稳定版本为 `2.7.6.2`；协议为 Tool Runtime v2、permissions v2、config 13、workspace schema 20、memory schema 6 和 plugin protocol 4。
 
 ## 文档入口
 
@@ -31,13 +31,14 @@
 - [v2.7.5 发布说明](../../releases/v2.7.5.md)：工具参数纠错、副作用状态、目录兜底、shadow 选择评估和并发治理。
 - [v2.7.6 发布说明](../../releases/v2.7.6.md)：统一上下文压缩管线、summary v3、引用式工作集、降级与防抖。
 - [v2.7.6.1 发布说明](../../releases/v2.7.6.1.md)：集中行为默认值、版本化策略评测、Memory RecallPolicy 与参数修复预算。
+- [v2.7.6.2 发布说明](../../releases/v2.7.6.2.md)：Responses-only Provider、统一结构化输出、外部基准评测与数据库维护。
 
 ## 当前稳定边界
 
 - 组合根为 `capslock.bootstrap.WorkspaceApplication.open()`；runtime/tooling 通过 `capslock.ports` 使用应用与存储能力。
 - 模型、工具、动作、workflow 和记忆接口均为异步；公开 Agent 执行入口只有 `AgentSession.run_stream(RunRequest)`。
-- workspace schema 18、memory schema 5、portable archive 6、session export 6、JSONL schema 3、`config_version = 10`、IDE Bridge protocol 1 和 plugin protocol 4 是当前协议。
+- workspace schema 20、memory schema 6、portable archive 7、session export 7、JSONL schema 3、`config_version = 13`、IDE Bridge protocol 1 和 plugin protocol 4 是当前协议。
 - 配置依赖图、Memory/Workflow repository、Lifecycle I/O/import merge、Action handler、子 Agent runner 与模型路由均使用显式窄接口；只有组合根可同时装配具体 storage、runtime 与 application。
 - fullscreen 中等待模态结果的斜杠命令运行在 Textual worker；根背景使用原生 `ansi_default`，Rich 内容通过只替换背景的渲染适配器保留全部字体样式。
 - 支持 Linux/macOS 与 Python 3.12；两个操作系统组合由发布 CI 验证。
-- config v3-v9、workspace schema v6-v15 与 memory schema v3-v4 使用 backup-first 自动迁移；memory export v3/v4、portable archive v3/v4/v5 可读取，旧 JSONL、插件协议和删除的 Python 接口不提供兼容别名。
+- config v3-v12、workspace schema v6-v19 与 memory schema v3-v5 使用 backup-first 自动迁移；Provider 统一迁移到 OpenAI Responses API。portable archive v3-v6 可读取，旧 JSONL、插件协议和删除的 Python 接口不提供兼容别名。

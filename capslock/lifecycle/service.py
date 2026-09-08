@@ -8,6 +8,7 @@ import shutil
 import sqlite3
 import tempfile
 import uuid
+import math
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -40,8 +41,8 @@ from .specs import (
 
 
 EXPORT_FORMAT = "capslock-lifecycle-export"
-ARCHIVE_VERSION = 6
-SUPPORTED_ARCHIVE_VERSIONS = frozenset({3, 4, 5, ARCHIVE_VERSION})
+ARCHIVE_VERSION = 7
+SUPPORTED_ARCHIVE_VERSIONS = frozenset({3, 4, 5, 6, ARCHIVE_VERSION})
 MAX_ARCHIVE_RECORDS = 100_000
 
 
@@ -141,6 +142,19 @@ class PortableArchiveService:
                 data_memory, dict
             ):
                 raise LifecycleError("portable archive has invalid data sections")
+            if int(manifest["version"]) <= 6:
+                for table in (
+                    "agent_capabilities",
+                    "context_snapshots",
+                    "citations",
+                ):
+                    obsolete_rows = data_workspace.pop(table, None)
+                    if obsolete_rows is not None and not isinstance(
+                        obsolete_rows, list
+                    ):
+                        raise LifecycleError(
+                            f"portable archive table {table} must be a list"
+                        )
             if set(data_workspace) - set(WORKSPACE_TABLES) or set(data_memory) - set(
                 MEMORY_TABLES
             ):
@@ -192,9 +206,7 @@ class PortableArchiveService:
     def _rebuild_plan_mirrors(self, report: dict[str, Any]) -> int:
         mappings = report.get("mappings", {})
         plan_mapping = (
-            mappings.get("session_plans", {})
-            if isinstance(mappings, dict)
-            else {}
+            mappings.get("session_plans", {}) if isinstance(mappings, dict) else {}
         )
         if not isinstance(plan_mapping, dict) or not plan_mapping:
             return 0
@@ -427,6 +439,90 @@ class LifecycleService:
 
     def import_archive(self, archive: Path) -> dict[str, Any]:
         return self.portable.import_archive(archive)
+
+    def compact(self, scope: str) -> dict[str, Any]:
+        """Safely VACUUM one or both managed databases."""
+        if scope not in {"workspace", "memory", "all"}:
+            raise ValueError("database compact scope must be workspace, memory, or all")
+        selected = []
+        if scope in {"workspace", "all"}:
+            selected.append(("workspace", self.layout.database))
+        if scope in {"memory", "all"}:
+            selected.append(("memory", self.memory_path))
+        selected = [(name, path) for name, path in selected if path.is_file()]
+        if not selected:
+            raise LifecycleError("no selected database exists")
+        with self.io.locks():
+            before = {name: path.stat().st_size for name, path in selected}
+            for _, path in selected:
+                _checkpoint_and_validate(path)
+            _require_compaction_space(selected)
+            backup = self.backup.create_under_lock()
+            try:
+                for _, path in selected:
+                    connection = sqlite3.connect(path)
+                    try:
+                        connection.execute("PRAGMA busy_timeout=5000")
+                        connection.execute("VACUUM")
+                        connection.execute("PRAGMA optimize")
+                        _validate_database(connection, path)
+                    finally:
+                        connection.close()
+            except Exception as exc:
+                raise LifecycleError(
+                    f"database compaction failed; recovery backup: {backup}"
+                ) from exc
+        databases = []
+        for name, path in selected:
+            after = path.stat().st_size
+            databases.append(
+                {
+                    "scope": name,
+                    "path": str(path),
+                    "before_bytes": before[name],
+                    "after_bytes": after,
+                    "reclaimed_bytes": max(0, before[name] - after),
+                }
+            )
+        return {"backup": str(backup), "databases": databases}
+
+
+def _require_compaction_space(selected: list[tuple[str, Path]]) -> None:
+    by_device: dict[int, tuple[Path, int]] = {}
+    for _, path in selected:
+        parent = path.parent
+        device = parent.stat().st_dev
+        prior = by_device.get(device)
+        by_device[device] = (parent, (prior[1] if prior else 0) + path.stat().st_size)
+    for parent, total in by_device.values():
+        required = math.ceil(total * 2.1)
+        available = shutil.disk_usage(parent).free
+        if available < required:
+            raise LifecycleError(
+                "insufficient free space for database compaction: "
+                f"need {required} bytes, have {available} bytes"
+            )
+
+
+def _checkpoint_and_validate(path: Path) -> None:
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute("PRAGMA busy_timeout=5000")
+        checkpoint = connection.execute("PRAGMA wal_checkpoint(FULL)").fetchone()
+        if checkpoint is not None and int(checkpoint[0]) != 0:
+            raise LifecycleError(f"database WAL checkpoint is busy: {path}")
+        _validate_database(connection, path)
+    finally:
+        connection.close()
+
+
+def _validate_database(connection: sqlite3.Connection, path: Path) -> None:
+    integrity = [str(row[0]) for row in connection.execute("PRAGMA integrity_check")]
+    if integrity != ["ok"]:
+        raise LifecycleError(f"database integrity check failed: {path}: {integrity[0]}")
+    foreign = list(connection.execute("PRAGMA foreign_key_check"))
+    if foreign:
+        raise LifecycleError(f"database foreign key check failed: {path}")
 
 
 def _database_rows(

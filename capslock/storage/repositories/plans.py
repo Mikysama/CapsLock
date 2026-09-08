@@ -294,9 +294,11 @@ class PlanRepository(Repository):
             if row is None:
                 raise ValueError("plan request is not pending")
             kind = str(row["kind"])
-            allowed = {"enter", "reject"} if kind == "enter" else {
-                "implement", "feedback", "reject"
-            }
+            allowed = (
+                {"enter", "reject"}
+                if kind == "enter"
+                else {"implement", "feedback", "reject"}
+            )
             if choice not in allowed:
                 raise ValueError("invalid plan request choice")
             status = {
@@ -465,7 +467,13 @@ class PlanRepository(Repository):
             )
 
     async def finish_implementation(self, run_id: str, run_status: str) -> None:
-        if run_status not in {"completed", "failed", "cancelled", "interrupted", "stopped"}:
+        if run_status not in {
+            "completed",
+            "failed",
+            "cancelled",
+            "interrupted",
+            "stopped",
+        }:
             return
         implementation_status = (
             "completed"
@@ -548,9 +556,7 @@ def _implementation_prompt(objective: str, content: str, digest: str) -> str:
         "tool call.\n\n"
         f"Objective: {objective}\n"
         f"Approved plan SHA-256: {digest}\n\n"
-        "<approved-plan>\n"
-        + content
-        + "\n</approved-plan>"
+        "<approved-plan>\n" + content + "\n</approved-plan>"
     )
 
 
@@ -560,19 +566,28 @@ def _digest(content: str) -> str:
 
 def _plan(row: Any) -> PlanRecord:
     return PlanRecord(
-        str(row["id"]), str(row["session_id"]), str(row["objective"]),
-        PlanStatus(str(row["status"])), str(row["entry_source"]),
+        str(row["id"]),
+        str(row["session_id"]),
+        str(row["objective"]),
+        PlanStatus(str(row["status"])),
+        str(row["entry_source"]),
         str(row["base_permission_mode"]),
         str(row["current_revision_id"]) if row["current_revision_id"] else None,
         str(row["parent_plan_id"]) if row["parent_plan_id"] else None,
-        str(row["mirror_relative_path"]), str(row["created_at"]), str(row["updated_at"]),
+        str(row["mirror_relative_path"]),
+        str(row["created_at"]),
+        str(row["updated_at"]),
     )
 
 
 def _revision(row: Any) -> PlanRevision:
     return PlanRevision(
-        str(row["id"]), str(row["plan_id"]), int(row["ordinal"]),
-        str(row["content"]), str(row["sha256"]), str(row["source"]),
+        str(row["id"]),
+        str(row["plan_id"]),
+        int(row["ordinal"]),
+        str(row["content"]),
+        str(row["sha256"]),
+        str(row["source"]),
         str(row["created_by_run_id"]) if row["created_by_run_id"] else None,
         str(row["created_at"]),
     )
@@ -580,24 +595,32 @@ def _revision(row: Any) -> PlanRevision:
 
 def _request(row: Any) -> PlanRequest:
     return PlanRequest(
-        str(row["id"]), str(row["session_id"]),
+        str(row["id"]),
+        str(row["session_id"]),
         str(row["plan_id"]) if row["plan_id"] else None,
         str(row["revision_id"]) if row["revision_id"] else None,
-        PlanRequestKind(str(row["kind"])), PlanRequestStatus(str(row["status"])),
+        PlanRequestKind(str(row["kind"])),
+        PlanRequestStatus(str(row["status"])),
         str(row["run_id"]) if row["run_id"] else None,
         str(row["invocation_id"]) if row["invocation_id"] else None,
         str(row["objective"]) if row["objective"] else None,
         str(row["choice"]) if row["choice"] else None,
         str(row["feedback"]) if row["feedback"] else None,
-        str(row["created_at"]), str(row["decided_at"]) if row["decided_at"] else None,
+        str(row["created_at"]),
+        str(row["decided_at"]) if row["decided_at"] else None,
     )
 
 
 def _implementation(row: Any) -> PlanImplementation:
     return PlanImplementation(
-        str(row["plan_id"]), str(row["revision_id"]), str(row["request_id"]),
-        str(row["work_item_id"]), str(row["run_id"]) if row["run_id"] else None,
-        str(row["status"]), str(row["created_at"]), str(row["updated_at"]),
+        str(row["plan_id"]),
+        str(row["revision_id"]),
+        str(row["request_id"]),
+        str(row["work_item_id"]),
+        str(row["run_id"]) if row["run_id"] else None,
+        str(row["status"]),
+        str(row["created_at"]),
+        str(row["updated_at"]),
     )
 
 

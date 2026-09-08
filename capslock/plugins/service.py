@@ -84,9 +84,7 @@ class PluginService:
 
     async def verify(self, name: str) -> PluginManifest:
         entry = self.registry.get(name, require_enabled=False)
-        await self.client.verify(
-            entry.manifest, trusted_native=entry.trusted_native
-        )
+        await self.client.verify(entry.manifest, trusted_native=entry.trusted_native)
         return entry.manifest
 
     def enable(

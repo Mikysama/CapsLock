@@ -116,7 +116,28 @@ class TaskRepository(Repository):
             query += " AND status=?"
             values.append(status)
         query += " ORDER BY position,created_at"
-        return [await self._task(row) for row in await self.all(query, tuple(values))]
+        rows = await self.all(query, tuple(values))
+        if not rows:
+            return []
+        dependencies = []
+        identifiers = [str(row["id"]) for row in rows]
+        for start in range(0, len(identifiers), 900):
+            batch = identifiers[start : start + 900]
+            placeholders = ",".join("?" for _ in batch)
+            dependencies.extend(
+                await self.all(
+                    f"""SELECT task_id,blocked_by_task_id FROM task_dependencies
+                        WHERE task_id IN ({placeholders})
+                        ORDER BY task_id,blocked_by_task_id""",
+                    tuple(batch),
+                )
+            )
+        grouped: dict[str, list[str]] = {}
+        for dependency in dependencies:
+            grouped.setdefault(str(dependency["task_id"]), []).append(
+                str(dependency["blocked_by_task_id"])
+            )
+        return [_task_info(row, tuple(grouped.get(str(row["id"]), ()))) for row in rows]
 
     async def get(
         self, task_id: str, *, session_id: str | None = None
@@ -238,18 +259,8 @@ class TaskRepository(Repository):
             "SELECT blocked_by_task_id FROM task_dependencies WHERE task_id=? ORDER BY blocked_by_task_id",
             (str(row["id"]),),
         )
-        return TaskInfo(
-            str(row["id"]),
-            str(row["session_id"]),
-            str(row["subject"]),
-            str(row["status"]),
-            row["run_id"],
-            int(row["position"]),
-            str(row["description"]),
-            row["owner"],
-            row["active_form"],
-            json.loads(row["metadata_json"]),
-            tuple(str(item["blocked_by_task_id"]) for item in dependencies),
+        return _task_info(
+            row, tuple(str(item["blocked_by_task_id"]) for item in dependencies)
         )
 
 
@@ -341,11 +352,9 @@ class SnapshotRepository(Repository):
         "tasks",
         "sources",
         "tool_calls",
-        "citations",
         "context_compactions",
         "session_lineage",
         "session_context_state",
-        "context_snapshots",
         "session_plans",
         "plan_revisions",
         "plan_requests",
@@ -360,7 +369,6 @@ class SnapshotRepository(Repository):
         "agent_checkpoints",
         "agent_budget_ledger",
         "agent_approval_links",
-        "agent_capabilities",
         "agent_messages",
         "agent_mailbox",
         "agent_outputs",
@@ -376,7 +384,6 @@ class SnapshotRepository(Repository):
                 "run_steps",
                 "run_events",
                 "tool_calls",
-                "citations",
                 "run_governance",
                 "tool_call_attempts",
             }:
@@ -406,7 +413,6 @@ class SnapshotRepository(Repository):
                 query = """SELECT l.* FROM agent_approval_links l JOIN agent_attempts a ON a.id=l.attempt_id
                            JOIN agent_tasks t ON t.id=a.task_id WHERE t.owner_session_id=? ORDER BY l.rowid"""
             elif table in {
-                "agent_capabilities",
                 "agent_messages",
                 "agent_mailbox",
                 "agent_outputs",
@@ -439,6 +445,22 @@ def _decode(record: dict[str, Any]) -> dict[str, Any]:
         if record.get(key):
             record[key.removesuffix("_json")] = json.loads(record.pop(key))
     return record
+
+
+def _task_info(row, dependencies: tuple[str, ...]) -> TaskInfo:
+    return TaskInfo(
+        str(row["id"]),
+        str(row["session_id"]),
+        str(row["subject"]),
+        str(row["status"]),
+        row["run_id"],
+        int(row["position"]),
+        str(row["description"]),
+        row["owner"],
+        row["active_form"],
+        json.loads(row["metadata_json"]),
+        dependencies,
+    )
 
 
 def _source(row) -> SourceInfo:

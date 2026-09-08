@@ -68,8 +68,8 @@ def model_routes(
         identifier("provider", name)
         if not isinstance(value, dict):
             raise ValueError(f"provider {name} must be a table")
-        kind = str(value.get("kind", "openai_compatible"))
-        if kind != "openai_compatible":
+        kind = str(value.get("kind", "openai_responses"))
+        if kind != "openai_responses":
             raise ValueError(f"unsupported provider kind: {kind}")
         base_url = str(value.get("base_url", "")).rstrip("/")
         if not base_url.startswith(("https://", "http://")):
@@ -93,6 +93,7 @@ def model_routes(
             data_policy,
             credential_ref,
             boolean(value.get("strict_tool_calls", False)),
+            boolean(value.get("json_schema_outputs", False)),
         )
     models: dict[str, ModelProfileSettings] = {}
     for name, value in raw_models.items():

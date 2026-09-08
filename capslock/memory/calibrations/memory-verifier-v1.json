@@ -1,6 +1,6 @@
 {
   "calibration_version": "memory-verifier-v1-fixture",
-  "prompt_version": "memory-candidate-verification-v1",
+  "prompt_version": "memory-candidate-verification-v2",
   "model_profiles": ["fast"],
   "bins": [
     {"upper_bound": 0.8, "scale": 0.5},

@@ -460,6 +460,7 @@ class InvocationPreparer:
                 ok,
                 audit_text,
                 duration_ms,
+                invocation_id=invocation_id,
             )
             if governor is not None and attempt_id is not None:
                 await governor.finish_tool(attempt_id, ok=ok, duration_ms=duration_ms)

@@ -174,9 +174,7 @@ async def _submit(context) -> CommandOutcome:
     )
     if selected == "implement":
         implementation = await service.repository.ensure_implementation(decided.id)
-        item = await context.session.work_items.require(
-            implementation.work_item_id
-        )
+        item = await context.session.work_items.require(implementation.work_item_id)
         return CommandOutcome(
             CommandOutcomeKind.ENQUEUE,
             work_item_id=item.id,
@@ -217,9 +215,7 @@ async def decide_plan_request_interactively(context, request) -> str:
             permission_mode=context.session.permission_mode.value,
         )
         choice, feedback = result.choice, result.feedback
-    await context.session.decide_plan_request(
-        request.id, choice, feedback=feedback
-    )
+    await context.session.decide_plan_request(request.id, choice, feedback=feedback)
     return choice
 
 

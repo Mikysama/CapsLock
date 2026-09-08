@@ -71,9 +71,7 @@ async def plugin_command(console: Console, layout: ProjectLayout, args) -> int:
         service.enable(
             args.name,
             trusted_native=bool(getattr(args, "trusted_native", False)),
-            allow_session_lifecycle=bool(
-                getattr(args, "session_lifecycle", False)
-            ),
+            allow_session_lifecycle=bool(getattr(args, "session_lifecycle", False)),
         )
     elif command == "disable":
         service.disable(args.name)
@@ -92,10 +90,7 @@ def _print_manifest(console: Console, manifest, *, enabled: bool) -> None:
     )
     console.print(f"Digest: {manifest.digest}")
     console.print(f"State: {'enabled' if enabled else 'disabled'}")
-    console.print(
-        "Capabilities: "
-        + str(manifest.capabilities.as_dict())
-    )
+    console.print("Capabilities: " + str(manifest.capabilities.as_dict()))
     console.print("Tools: " + ", ".join(item.name for item in manifest.tools))
     console.print("Execution: OS sandbox with host-brokered capabilities")
 

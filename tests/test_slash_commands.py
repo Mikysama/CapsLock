@@ -159,7 +159,7 @@ def test_side_question_runner_exposes_tools_and_redacts_checkpoints() -> None:
             return None
 
         async def record_tool_call(
-            self, run_id, name, arguments, ok, summary, duration_ms
+            self, run_id, name, arguments, ok, summary, duration_ms, *, invocation_id
         ):
             self.tool_calls.append((arguments, summary))
 

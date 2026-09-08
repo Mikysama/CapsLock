@@ -24,7 +24,7 @@ from .rules import (
 )
 from .types import ConfigIssue
 
-CONFIG_VERSION = 10
+CONFIG_VERSION = 13
 _GROUP_FIELDS = {
     "runtime": {"max_tool_rounds", "permission_mode"},
     "tools": {
@@ -103,6 +103,12 @@ _GROUP_FIELDS = {
         "policy",
         "temporary_ttl_days",
     },
+    "storage": {
+        "maintenance_enabled",
+        "operation_retention_days",
+        "audit_retention_days",
+        "maintenance_interval_hours",
+    },
     "routing": {"reasoning", "fast", "embedding", "vision"},
     "budget": {"max_run_tokens", "max_run_usd", "max_session_usd"},
     "loop_detection": {
@@ -120,6 +126,7 @@ _PROVIDER_FIELDS = {
     "timeout_seconds",
     "data_policy",
     "strict_tool_calls",
+    "json_schema_outputs",
 }
 _MODEL_FIELDS = {
     "provider",
@@ -229,6 +236,23 @@ def validate_config_document(document: dict[str, object]) -> tuple[ConfigIssue, 
 
 def validate_semantics(document: dict[str, object]) -> None:
     model_routes(document, resolve_credentials=False)
+    storage = document.get("storage", {})
+    if isinstance(storage, dict):
+        boolean(storage.get("maintenance_enabled", True))
+        operation_days = int(storage.get("operation_retention_days", 30))
+        audit_days = int(storage.get("audit_retention_days", 180))
+        interval_hours = int(storage.get("maintenance_interval_hours", 24))
+        if operation_days <= 0:
+            raise ValueError("storage.operation_retention_days must be positive")
+        if audit_days <= 0:
+            raise ValueError("storage.audit_retention_days must be positive")
+        if interval_hours <= 0:
+            raise ValueError("storage.maintenance_interval_hours must be positive")
+        if audit_days < operation_days:
+            raise ValueError(
+                "storage.audit_retention_days must be greater than or equal to "
+                "storage.operation_retention_days"
+            )
     budget_settings(
         document.get("budget", {}) if isinstance(document.get("budget"), dict) else {}
     )

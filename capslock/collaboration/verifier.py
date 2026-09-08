@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 from typing import Any, Mapping
 
+from ..structured_output import child_agent_result_schema, validate_schema_value
 from .models import AgentTaskContract, AgentTaskState, ValidatedAgentOutput
 from .workspace import WorkspaceSnapshot
 
@@ -73,12 +74,13 @@ class AgentOutputVerifier:
     def _validate_schema(
         self, schema: Mapping[str, Any], output: Mapping[str, Any]
     ) -> None:
-        if not schema:
-            return
         public = {
             name: value for name, value in output.items() if not name.startswith("_")
         }
-        self._validate_schema_value(schema, public, "output")
+        try:
+            validate_schema_value(public, child_agent_result_schema(dict(schema)))
+        except ValueError as exc:
+            raise VerificationError(str(exc)) from exc
 
     def _validate_schema_value(
         self, schema: Mapping[str, Any], value: Any, path: str

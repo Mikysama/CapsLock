@@ -21,7 +21,7 @@ async def upgrade_workspace_schema(
     if source_version is None:
         row = await (await connection.execute("PRAGMA user_version")).fetchone()
         source_version = int(row[0])
-    if source_version not in {6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17}:
+    if source_version not in {6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19}:
         raise ValueError(f"unsupported workspace upgrade source: {source_version}")
     checkpoint = await connection.execute("PRAGMA wal_checkpoint(FULL)")
     await checkpoint.close()
@@ -95,19 +95,20 @@ async def upgrade_workspace_schema(
                 )
             await connection.commit()
             await connection.executescript(_UPGRADE_WORKSPACE_SEVENTEEN)
-        agent_task_columns = {
-            str(row[1])
-            for row in await (
-                await connection.execute("PRAGMA table_info(agent_tasks)")
-            ).fetchall()
-        }
-        if "owner_session_id" not in agent_task_columns:
-            await connection.executescript(_UPGRADE_WORKSPACE_EIGHTEEN)
-        else:
-            # Test fixtures and development snapshots can be structurally newer
-            # than their user_version.  Keep the upgrade idempotent in that case.
-            await connection.execute("PRAGMA user_version=18")
-            await connection.commit()
+        if source_version < 18:
+            agent_task_columns = {
+                str(row[1])
+                for row in await (
+                    await connection.execute("PRAGMA table_info(agent_tasks)")
+                ).fetchall()
+            }
+            if "owner_session_id" not in agent_task_columns:
+                await connection.executescript(_UPGRADE_WORKSPACE_EIGHTEEN)
+            else:
+                # Test fixtures and development snapshots can be structurally newer
+                # than their user_version.  Keep the upgrade idempotent in that case.
+                await connection.execute("PRAGMA user_version=18")
+                await connection.commit()
         migrated_contract_rows = await (
             await connection.execute(
                 "SELECT id,contract_json FROM agent_tasks WHERE contract_sha256=''"
@@ -123,8 +124,48 @@ async def upgrade_workspace_schema(
             )
         if migrated_contract_rows:
             await connection.commit()
-    except BaseException:
+        if source_version < 19:
+            await connection.executescript(_UPGRADE_WORKSPACE_NINETEEN)
+        if source_version < 20:
+            obsolete_tables = {
+                str(row[0])
+                for row in await (
+                    await connection.execute(
+                        """SELECT name FROM sqlite_master WHERE type='table' AND
+                           name IN ('tool_result_replacements','context_snapshots',
+                                    'citations','agent_capabilities')"""
+                    )
+                ).fetchall()
+            }
+            if obsolete_tables:
+                if len(obsolete_tables) != 4:
+                    raise ValueError("workspace v20 legacy tables are incomplete")
+                await _validate_workspace_twenty(connection)
+                await connection.executescript(_UPGRADE_WORKSPACE_TWENTY)
+            else:
+                invocation_columns = {
+                    str(row[1])
+                    for row in await (
+                        await connection.execute("PRAGMA table_info(tool_invocations)")
+                    ).fetchall()
+                }
+                tool_call_columns = {
+                    str(row[1])
+                    for row in await (
+                        await connection.execute("PRAGMA table_info(tool_calls)")
+                    ).fetchall()
+                }
+                if "delivered_result_json" not in invocation_columns or (
+                    "invocation_id" not in tool_call_columns
+                ):
+                    raise ValueError("workspace v20 canonical columns are incomplete")
+                await connection.execute("PRAGMA user_version=20")
+                await connection.commit()
+        await _validate_integrity(connection, "workspace")
+    except BaseException as exc:
         await connection.rollback()
+        await asyncio.to_thread(_write_migration_report, backup, source_version, exc)
+        await _restore_backup(connection, backup)
         raise
     return backup
 
@@ -135,11 +176,11 @@ async def upgrade_memory_schema(
     *,
     source_version: int | None = None,
 ) -> Path:
-    """Backup and transactionally migrate the user memory database to v5."""
+    """Backup and transactionally migrate the user memory database to v6."""
     if source_version is None:
         row = await (await connection.execute("PRAGMA user_version")).fetchone()
         source_version = int(row[0])
-    if source_version not in {3, 4}:
+    if source_version not in {3, 4, 5}:
         raise ValueError(f"unsupported memory upgrade source: {source_version}")
     checkpoint = await connection.execute("PRAGMA wal_checkpoint(FULL)")
     await checkpoint.close()
@@ -157,9 +198,14 @@ async def upgrade_memory_schema(
     try:
         if source_version == 3:
             await connection.executescript(_UPGRADE_MEMORY_CURRENT)
-        await connection.executescript(_UPGRADE_MEMORY_FIVE)
+        if source_version < 5:
+            await connection.executescript(_UPGRADE_MEMORY_FIVE)
+        if source_version < 6:
+            await connection.executescript(_UPGRADE_MEMORY_SIX)
+        await _validate_integrity(connection, "memory")
     except BaseException:
         await connection.rollback()
+        await _restore_backup(connection, backup)
         raise
     return backup
 
@@ -175,6 +221,139 @@ def _backup(source_path: Path, target_path: Path) -> None:
         target.close()
         source.close()
     target_path.chmod(0o600)
+
+
+def _write_migration_report(
+    backup_path: Path, source_version: int, error: BaseException
+) -> None:
+    report = backup_path.with_name(f"{backup_path.stem}-migration-report.json")
+    report.write_text(
+        json.dumps(
+            {
+                "source_version": source_version,
+                "backup": str(backup_path),
+                "status": "failed",
+                "error_type": type(error).__name__,
+                "error": str(error),
+                "created_at": datetime.now(UTC).isoformat(),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    report.chmod(0o600)
+
+
+async def _restore_backup(connection: aiosqlite.Connection, backup_path: Path) -> None:
+    """Restore the pre-migration image into the still-owned connection."""
+    source = await aiosqlite.connect(f"file:{backup_path}?mode=ro", uri=True)
+    try:
+        await source.backup(connection)
+    finally:
+        await source.close()
+    await connection.execute("PRAGMA foreign_keys=ON")
+    await connection.commit()
+
+
+async def _validate_integrity(connection: aiosqlite.Connection, label: str) -> None:
+    integrity = await (await connection.execute("PRAGMA integrity_check")).fetchall()
+    if [str(row[0]) for row in integrity] != ["ok"]:
+        raise ValueError(f"{label} database integrity check failed")
+    foreign = await (await connection.execute("PRAGMA foreign_key_check")).fetchall()
+    if foreign:
+        raise ValueError(f"{label} database foreign key check failed")
+
+
+async def _validate_workspace_twenty(connection: aiosqlite.Connection) -> None:
+    replacement = await (
+        await connection.execute(
+            """SELECT r.tool_call_id FROM tool_result_replacements r
+               LEFT JOIN tool_invocations i ON i.id=r.invocation_id
+               WHERE r.invocation_id IS NULL OR i.id IS NULL
+                  OR i.tool_call_id<>r.tool_call_id
+                  OR i.session_id<>r.session_id
+               LIMIT 1"""
+        )
+    ).fetchone()
+    if replacement is not None:
+        raise ValueError("tool result replacement has no matching invocation")
+    duplicate = await (
+        await connection.execute(
+            """SELECT invocation_id FROM tool_result_replacements
+               GROUP BY invocation_id HAVING count(*)<>1 LIMIT 1"""
+        )
+    ).fetchone()
+    if duplicate is not None:
+        raise ValueError("multiple tool result replacements match one invocation")
+
+    capability_rows = await (
+        await connection.execute(
+            """SELECT t.id,t.contract_json,t.contract_sha256,c.ordinal,c.capability_json
+               FROM agent_tasks t LEFT JOIN agent_capabilities c ON c.task_id=t.id
+               ORDER BY t.id,c.ordinal"""
+        )
+    ).fetchall()
+    contracts: dict[str, tuple[list[object], list[object]]] = {}
+    for row in capability_rows:
+        task_id = str(row[0])
+        if task_id not in contracts:
+            document = json.loads(str(row[1]))
+            canonical = json.dumps(document, sort_keys=True, ensure_ascii=False)
+            if hashlib.sha256(canonical.encode("utf-8")).hexdigest() != str(row[2]):
+                raise ValueError("agent task contract checksum is invalid")
+            expected = document.get("capabilities", [])
+            if not isinstance(expected, list):
+                raise ValueError("agent task contract capabilities are invalid")
+            contracts[task_id] = (expected, [])
+        if row[3] is not None:
+            contracts[task_id][1].append(json.loads(str(row[4])))
+    if any(expected != stored for expected, stored in contracts.values()):
+        raise ValueError("agent capability rows do not match task contracts")
+
+    rows = await (
+        await connection.execute(
+            "SELECT run_id,citation_id,path,start_line,end_line FROM citations ORDER BY run_id,id"
+        )
+    ).fetchall()
+    by_run: dict[str, list[tuple[object, ...]]] = {}
+    for row in rows:
+        by_run.setdefault(str(row[0]), []).append(tuple(row[1:]))
+    for run_id, stored in by_run.items():
+        events = await (
+            await connection.execute(
+                """SELECT payload_json FROM run_events
+                   WHERE run_id=? AND event_kind='completed' ORDER BY sequence DESC""",
+                (run_id,),
+            )
+        ).fetchall()
+        found = False
+        for event in events:
+            payload = json.loads(str(event[0]))
+            citations = (
+                payload.get("citations", []) if isinstance(payload, dict) else []
+            )
+            canonical = [
+                (
+                    item.get("id", item.get("citation_id")),
+                    item.get("path"),
+                    item.get("start_line"),
+                    item.get("end_line"),
+                )
+                for item in citations
+                if isinstance(item, dict)
+                and item.get("path") is not None
+                and item.get("start_line") is not None
+                and item.get("end_line") is not None
+            ]
+            if canonical == stored:
+                found = True
+                break
+        if not found:
+            raise ValueError(
+                f"citation rows are not present in terminal event: {run_id}"
+            )
 
 
 _UPGRADE_FIRST_STEP = """
@@ -1423,5 +1602,84 @@ UPDATE memories SET owner_session_id=coalesce(
 UPDATE memory_revisions SET expires_at=strftime('%Y-%m-%dT%H:%M:%fZ','now','+7 days')
  WHERE durability='temporary' AND expires_at IS NULL;
 PRAGMA user_version=5;
+COMMIT;
+"""
+
+
+_UPGRADE_WORKSPACE_NINETEEN = """
+BEGIN IMMEDIATE;
+DROP INDEX IF EXISTS idx_run_steps_run;
+DROP INDEX IF EXISTS idx_run_events_run;
+DROP INDEX IF EXISTS idx_tool_invocations_run;
+DROP INDEX IF EXISTS idx_plan_revisions_plan;
+DROP INDEX IF EXISTS idx_tool_call_attempts_run;
+DROP INDEX IF EXISTS idx_agent_attempts_task;
+DROP INDEX IF EXISTS idx_agent_messages_task;
+
+UPDATE run_steps AS step SET checkpoint_json=NULL
+WHERE checkpoint_json IS NOT NULL
+  AND status NOT IN ('waiting_approval','waiting_input')
+  AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.resume_from_step_id=step.id)
+  AND ordinal < (
+    SELECT max(newer.ordinal) FROM run_steps newer
+    WHERE newer.run_id=step.run_id AND newer.checkpoint_json IS NOT NULL
+  );
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tool_invocations_call
+  ON tool_invocations(run_id,tool_call_id);
+CREATE INDEX IF NOT EXISTS idx_tool_invocations_working_set
+  ON tool_invocations(session_id,name,status,finished_at DESC,sequence DESC);
+CREATE INDEX IF NOT EXISTS idx_tasks_session_order ON tasks(session_id,position,created_at);
+CREATE INDEX IF NOT EXISTS idx_sources_session_time ON sources(session_id,fetched_at);
+CREATE INDEX IF NOT EXISTS idx_agent_mailbox_worker_delivery
+  ON agent_mailbox(worker_id,recipient,status,created_at);
+CREATE INDEX IF NOT EXISTS idx_agent_approval_links_parent ON agent_approval_links(parent_action_id);
+CREATE INDEX IF NOT EXISTS idx_agent_workspaces_worker_open
+  ON agent_workspaces(worker_id,cleaned_at,created_at);
+CREATE INDEX IF NOT EXISTS idx_agent_budget_team ON agent_budget_ledger(team_id,created_at);
+CREATE INDEX IF NOT EXISTS idx_performance_spans_created ON performance_spans(created_at);
+PRAGMA user_version=19;
+COMMIT;
+"""
+
+
+_UPGRADE_WORKSPACE_TWENTY = """
+PRAGMA foreign_keys=OFF;
+BEGIN IMMEDIATE;
+ALTER TABLE tool_invocations ADD COLUMN delivered_result_json TEXT
+  CHECK(delivered_result_json IS NULL OR json_valid(delivered_result_json));
+UPDATE tool_invocations SET delivered_result_json=(
+  SELECT replacement_json FROM tool_result_replacements r
+  WHERE r.invocation_id=tool_invocations.id
+) WHERE id IN (
+  SELECT invocation_id FROM tool_result_replacements WHERE invocation_id IS NOT NULL
+);
+ALTER TABLE tool_calls ADD COLUMN invocation_id TEXT
+  REFERENCES tool_invocations(id) ON DELETE SET NULL;
+CREATE UNIQUE INDEX idx_tool_calls_invocation ON tool_calls(invocation_id);
+DROP TABLE tool_result_replacements;
+DROP TABLE context_snapshots;
+DROP TABLE citations;
+DROP TABLE agent_capabilities;
+PRAGMA user_version=20;
+COMMIT;
+PRAGMA foreign_keys=ON;
+"""
+
+
+_UPGRADE_MEMORY_SIX = """
+BEGIN IMMEDIATE;
+DROP INDEX IF EXISTS idx_memory_jobs_ready;
+CREATE INDEX IF NOT EXISTS idx_memory_candidate_sources_candidate
+  ON memory_candidate_sources(candidate_id,id);
+CREATE INDEX IF NOT EXISTS idx_memory_jobs_claim
+  ON memory_jobs(status,workspace_key,job_type,created_at,available_at);
+CREATE INDEX IF NOT EXISTS idx_memory_jobs_history
+  ON memory_jobs(workspace_key,status,created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_memory_recalls_session_latest
+  ON memory_recalls(workspace_key,session_id,created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_memory_accesses_session
+  ON memory_accesses(workspace_key,session_id,run_id,memory_id,revision);
+PRAGMA user_version=6;
 COMMIT;
 """

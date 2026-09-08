@@ -45,6 +45,7 @@ from .models import (
     ModelErrorCode,
     ModelRole,
     ModelRoutingError,
+    ProviderCapabilityUnavailable,
 )
 from .governance import (
     BudgetSnapshot,
@@ -120,6 +121,7 @@ __all__ = [
     "ModelErrorCode",
     "ModelRole",
     "ModelRoutingError",
+    "ProviderCapabilityUnavailable",
     "PlanApprovalChoice",
     "PlanImplementation",
     "PlanRecord",

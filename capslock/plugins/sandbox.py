@@ -71,7 +71,9 @@ class BubblewrapSandbox(SandboxAdapter):
             command = (interpreter, str(executable), *manifest.entrypoint[1:])
         else:
             command = (str(executable), *manifest.entrypoint[1:])
-        return SandboxCommand(tuple((*argv, "--", *command)), manifest.root, "sandboxed")
+        return SandboxCommand(
+            tuple((*argv, "--", *command)), manifest.root, "sandboxed"
+        )
 
 
 class MacOSSandbox(SandboxAdapter):
@@ -79,7 +81,7 @@ class MacOSSandbox(SandboxAdapter):
         root = str(manifest.root).replace('"', '\\"')
         runtime = str(Path(sys.prefix).resolve()).replace('"', '\\"')
         profile = (
-            '(version 1) (deny default) (allow process*) '
+            "(version 1) (deny default) (allow process*) "
             '(allow file-read* (subpath "/usr") (subpath "/System") '
             f'(subpath "{root}") (subpath "{runtime}")) '
             '(allow file-write* (subpath "/private/tmp")) (deny network*)'

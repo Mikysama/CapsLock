@@ -48,7 +48,9 @@ class WorkspaceFileSuggestionProvider:
         self._paths: tuple[str, ...] = ()
 
     def suggestions(self, prefix: str) -> Iterable[Suggestion]:
-        if not prefix.startswith("@") or prefix.startswith(("@selection", "@diagnostics")):
+        if not prefix.startswith("@") or prefix.startswith(
+            ("@selection", "@diagnostics")
+        ):
             return ()
         query = prefix[1:].casefold()
         paths = self._load()
@@ -94,8 +96,7 @@ class WorkspaceFileSuggestionProvider:
                     for value in values
                     if value
                     and not any(
-                        part in {".git", ".capslock"}
-                        for part in Path(value).parts
+                        part in {".git", ".capslock"} for part in Path(value).parts
                     )
                     and Path(value).name != ".env"
                     and not Path(value).name.startswith(".env.")

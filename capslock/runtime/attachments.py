@@ -69,7 +69,9 @@ class LocalAttachmentResolver:
             text = path.read_text(encoding="utf-8")
             lines = text.splitlines()
             start = int(match.group("start") or 1)
-            end = int(match.group("end") or start if match.group("start") else len(lines))
+            end = int(
+                match.group("end") or start if match.group("start") else len(lines)
+            )
             if start < 1 or end < start or start > max(1, len(lines)):
                 raise ValueError(f"invalid attachment line range: {match.group(0)}")
             end = min(end, len(lines))
