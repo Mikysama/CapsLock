@@ -80,6 +80,17 @@ class ContextBuildResult:
     no_progress_reason: str | None = None
 
 
+@dataclass(frozen=True)
+class ContextEvaluationPolicy:
+    """Internal-only compaction policy injected by the evaluation harness."""
+
+    minimum_headroom_tokens: int = 0
+    dynamic_recent: bool = False
+    protect_latest_tool_round: bool = False
+    minimum_tool_reclaim_tokens: int = 0
+    exact_anchors: bool = False
+
+
 class _SummaryUsageMeter:
     """Count every completed summary call, including responses later rejected."""
 
@@ -116,6 +127,7 @@ class ContextBudgetManager:
         artifacts: Any = None,
         journal: Any = None,
         working_set_provider: Any = None,
+        evaluation_policy: ContextEvaluationPolicy | None = None,
     ) -> None:
         self.sessions = sessions
         self.compactions = compactions
@@ -139,6 +151,7 @@ class ContextBudgetManager:
         self.failures = 0
         self.last_no_progress_reason: str | None = None
         self.last_micro_compaction_saved_tokens = 0
+        self.evaluation_policy = evaluation_policy
 
     @property
     def input_budget(self) -> int:
@@ -150,7 +163,13 @@ class ContextBudgetManager:
 
     @property
     def trigger_tokens(self) -> int:
-        return max(1, int(self.input_budget * self.settings.trigger_ratio))
+        ratio_trigger = max(1, int(self.input_budget * self.settings.trigger_ratio))
+        if self.evaluation_policy is None:
+            return ratio_trigger
+        headroom_trigger = self.input_budget - max(
+            0, self.evaluation_policy.minimum_headroom_tokens
+        )
+        return max(1, min(ratio_trigger, headroom_trigger))
 
     def observe_compaction_progress(self, before: int, after: int) -> None:
         if after < before:
@@ -209,11 +228,16 @@ class ContextBudgetManager:
             return [], []
         selected: list[list[dict[str, object]]] = []
         used = 0
+        recent_token_limit = self.settings.preserve_recent_tokens
+        if self.evaluation_policy is not None and self.evaluation_policy.dynamic_recent:
+            recent_token_limit = min(
+                32_768, max(8_192, int(self.input_budget * 0.10))
+            )
         for unit in reversed(units):
             amount = estimate_tokens(unit)
             if selected and (
                 len(selected) >= self.settings.preserve_recent_turns
-                or used + amount > self.settings.preserve_recent_tokens
+                or used + amount > recent_token_limit
             ):
                 break
             selected.append(unit)
@@ -271,8 +295,6 @@ class ContextBudgetManager:
             policy_digest,
         )
         if cached is not None:
-            if activate:
-                await self.compactions.activate(session_id, cached.id)
             return cached
         working_set = await self.working_set(session_id, run_id)
         source_tokens = estimate_tokens(older)
@@ -292,6 +314,24 @@ class ContextBudgetManager:
                 working_set=working_set,
                 reason=str(exc) or type(exc).__name__,
             )
+        if self.evaluation_policy is not None and self.evaluation_policy.exact_anchors:
+            summary = _with_exact_anchors(
+                summary,
+                older,
+                output_limit=min(
+                    self.settings.summary_max_tokens,
+                    self.max_output_tokens,
+                    max_summary_tokens or self.settings.summary_max_tokens,
+                ),
+            )
+        summary = _fit_summary_to_limit(
+            summary,
+            min(
+                self.settings.summary_max_tokens,
+                self.max_output_tokens,
+                max_summary_tokens or self.settings.summary_max_tokens,
+            ),
+        )
         input_tokens = metered_summarizer.input_tokens
         output_tokens = metered_summarizer.output_tokens
         summary = _validate_summary(summary, _entry_refs(older))
@@ -314,8 +354,38 @@ class ContextBudgetManager:
             summary_policy_digest=policy_digest,
             focus_instructions=focus,
             quality_status=quality,
-            activate=activate,
+            # Activation is deliberately deferred until the final request is valid.
+            activate=False,
         )
+
+    async def _finalize_compaction(
+        self,
+        record: Any,
+        *,
+        session_id: str,
+        source_tokens: int,
+        result_tokens: int,
+        quality_status: str,
+        activate: bool,
+    ) -> Any:
+        if activate and hasattr(self.compactions, "finalize_and_activate"):
+            return await self.compactions.finalize_and_activate(
+                session_id,
+                record.id,
+                source_tokens=source_tokens,
+                result_tokens=result_tokens,
+                quality_status=quality_status,
+            )
+        if hasattr(self.compactions, "update_result"):
+            await self.compactions.update_result(
+                record.id,
+                source_tokens=source_tokens,
+                result_tokens=result_tokens,
+                quality_status=quality_status,
+            )
+        if activate:
+            return await self.compactions.activate(session_id, record.id)
+        return record
 
     async def compact_history(
         self,
@@ -342,7 +412,7 @@ class ContextBudgetManager:
             focus=focus,
             first_message_id=int(older[0]["id"]),
             last_message_id=int(older[-1]["id"]),
-            activate=True,
+            activate=False,
         )
         result_tokens = self.estimate(
             [_summary_message(record), *_role_content(recent)]
@@ -356,26 +426,30 @@ class ContextBudgetManager:
                 focus=focus,
                 first_message_id=int(older[0]["id"]),
                 last_message_id=int(older[-1]["id"]),
-                activate=True,
+                activate=False,
                 summary_mode="slim",
                 max_summary_tokens=max(256, self.settings.summary_max_tokens // 2),
             )
             result_tokens = self.estimate(
                 [_summary_message(record), *_role_content(recent)]
             )
+        if result_tokens > self.input_budget:
+            self.failures += 1
+            raise ContextBudgetExceeded("compacted context exceeds the model budget")
         quality = _result_quality(record.summary, result_tokens, self.target_tokens)
         before_tokens = self.estimate(_role_content(entries))
-        if hasattr(self.compactions, "update_result"):
-            await self.compactions.update_result(
-                record.id,
-                source_tokens=before_tokens,
-                result_tokens=result_tokens,
-                quality_status=quality,
-            )
-        self.observe_compaction_progress(before_tokens, result_tokens)
+        self._require_compaction_progress(before_tokens, result_tokens)
+        record = await self._finalize_compaction(
+            record,
+            session_id=session_id,
+            source_tokens=before_tokens,
+            result_tokens=result_tokens,
+            quality_status=quality,
+            activate=True,
+        )
         if result_tokens < before_tokens and quality == "target_unreachable":
             self.last_no_progress_reason = "mandatory context exceeds target"
-        return await self.compactions.active(session_id)
+        return record
 
     async def build(
         self,
@@ -597,7 +671,7 @@ class ContextBudgetManager:
             memory_revision_digest=memory_revision_digest,
             first_message_id=int(older[0]["id"]),
             last_message_id=int(older[-1]["id"]),
-            activate=True,
+            activate=False,
         )
         summary = _validate_summary(cached.summary)
         compacted_bundle = compact_bundle.add(
@@ -624,7 +698,7 @@ class ContextBudgetManager:
                 memory_revision_digest=memory_revision_digest,
                 first_message_id=int(older[0]["id"]),
                 last_message_id=int(older[-1]["id"]),
-                activate=True,
+                activate=False,
                 summary_mode="slim",
                 max_summary_tokens=max(256, self.settings.summary_max_tokens // 2),
             )
@@ -650,14 +724,15 @@ class ContextBudgetManager:
                 raise ContextBudgetExceeded("context compaction failure limit reached")
             raise ContextBudgetExceeded("compacted context exceeds the model budget")
         quality = _result_quality(summary, estimate, self.target_tokens)
-        if hasattr(self.compactions, "update_result"):
-            await self.compactions.update_result(
-                cached.id,
-                source_tokens=before_summary_tokens,
-                result_tokens=estimate,
-                quality_status=quality,
-            )
-        self.observe_compaction_progress(before_summary_tokens, estimate)
+        self._require_compaction_progress(before_summary_tokens, estimate)
+        cached = await self._finalize_compaction(
+            cached,
+            session_id=session_id,
+            source_tokens=before_summary_tokens,
+            result_tokens=estimate,
+            quality_status=quality,
+            activate=True,
+        )
         if estimate < before_summary_tokens:
             self.last_no_progress_reason = (
                 "mandatory context exceeds target"
@@ -677,6 +752,11 @@ class ContextBudgetManager:
             len(summary["working_set"]),
             self.last_no_progress_reason,
         )
+
+    def _require_compaction_progress(self, before: int, after: int) -> None:
+        self.observe_compaction_progress(before, after)
+        if after >= before:
+            raise ContextBudgetExceeded("context compaction saved no tokens")
 
     def estimate(self, messages: list[dict[str, object]]) -> int:
         return self.estimator.estimate(messages) + self.estimator.estimate(
@@ -743,7 +823,56 @@ class ContextBudgetManager:
         del preserve_messages  # Retained for Python API compatibility.
         compacted: list[dict[str, object]] = []
         persistence_failed = False
-        for item in messages:
+        oversized = [
+            index
+            for index, item in enumerate(messages)
+            if item.get("role") == "tool"
+            and len(_message_content(item).encode("utf-8"))
+            > self.settings.inline_tool_result_bytes
+        ]
+        selected = set(oversized)
+        policy = self.evaluation_policy
+        if policy is not None and policy.protect_latest_tool_round:
+            protected_ids = _latest_tool_round_ids(messages)
+            older, _recent = self.split_recent(messages)
+            recent_start = len(older)
+            preferred = [
+                index
+                for index in oversized
+                if index < recent_start
+                and str(messages[index].get("tool_call_id", ""))
+                not in protected_ids
+            ]
+            preferred.extend(
+                index
+                for index in oversized
+                if index >= recent_start
+                and str(messages[index].get("tool_call_id", ""))
+                not in protected_ids
+            )
+            selected = set()
+            reclaimed = 0
+            target = max(
+                policy.minimum_tool_reclaim_tokens,
+                max(0, before - self.trigger_tokens),
+            )
+            for index in preferred:
+                selected.add(index)
+                reclaimed += _tool_result_reclaim_estimate(messages[index])
+                if reclaimed >= target:
+                    break
+            if reclaimed < policy.minimum_tool_reclaim_tokens:
+                selected.clear()
+                reclaimed = 0
+            if before - reclaimed > self.input_budget:
+                for index in oversized:
+                    if index in selected:
+                        continue
+                    selected.add(index)
+                    reclaimed += _tool_result_reclaim_estimate(messages[index])
+                    if before - reclaimed <= self.input_budget:
+                        break
+        for index, item in enumerate(messages):
             value = dict(item)
             raw_content = value.get("content", "")
             content = (
@@ -753,6 +882,7 @@ class ContextBudgetManager:
             )
             if (
                 value.get("role") == "tool"
+                and index in selected
                 and len(content.encode("utf-8"))
                 > self.settings.inline_tool_result_bytes
             ):
@@ -813,9 +943,14 @@ class ContextBudgetManager:
         session_id: str,
         run_id: str,
         summarizer: ChatModel,
+        force: bool = False,
     ) -> list[dict[str, object]]:
         estimate = self.estimate(messages)
-        if estimate <= self.trigger_tokens:
+        if not self.settings.auto_compact:
+            if force:
+                raise ContextBudgetExceeded("automatic context compaction is disabled")
+            return messages
+        if not force and estimate <= self.trigger_tokens:
             return messages
         before_summary_tokens = estimate
         if self.failures >= self.settings.max_compaction_failures:
@@ -825,7 +960,7 @@ class ContextBudgetManager:
         )
         self.last_micro_compaction_saved_tokens = _saved
         estimate = self.estimate(messages)
-        if estimate <= self.trigger_tokens:
+        if not force and estimate <= self.trigger_tokens:
             return messages
         pinned: list[dict[str, object]] = []
         conversation: list[dict[str, object]] = []
@@ -902,14 +1037,15 @@ class ContextBudgetManager:
             self.failures += 1
             raise ContextBudgetExceeded("compacted checkpoint exceeds the model budget")
         quality = _result_quality(summary, result_tokens, self.target_tokens)
-        if hasattr(self.compactions, "update_result"):
-            await self.compactions.update_result(
-                cached.id,
-                source_tokens=before_summary_tokens,
-                result_tokens=result_tokens,
-                quality_status=quality,
-            )
-        self.observe_compaction_progress(before_summary_tokens, result_tokens)
+        self._require_compaction_progress(before_summary_tokens, result_tokens)
+        await self._finalize_compaction(
+            cached,
+            session_id=session_id,
+            source_tokens=before_summary_tokens,
+            result_tokens=result_tokens,
+            quality_status=quality,
+            activate=False,
+        )
         if result_tokens < before_summary_tokens:
             self.last_no_progress_reason = (
                 "mandatory checkpoint context exceeds target"
@@ -978,10 +1114,12 @@ class ContextBudgetManager:
         policy_digest = policy_digest or _summary_policy_digest(focus)
         output_limit = min(
             self.settings.summary_max_tokens,
+            self.max_output_tokens,
             max_summary_tokens or self.settings.summary_max_tokens,
         )
-        max_chars = max(4096, self.input_budget * 3)
-        chunks = _summary_chunks(entries, max_chars)
+        chunks = self._summary_chunks(
+            entries, focus=focus, output_limit=output_limit
+        )
         if len(chunks) == 1:
             summary, input_tokens, output_tokens = await self._summarize_segment(
                 chunks[0],
@@ -991,8 +1129,12 @@ class ContextBudgetManager:
                 output_limit=output_limit,
             )
             summary = _with_critical_facts(summary, entries)
+            summary = self._with_evaluation_anchors(
+                summary, entries, output_limit=output_limit
+            )
             summary = _with_source_coverage(summary, entries)
             summary["working_set"] = working_set or []
+            summary = _fit_summary_to_limit(summary, output_limit)
             return (
                 _validate_summary(summary, _entry_refs(entries)),
                 input_tokens,
@@ -1015,9 +1157,34 @@ class ContextBudgetManager:
             {"id": f"map:{index}", "role": "summary", "content": summary}
             for index, summary in enumerate(summaries)
         ]
-        while len(_summary_chunks(reduction, max_chars)) > 1:
+        while len(
+            self._summary_chunks(
+                reduction, focus=focus, output_limit=output_limit
+            )
+        ) > 1:
             next_level: list[dict[str, object]] = []
-            for index, chunk in enumerate(_summary_chunks(reduction, max_chars)):
+            reduction_chunks = self._summary_chunks(
+                reduction, focus=focus, output_limit=output_limit
+            )
+            if len(reduction_chunks) >= len(reduction):
+                fallback = _fallback_summary(
+                    entries,
+                    working_set=working_set,
+                    reason=(
+                        "summary reduction cannot make progress within the model budget"
+                    ),
+                )
+                fallback = self._with_evaluation_anchors(
+                    fallback, entries, output_limit=output_limit
+                )
+                fallback = _with_source_coverage(fallback, entries)
+                fallback = _fit_summary_to_limit(fallback, output_limit)
+                return (
+                    fallback,
+                    input_tokens,
+                    output_tokens,
+                )
+            for index, chunk in enumerate(reduction_chunks):
                 summary, current_input, current_output = await self._summarize_segment(
                     chunk,
                     summarizer,
@@ -1039,13 +1206,135 @@ class ContextBudgetManager:
             output_limit=output_limit,
         )
         final = _with_critical_facts(final, entries)
+        final = self._with_evaluation_anchors(
+            final, entries, output_limit=output_limit
+        )
         final = _with_source_coverage(final, entries)
         final["working_set"] = working_set or []
+        final = _fit_summary_to_limit(final, output_limit)
         return (
             _validate_summary(final, _entry_refs(entries)),
             input_tokens + current_input,
             output_tokens + current_output,
         )
+
+    def _with_evaluation_anchors(
+        self,
+        summary: dict[str, object],
+        entries: list[dict[str, object]],
+        *,
+        output_limit: int,
+    ) -> dict[str, object]:
+        if self.evaluation_policy is None or not self.evaluation_policy.exact_anchors:
+            return summary
+        return _with_exact_anchors(summary, entries, output_limit=output_limit)
+
+    def _summary_chunks(
+        self,
+        entries: list[dict[str, object]],
+        *,
+        focus: str | None,
+        output_limit: int,
+    ) -> list[list[dict[str, object]]]:
+        expanded: list[dict[str, object]] = []
+        for entry in entries:
+            if self._summary_request_fits(
+                [entry], focus=focus, output_limit=output_limit
+            ):
+                expanded.append(entry)
+                continue
+            expanded.extend(
+                self._split_summary_entry(
+                    entry, focus=focus, output_limit=output_limit
+                )
+            )
+        chunks: list[list[dict[str, object]]] = []
+        current: list[dict[str, object]] = []
+        for entry in expanded:
+            candidate = [*current, entry]
+            if current and not self._summary_request_fits(
+                candidate, focus=focus, output_limit=output_limit
+            ):
+                chunks.append(current)
+                current = []
+            if not self._summary_request_fits(
+                [entry], focus=focus, output_limit=output_limit
+            ):
+                raise ContextBudgetExceeded(
+                    "summary entry cannot fit within the model budget"
+                )
+            current.append(entry)
+        if current:
+            chunks.append(current)
+        return chunks or [[]]
+
+    def _summary_request_fits(
+        self,
+        entries: list[dict[str, object]],
+        *,
+        focus: str | None,
+        output_limit: int,
+    ) -> bool:
+        # Reserve for the longer retry request as well as provider schema encoding.
+        messages = _summary_request_messages(
+            entries, focus, validation_error="\U0001f600" * 240
+        )
+        request = {
+            "messages": messages,
+            "tools": [],
+            "response_format": _summary_response_format(),
+        }
+        return self.estimator.estimate(request) <= max(
+            1, self.context_window - output_limit
+        )
+
+    def _split_summary_entry(
+        self,
+        entry: dict[str, object],
+        *,
+        focus: str | None,
+        output_limit: int,
+    ) -> list[dict[str, object]]:
+        content = str(entry.get("content", ""))
+        if not content:
+            raise ContextBudgetExceeded(
+                "summary entry metadata cannot fit within the model budget"
+            )
+        parts: list[dict[str, object]] = []
+        remaining = content
+        part = 0
+        while remaining:
+            low, high, best = 1, len(remaining), 0
+            while low <= high:
+                middle = (low + high) // 2
+                candidate = {
+                    **entry,
+                    "content": remaining[:middle],
+                    "source_part": part,
+                    "continued": middle < len(remaining),
+                }
+                if self._summary_request_fits(
+                    [candidate], focus=focus, output_limit=output_limit
+                ):
+                    best = middle
+                    low = middle + 1
+                else:
+                    high = middle - 1
+            if best <= 0:
+                raise ContextBudgetExceeded(
+                    "summary entry cannot fit within the model budget"
+                )
+            boundary = _text_boundary(remaining, best)
+            candidate = {
+                **entry,
+                "content": remaining[:boundary],
+                "source_part": part,
+                "continued": boundary < len(remaining),
+            }
+            parts.append(candidate)
+            remaining = remaining[boundary:]
+            part += 1
+        return parts
 
     async def _summarize_segment(
         self,
@@ -1055,6 +1344,7 @@ class ContextBudgetManager:
         focus: str | None,
         policy_digest: str,
         output_limit: int,
+        overflow_depth: int = 0,
     ) -> tuple[dict[str, object], int, int]:
         digest = _digest(entries)
         if hasattr(self.compactions, "summary_segment"):
@@ -1072,9 +1362,57 @@ class ContextBudgetManager:
                 )
             if cached is not None:
                 return _with_source_coverage(_validate_summary(cached), entries), 0, 0
-        summary, input_tokens, output_tokens = await self._summarize_once(
-            entries, summarizer, focus=focus, output_limit=output_limit
-        )
+        if not self._summary_request_fits(
+            entries, focus=focus, output_limit=output_limit
+        ):
+            raise ContextBudgetExceeded(
+                "summary segment request exceeds the model input budget"
+            )
+        try:
+            summary, input_tokens, output_tokens = await self._summarize_once(
+                entries, summarizer, focus=focus, output_limit=output_limit
+            )
+        except ModelRoutingError as exc:
+            if (
+                exc.code is not ModelErrorCode.CONTEXT_OVERFLOW
+                or overflow_depth >= 4
+            ):
+                raise
+            halves = _bisect_summary_segment(entries)
+            if halves is None:
+                raise
+            mapped: list[dict[str, object]] = []
+            input_tokens = output_tokens = 0
+            for index, half in enumerate(halves):
+                partial, current_input, current_output = (
+                    await self._summarize_segment(
+                        half,
+                        summarizer,
+                        focus=focus,
+                        policy_digest=policy_digest,
+                        output_limit=output_limit,
+                        overflow_depth=overflow_depth + 1,
+                    )
+                )
+                input_tokens += current_input
+                output_tokens += current_output
+                mapped.append(
+                    {
+                        "id": f"overflow:{overflow_depth}:{index}",
+                        "role": "summary",
+                        "content": partial,
+                    }
+                )
+            summary, current_input, current_output = await self._summarize_segment(
+                mapped,
+                summarizer,
+                focus=focus,
+                policy_digest=policy_digest,
+                output_limit=output_limit,
+                overflow_depth=overflow_depth + 1,
+            )
+            input_tokens += current_input
+            output_tokens += current_output
         summary = _with_source_coverage(summary, entries)
         if hasattr(self.compactions, "store_summary_segment"):
             arguments = {
@@ -1107,57 +1445,15 @@ class ContextBudgetManager:
         focus: str | None,
         output_limit: int,
     ) -> tuple[dict[str, object], int, int]:
-        source = json.dumps(entries, ensure_ascii=False, separators=(",", ":"))
-        source = (
-            source.replace("<", "\\u003c")
-            .replace(">", "\\u003e")
-            .replace("&", "\\u0026")
-        )
         allowed = _entry_refs(entries)
-        system = _summary_system_prompt()
         validation_errors: list[str] = []
         total_input = total_output = 0
         for attempt in range(2):
-            messages = [
-                {"role": "system", "content": system},
-            ]
-            if focus:
-                encoded_focus = (
-                    json.dumps(
-                        {"preference": focus}, ensure_ascii=False, separators=(",", ":")
-                    )
-                    .replace("<", "\\u003c")
-                    .replace(">", "\\u003e")
-                    .replace("&", "\\u0026")
-                )
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": "<summary-focus-json>"
-                        + encoded_focus
-                        + "</summary-focus-json>",
-                    }
-                )
-            messages.append(
-                {
-                    "role": "user",
-                    "content": "<untrusted-history-json>\n"
-                    + source
-                    + "\n</untrusted-history-json>",
-                }
+            messages = _summary_request_messages(
+                entries,
+                focus,
+                validation_error=validation_errors[-1] if attempt else None,
             )
-            if attempt:
-                failure = validation_errors[-1]
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": (
-                            "The previous output failed validation: "
-                            + failure
-                            + ". Correct that semantic error without changing facts."
-                        ),
-                    }
-                )
             try:
                 response = await _complete_with_limit(
                     summarizer,
@@ -1168,6 +1464,7 @@ class ContextBudgetManager:
                 )
                 total_input += response.usage.input_tokens
                 total_output += response.usage.output_tokens
+                _ensure_complete_summary(response)
                 value = _without_model_provenance(
                     json.loads(response.message.content or "")
                 )
@@ -1183,7 +1480,10 @@ class ContextBudgetManager:
             except ProviderCapabilityUnavailable:
                 raise
             except ModelRoutingError as exc:
-                if exc.code is ModelErrorCode.INVALID_REQUEST:
+                if exc.code in {
+                    ModelErrorCode.INVALID_REQUEST,
+                    ModelErrorCode.CONTEXT_OVERFLOW,
+                }:
                     raise
                 validation_errors.append(_summary_validation_error(exc))
             except Exception as exc:
@@ -1197,49 +1497,148 @@ class ContextBudgetManager:
         )
 
 
-def _summary_chunks(
-    entries: list[dict[str, object]], max_chars: int
-) -> list[list[dict[str, object]]]:
-    expanded: list[dict[str, object]] = []
-    for entry in entries:
-        encoded = json.dumps(entry, ensure_ascii=False, separators=(",", ":"))
-        if len(encoded) <= max_chars:
-            expanded.append(entry)
+def _ensure_complete_summary(response: Any) -> None:
+    status = str(getattr(response, "completion_status", "") or "").casefold()
+    reason = str(getattr(response, "incomplete_reason", "") or "").casefold()
+    truncated_reasons = {
+        "max_output_tokens",
+        "max_tokens",
+        "length",
+        "max_completion_tokens",
+    }
+    if status == "incomplete" or reason in truncated_reasons:
+        detail = reason or status or "unknown"
+        raise ValueError(f"summary response was truncated: {detail}")
+
+
+def _summary_request_messages(
+    entries: list[dict[str, object]],
+    focus: str | None,
+    *,
+    validation_error: str | None = None,
+) -> list[dict[str, object]]:
+    source = _safe_summary_json(entries)
+    messages: list[dict[str, object]] = [
+        {"role": "system", "content": _summary_system_prompt()}
+    ]
+    if focus:
+        messages.append(
+            {
+                "role": "user",
+                "content": "<summary-focus-json>"
+                + _safe_summary_json({"preference": focus})
+                + "</summary-focus-json>",
+            }
+        )
+    messages.append(
+        {
+            "role": "user",
+            "content": "<untrusted-history-json>\n"
+            + source
+            + "\n</untrusted-history-json>",
+        }
+    )
+    if validation_error is not None:
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    "The previous output failed validation: "
+                    + validation_error
+                    + ". Correct that semantic error without changing facts."
+                ),
+            }
+        )
+    return messages
+
+
+def _safe_summary_json(value: object) -> str:
+    return (
+        json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+    )
+
+
+def _text_boundary(content: str, maximum: int) -> int:
+    if maximum >= len(content):
+        return len(content)
+    floor = max(1, maximum - 512)
+    for index in range(maximum, floor - 1, -1):
+        if content[index - 1] in "\n\r\t ,;)}]":
+            return index
+    return maximum
+
+
+def _bisect_summary_segment(
+    entries: list[dict[str, object]],
+) -> tuple[list[dict[str, object]], list[dict[str, object]]] | None:
+    if len(entries) > 1:
+        middle = len(entries) // 2
+        return entries[:middle], entries[middle:]
+    if not entries:
+        return None
+    entry = entries[0]
+    content = str(entry.get("content", ""))
+    if len(content) < 2:
+        return None
+    middle = len(content) // 2
+    base_part = str(entry.get("source_part", "0"))
+    left = {
+        **entry,
+        "content": content[:middle],
+        "source_part": f"{base_part}.0",
+        "continued": True,
+    }
+    right = {
+        **entry,
+        "content": content[middle:],
+        "source_part": f"{base_part}.1",
+        "continued": bool(entry.get("continued", False)),
+    }
+    return [left], [right]
+
+
+def _message_content(item: dict[str, object]) -> str:
+    content = item.get("content", "")
+    return (
+        content
+        if isinstance(content, str)
+        else json.dumps(content, ensure_ascii=False, default=str)
+    )
+
+
+def _latest_tool_round_ids(messages: list[dict[str, object]]) -> set[str]:
+    for item in reversed(messages):
+        calls = item.get("tool_calls")
+        if item.get("role") != "assistant" or not calls:
             continue
-        content = str(entry.get("content", ""))
-        overhead = max(256, len(encoded) - len(content))
-        size = max(512, max_chars - overhead)
-        for index in range(0, len(content), size):
-            expanded.append(
-                {
-                    **entry,
-                    "id": f"{entry.get('id', 'entry')}:{index // size}",
-                    "content": content[index : index + size],
-                    "continued": index + size < len(content),
-                }
-            )
-    chunks: list[list[dict[str, object]]] = []
-    current: list[dict[str, object]] = []
-    current_size = 2
-    for entry in expanded:
-        size = len(json.dumps(entry, ensure_ascii=False, separators=(",", ":"))) + 1
-        if current and current_size + size > max_chars:
-            chunks.append(current)
-            current, current_size = [], 2
-        current.append(entry)
-        current_size += size
-    if current:
-        chunks.append(current)
-    return chunks or [[]]
+        identifiers: set[str] = set()
+        for call in calls if isinstance(calls, (list, tuple)) else ():
+            if isinstance(call, dict) and call.get("id") is not None:
+                identifiers.add(str(call["id"]))
+        return identifiers
+    return set()
+
+
+def _tool_result_reclaim_estimate(item: dict[str, object]) -> int:
+    # Artifact descriptors are normally below 300 estimated tokens.
+    return max(0, estimate_tokens(_message_content(item)) - 300)
 
 
 def _with_source_coverage(
     summary: dict[str, object], entries: list[dict[str, object]]
 ) -> dict[str, object]:
     normalized = _validate_summary(summary)
-    allowed = _entry_refs(entries)
+    ordered_allowed = [
+        str(item["id"])
+        for item in entries
+        if item.get("id") is not None
+    ]
+    allowed = set(ordered_allowed)
     covered = [ref for ref in normalized["source_refs"] if ref in allowed]
-    covered.extend(ref for ref in allowed if ref not in covered)
+    covered.extend(ref for ref in ordered_allowed if ref not in covered)
     source_map: dict[str, list[str]] = {}
     if normalized["goal"]:
         refs = normalized["source_map"].get("/goal", [])
@@ -1349,6 +1748,48 @@ def _validate_summary(
         raise ValueError("compaction degraded must be a boolean")
     value["source_map"] = normalized_map
     return {key: value[key] for key in SUMMARY_KEYS}
+
+
+def _fit_summary_to_limit(
+    summary: dict[str, object], output_limit: int
+) -> dict[str, object]:
+    result = _validate_summary(summary)
+    if estimate_tokens(result) <= output_limit:
+        return result
+    result = {**result, "degraded": True, "source_map": {}}
+    for key in ("retrieval_hints", "working_set"):
+        values = list(result[key])
+        while values and estimate_tokens({**result, key: values}) > output_limit:
+            values.pop(0)
+        result[key] = values
+    refs = list(result["source_refs"])
+    while refs and estimate_tokens({**result, "source_refs": refs}) > output_limit:
+        refs.pop(0)
+    result["source_refs"] = refs
+    for key in (
+        "evidence",
+        "completed_work",
+        "decisions",
+        "constraints",
+        "current_work",
+        "verification",
+        "code_symbols",
+        "files",
+        "failures",
+        "pending",
+        "user_feedback",
+        "omissions",
+    ):
+        values = list(result[key])
+        while values and estimate_tokens({**result, key: values}) > output_limit:
+            values.pop(0)
+        result[key] = values
+    if estimate_tokens(result) > output_limit:
+        result["goal"] = _text_within_tokens(
+            str(result["goal"]),
+            max(0, output_limit - estimate_tokens({**result, "goal": ""})),
+        )
+    return _validate_summary(result)
 
 
 def _fallback_summary(
@@ -1477,6 +1918,135 @@ def _fallback_critical_facts(
     corrections = [content for _, _, content, correction in selected if correction]
     decisions = [content for _, _, content, correction in selected if not correction]
     return corrections, decisions
+
+
+def _with_exact_anchors(
+    summary: dict[str, object],
+    entries: list[dict[str, object]],
+    *,
+    output_limit: int,
+) -> dict[str, object]:
+    """Mechanically preserve evaluation anchors using only the v3 schema."""
+
+    result = _validate_summary(summary)
+    anchor_limit = max(1, output_limit // 4)
+    anchor_tokens = 0
+
+    def apply(key: str, value: str, *, replace_value: bool = False) -> None:
+        nonlocal result, anchor_tokens
+        normalized = " ".join(value.split()).strip()
+        if not normalized:
+            return
+        available = anchor_limit - anchor_tokens
+        normalized = _text_within_tokens(normalized, available)
+        if not normalized:
+            return
+        candidate = dict(result)
+        if replace_value:
+            candidate[key] = normalized
+        else:
+            current = list(candidate[key])
+            if normalized in current:
+                return
+            current.append(normalized)
+            candidate[key] = current
+        amount = estimate_tokens(normalized)
+        if anchor_tokens + amount > anchor_limit:
+            return
+        if estimate_tokens(candidate) > output_limit:
+            return
+        result = _validate_summary(candidate)
+        anchor_tokens += amount
+
+    unfinished = _latest_unfinished_user_request(entries)
+    if unfinished:
+        apply("goal", unfinished, replace_value=True)
+
+    correction_markers = (
+        "correction",
+        "corrected",
+        "actually",
+        "instead",
+        "更正",
+        "纠正",
+        "改为",
+        "以此为准",
+    )
+    path_pattern = re.compile(
+        r"(?<![\w])(?:[A-Za-z]:\\\\|\.\.?/|/)[^\s\"'`<>]+"
+    )
+    sha_pattern = re.compile(r"\b[0-9a-fA-F]{7,64}\b")
+    symbol_pattern = re.compile(
+        r"\b[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*|"
+        r"\.[A-Za-z_][A-Za-z0-9_]*)+\b"
+    )
+    command_pattern = re.compile(
+        r"^(?:\$\s*)?(?:git|python|pytest|uv|npm|pnpm|yarn|cargo|go|make)\s+.+$",
+        re.IGNORECASE,
+    )
+    for entry in reversed(entries):
+        content = str(entry.get("content", ""))
+        folded = content.casefold()
+        if entry.get("role") == "user" and any(
+            marker in folded for marker in correction_markers
+        ):
+            apply("user_feedback", content)
+        for path in path_pattern.findall(content):
+            apply("files", path.rstrip(".,:;)"))
+        for sha in sha_pattern.findall(content):
+            apply("evidence", sha)
+        for symbol in symbol_pattern.findall(content):
+            apply("code_symbols", symbol)
+        for line in content.splitlines():
+            stripped = line.strip().strip("`")
+            line_folded = stripped.casefold()
+            if command_pattern.match(stripped):
+                apply("current_work", stripped)
+            if any(marker in line_folded for marker in ("error", "failed", "exception")):
+                apply("failures", stripped)
+            if any(marker in line_folded for marker in ("passed", "verified", "验证通过")):
+                apply("verification", stripped)
+        if anchor_tokens >= anchor_limit:
+            break
+    return result
+
+
+def _latest_unfinished_user_request(
+    entries: list[dict[str, object]],
+) -> str | None:
+    user_index = next(
+        (
+            index
+            for index in range(len(entries) - 1, -1, -1)
+            if entries[index].get("role") == "user"
+        ),
+        None,
+    )
+    if user_index is None:
+        return None
+    completed = any(
+        item.get("role") == "assistant"
+        and bool(str(item.get("content", "") or "").strip())
+        and not item.get("tool_calls")
+        for item in entries[user_index + 1 :]
+    )
+    return None if completed else str(entries[user_index].get("content", ""))
+
+
+def _text_within_tokens(value: str, limit: int) -> str:
+    if limit <= 0:
+        return ""
+    if estimate_tokens(value) <= limit:
+        return value
+    low, high, best = 0, len(value), 0
+    while low <= high:
+        middle = (low + high) // 2
+        if estimate_tokens(value[:middle]) <= limit:
+            best = middle
+            low = middle + 1
+        else:
+            high = middle - 1
+    return value[:best].rstrip()
 
 
 def _with_critical_facts(

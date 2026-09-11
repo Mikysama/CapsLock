@@ -199,12 +199,12 @@ def aggregate(samples: list[SampleResult]) -> dict[str, Any]:
 def _dominates(left: dict[str, Any], right: dict[str, Any]) -> bool:
     left_values = (
         left["quality_success_rate"],
-        -left["median_cost_usd"],
+        -left["tokens"]["input_per_task"],
         -left["latency_seconds"]["p95"],
     )
     right_values = (
         right["quality_success_rate"],
-        -right["median_cost_usd"],
+        -right["tokens"]["input_per_task"],
         -right["latency_seconds"]["p95"],
     )
     return all(a >= b for a, b in zip(left_values, right_values, strict=True)) and any(
@@ -317,36 +317,43 @@ def analyse_candidates(
     ]
     recommendation: dict[str, Any] | None = None
     if pareto:
-        best_success = max(item["quality_success_rate"] for item in pareto)
-        near_best = [
-            item
-            for item in pareto
-            if item["quality_success_rate"] >= best_success - 0.01
-        ]
-        near_best.sort(
+        pareto.sort(
             key=lambda item: (
-                item["median_cost_usd"],
+                -item["quality_success_rate"],
+                item["tokens"]["input_per_task"],
                 item["latency_seconds"]["p95"],
                 item["values"].get("tools.max_read_concurrency", 1),
                 item["values"].get("runtime.max_tool_rounds", 1),
                 item["values"].get("context.preserve_recent_tokens", 1),
             )
         )
-        chosen = near_best[0]
+        chosen = pareto[0]
         base = summaries[baseline.fingerprint]
         success_gain = chosen["quality_success_rate"] - base["quality_success_rate"]
+        base_input_cost = float(base["tokens"]["input_per_task"])
+        chosen_input_cost = float(chosen["tokens"]["input_per_task"])
         cost_gain = (
             0.0
-            if base["median_cost_usd"] == 0
-            else 1 - chosen["median_cost_usd"] / base["median_cost_usd"]
+            if base_input_cost == 0
+            else 1 - chosen_input_cost / base_input_cost
         )
         latency_gain = (
             0.0
             if base["latency_seconds"]["p95"] == 0
             else 1 - chosen["latency_seconds"]["p95"] / base["latency_seconds"]["p95"]
         )
-        should_update = chosen["fingerprint"] != baseline.fingerprint and (
-            success_gain >= 0.01 or cost_gain >= 0.05 or latency_gain >= 0.05
+        no_resource_regression = (
+            chosen_input_cost <= base_input_cost
+            and chosen["latency_seconds"]["p95"]
+            <= base["latency_seconds"]["p95"]
+        )
+        should_update = (
+            chosen["fingerprint"] != baseline.fingerprint
+            and no_resource_regression
+            and (
+                _dominates(chosen, base)
+                or success_gain >= 0.01
+            )
         )
         recommendation = {
             "candidate": chosen["name"],

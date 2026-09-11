@@ -77,7 +77,11 @@ Markdown 镜像位于 `.capslock/state/plans/<session-id>/<plan-id>.md`。数据
 
 输入预算由模型 `context_window - max_output_tokens` 计算，并计入 system prompt、memory、episodic recall、显式 attachment、Skill catalog、工具 schema 与 checkpoint。默认在 80% 触发并压到 60% 目标；自动、active-run checkpoint 与 `/compact` 共用同一管线。最近历史按完整 user turn/API-safe tool round 从尾部选择，始终保留最新完整 turn，并受 `preserve_recent_turns=6` 与 `preserve_recent_tokens=32768` 双重约束。预算不足时先移除 episodic recall，再减少非最新 recent turn；核心/运行时策略、仓库指令、当前输入、显式附件及最新 turn 不会为达成 target 而删除。
 
+Provider 以结构化错误码或 HTTP 413 报告 context overflow 时，Runtime 仅在尚未输出 delta 的模型调用上强制执行一次 compaction，并用相同逻辑请求重试一次。强制模式跳过 80% 本地触发阈值，但仍遵守 `auto_compact`、硬输入预算和三次失败熔断；第二次 overflow、无可压缩历史、固定上下文本身过大或自动压缩关闭时保留原错误。已经完成的 Tool 调用不会重放。诊断事件包括 `context_overflow_detected`、`context_overflow_recovery_started`、`context_overflow_recovery_succeeded` 和 `context_overflow_recovery_failed`。
+
 旧 Tool Result 超过 `inline_tool_result_bytes=16384` 且 Artifact 持久化成功后才从模型上下文替换；失败保留原文并返回明确错误。摘要 v3 使用 `summary_max_tokens=2048` 作为 provider 输出与最终结果的硬上限，保存用户纠正、当前工作、代码符号、验证状态、逐项 `source_map` 和引用式 `working_set`。文件引用包含路径、SHA、行区间及 invocation ID，已加载 Skill 只记录名称和 digest，不跨 run 恢复正文。v1/v2 读取时仅在内存补齐 v3 默认字段，不重写旧记录。模型输出会校验并纠错一次；仍失败时生成 `degraded=true` 的确定性摘要及 `search_session_history`/`read_tool_artifact` 提示。超过 target 但低于 trigger 标记 `target_unreachable` 并继续，不在相同上下文中循环重压缩；只有超过硬输入预算或命中三次失败熔断才返回 `context_budget_exceeded`。
+
+摘要请求按 entry 使用自适应 token 估算器装箱，估算覆盖 system、focus、history wrapper、JSON Schema 和纠错消息，并为摘要输出预留完整空间。超大 entry 按 token 预算切分且保留 source ID；Provider 仍报告 overflow 时仅二分失败 segment，最多四层，之后使用确定性 fallback。normal 与 slim policy digest 隔离 segment cache。`status=incomplete`、`max_output_tokens` 或等价 length 截断即使返回合法 JSON 也不会被接受。持久 compaction 先以 inactive candidate 生成，完整最终请求通过硬预算和进展校验后，才在一个 SQLite 事务中写入结果并切换 active pointer。
 
 Composer 的 `@path[:line[-line]]` 仅在用户显式引用时读取工作区文本，最多四项、合计 64 KiB，并标记为不可信数据。启用 IDE Bridge 后，编辑器使用权限 `0600` 的 Unix socket descriptor 与随机 token 调用 JSON-RPC protocol 1；只有提示中的 `@selection` / `@diagnostics` 会展开最近上下文，路径仍受工作区私有文件边界限制。`CAPSLOCK_IDE=1` 可临时启用，持久配置使用 `[bridge]`。
 

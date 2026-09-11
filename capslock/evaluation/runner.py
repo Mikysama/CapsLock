@@ -343,6 +343,8 @@ def _reasoning_request_options(provider: str, model: str) -> dict[str, Any]:
 
 
 def _expected_answer(task: EvaluationTask) -> str:
+    if task.requirements.get("expected_answer") is not None:
+        return str(task.requirements["expected_answer"])
     if task.subsystem == "loop":
         return "STOP" if task.requirements["true_loop"] else "CONTINUE"
     if task.subsystem == "memory":
@@ -356,6 +358,8 @@ def _expected_answer(task: EvaluationTask) -> str:
 
 def _live_prompt(task: EvaluationTask) -> str:
     if task.subsystem == "context":
+        if task.requirements.get("history") is not None:
+            return task.prompt
         distractors = [f"irrelevant-{index}" for index in range(24)]
         insertion = {"front": 0, "middle": 12, "tail": 24}[
             str(task.requirements["position"])

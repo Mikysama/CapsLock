@@ -63,7 +63,12 @@ from ..tooling.contracts import ExecutionContext
 from ..tooling.executor import ToolRuntime
 from ..tooling.tools import workspace_tools
 from .attachments import LocalAttachmentResolver
-from .context import CitationResolver, ContextBudgetManager, citation_data
+from .context import (
+    CitationResolver,
+    ContextBudgetManager,
+    ContextEvaluationPolicy,
+    citation_data,
+)
 from .engine import MemoryRunMode, RunEngine, RunRequest
 from .model import ChatModel
 from .prompts import PromptBundle, PromptSection, PromptTrust
@@ -173,6 +178,7 @@ class AgentSession:
         ide_bridge: Any = None,
         core_instructions: str = INSTRUCTIONS,
         runtime_controls: tuple[str, ...] = (),
+        context_evaluation_policy: ContextEvaluationPolicy | None = None,
     ) -> None:
         self.workspace = workspace.resolve()
         self.model = model_name
@@ -245,6 +251,7 @@ class AgentSession:
             working_set_provider=getattr(skill_service, "loaded_references", None),
             attachment_resolver=LocalAttachmentResolver(policy, bridge=ide_bridge),
             settings_store=settings_store,
+            evaluation_policy=context_evaluation_policy,
         )
         self._active_runs = 0
         self.citations = CitationResolver(sources)
@@ -636,13 +643,14 @@ class AgentSession:
             else:
                 user_message_id = None
 
-            async def compact_context(active_messages):
+            async def compact_context(active_messages, *, force: bool = False):
                 self.context_budget.tool_schemas = active_tools.schemas
                 return await self.context_budget.compact_checkpoint(
                     active_messages,
                     session_id=self.session_id,
                     run_id=run_id,
                     summarizer=model_session.for_role(ModelRole.FAST),
+                    force=force,
                 )
 
             loop_started = time.perf_counter()

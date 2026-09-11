@@ -20,6 +20,7 @@ from capslock.domain import (
     MemoryType,
     ModelBudgetExceeded,
     ModelDataPolicyMismatch,
+    ModelErrorCode,
     ModelRoutingError,
     ModelRole,
 )
@@ -27,7 +28,7 @@ from capslock.memory import MemoryService
 from capslock.memory.embeddings import ExternalEmbeddingConfig
 from capslock.runtime.model import ModelDelta, ModelMessage, ModelResponse, ModelUsage
 from capslock.runtime.model import ModelRunContext
-from capslock.runtime.routing import ModelRouter, _retry_delay
+from capslock.runtime.routing import ModelRouter, _classify_error, _retry_delay
 from capslock.storage.memory_repositories import MemoryRepositories
 from capslock.storage.repositories import WorkspaceRepositories
 
@@ -36,6 +37,30 @@ from .helpers import workspace_run
 
 class TransportError(RuntimeError):
     status_code = 503
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        SimpleNamespace(status_code=413),
+        SimpleNamespace(status_code=400, code="context_length_exceeded"),
+        SimpleNamespace(status_code=400, body={"error": {"code": "prompt_too_long"}}),
+        SimpleNamespace(status_code=400, error={"type": "input_too_long"}),
+    ],
+)
+def test_provider_context_overflow_classification(error) -> None:
+    class ProviderError(RuntimeError):
+        pass
+
+    exc = ProviderError("provider rejected request")
+    exc.__dict__.update(error.__dict__)
+    assert _classify_error(exc) == (ModelErrorCode.CONTEXT_OVERFLOW, False)
+
+
+def test_generic_provider_400_is_not_context_overflow() -> None:
+    error = RuntimeError("invalid request")
+    error.status_code = 400
+    assert _classify_error(error) == (ModelErrorCode.INVALID_REQUEST, False)
 
 
 class ScriptedClient:

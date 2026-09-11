@@ -15,6 +15,8 @@ from ..behavior_defaults import (
 from ..domain import (
     AgentEventKind,
     BudgetSnapshot,
+    ModelErrorCode,
+    ModelRoutingError,
     RunMode,
     RunStepKind,
     RunStepStatus,
@@ -191,6 +193,14 @@ class ModelStepExecutor:
             await self.journal.finish_step(
                 step.id, status=RunStepStatus.FAILED, error=str(exc)
             )
+            if (
+                isinstance(exc, ModelRoutingError)
+                and exc.code is ModelErrorCode.CONTEXT_OVERFLOW
+                and (content or reasoning or calls)
+            ):
+                raise ModelRoutingError(
+                    "model stream failed after output started; retry suppressed"
+                ) from exc
             raise
         message = ModelMessage(
             "".join(content) or None,
@@ -452,7 +462,7 @@ class ToolLoop:
         authorize_limit: Callable[[BudgetSnapshot], Awaitable[bool]] | None = None,
         chat_model: ChatModel | None = None,
         compact_context: Callable[
-            [list[dict[str, object]]], Awaitable[list[dict[str, object]]]
+            ..., Awaitable[list[dict[str, object]]]
         ]
         | None = None,
         usage_observer: Callable[
@@ -549,16 +559,65 @@ class ToolLoop:
                 if active_repair is not None
                 else messages
             )
-            model_step, message, usage = await self.model_steps.invoke(
-                chat_model=active_model,
-                messages=model_messages,
-                run_id=run_id,
-                emit=emit,
-                governor=governor,
-                tool_schemas=selected_schemas,
-                usage_observer=usage_observer,
-                response_format=response_format,
-            )
+            recovered_overflow = False
+            try:
+                model_step, message, usage = await self.model_steps.invoke(
+                    chat_model=active_model,
+                    messages=model_messages,
+                    run_id=run_id,
+                    emit=emit,
+                    governor=governor,
+                    tool_schemas=selected_schemas,
+                    usage_observer=usage_observer,
+                    response_format=response_format,
+                )
+            except ModelRoutingError as exc:
+                if exc.code is not ModelErrorCode.CONTEXT_OVERFLOW:
+                    raise
+                runtime_context = self.context_factory(run_id)
+                runtime_context.event("context_overflow_detected")
+                if compact_context is None:
+                    runtime_context.event(
+                        "context_overflow_recovery_failed",
+                        reason="compaction_unavailable",
+                    )
+                    raise
+                runtime_context.event("context_overflow_recovery_started")
+                try:
+                    messages[:] = await compact_context(messages, force=True)
+                except BaseException as recovery_error:
+                    runtime_context.event(
+                        "context_overflow_recovery_failed",
+                        reason=str(recovery_error) or type(recovery_error).__name__,
+                    )
+                    raise exc from recovery_error
+                model_messages = (
+                    [*messages, active_repair.prompt()]
+                    if active_repair is not None
+                    else messages
+                )
+                try:
+                    model_step, message, usage = await self.model_steps.invoke(
+                        chat_model=active_model,
+                        messages=model_messages,
+                        run_id=run_id,
+                        emit=emit,
+                        governor=governor,
+                        tool_schemas=selected_schemas,
+                        usage_observer=usage_observer,
+                        response_format=response_format,
+                    )
+                except BaseException as retry_error:
+                    runtime_context.event(
+                        "context_overflow_recovery_failed",
+                        reason=str(retry_error) or type(retry_error).__name__,
+                    )
+                    raise
+                recovered_overflow = True
+            if recovered_overflow:
+                self.context_factory(run_id).event(
+                    "context_overflow_recovery_succeeded"
+                )
             input_tokens += usage.input_tokens
             output_tokens += usage.output_tokens
             if governor is not None:

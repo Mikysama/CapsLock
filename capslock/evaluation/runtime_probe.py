@@ -13,11 +13,12 @@ from openai import AsyncOpenAI
 
 from ..bootstrap import WorkspaceApplication
 from ..configuration import Settings
-from ..domain import AgentEventKind, RunMode
+from ..domain import AgentEventKind, RunKind, RunMode
 from ..memory.recall import RecallPolicy
 from ..runtime import RunRequest
 from .models import EvaluationTask, PolicyCandidate
 from .runner import _answer_matches, _expected_answer, _live_prompt
+from .context_compaction import policy_for_candidate
 
 
 class _ResponsesProxy:
@@ -91,7 +92,35 @@ class WorkspaceRuntimeCandidateProbe:
                     client={"default": runtime_client},
                     close_client=False,
                     memory_recall_policy=memory_policy,
+                    context_evaluation_policy=policy_for_candidate(candidate),
                 )
+                history = task.requirements.get("history")
+                if isinstance(history, list):
+                    seed_run = await application.repositories.runs.create_hidden(
+                        application.session.session_id,
+                        kind=RunKind.SESSION_SEED,
+                    )
+                    for message in history:
+                        if not isinstance(message, dict):
+                            continue
+                        await application.repositories.sessions.append_message(
+                            application.session.session_id,
+                            seed_run.id,
+                            (
+                                "assistant"
+                                if message.get("role") == "tool"
+                                else str(message.get("role", "user"))
+                            ),
+                            (
+                                "[Tool result "
+                                + str(message.get("tool_call_id", "unknown"))
+                                + "]\n"
+                                + str(message.get("content", ""))
+                                if message.get("role") == "tool"
+                                else str(message.get("content", ""))
+                            ),
+                        )
+                    await application.repositories.runs.finish_hidden(seed_run.id)
                 async for event in application.session.run_stream(
                     RunRequest(question=_live_prompt(task), mode=RunMode.EXEC)
                 ):

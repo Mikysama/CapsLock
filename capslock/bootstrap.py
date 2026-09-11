@@ -35,6 +35,7 @@ from .lsp import LspManager
 from .mcp import McpManager
 from .runtime import AgentSession, AsyncOpenAIResponsesModel, ModelRouter
 from .runtime.agent import INSTRUCTIONS
+from .runtime.context import ContextEvaluationPolicy
 from .shell import ModelShellClassifier, SessionProcessManager
 from .skills import SkillRegistry, SkillService
 from .storage.memory_repositories import MemoryRepositories
@@ -115,6 +116,7 @@ class WorkspaceApplication:
         core_instructions: str | None = None,
         runtime_controls: tuple[str, ...] = (),
         memory_recall_policy: RecallPolicy | None = None,
+        context_evaluation_policy: ContextEvaluationPolicy | None = None,
     ) -> "WorkspaceApplication":
         root = workspace.resolve()
         layout = layout or ProjectLayout.discover(root)
@@ -386,6 +388,7 @@ class WorkspaceApplication:
                 loop_detection=settings.loop_detection,
                 interaction=interaction,
                 collaboration=collaboration,
+                context_evaluation_policy=context_evaluation_policy,
             )
 
             async def switch_active_workspace(

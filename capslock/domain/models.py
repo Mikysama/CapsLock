@@ -20,6 +20,7 @@ class ModelErrorCode(StrEnum):
     BUDGET_EXCEEDED = "model_budget_exceeded"
     AUTHENTICATION = "model_authentication_failed"
     INVALID_REQUEST = "model_invalid_request"
+    CONTEXT_OVERFLOW = "model_context_overflow"
     CAPABILITY_UNAVAILABLE = "provider_capability_unavailable"
 
 

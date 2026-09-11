@@ -20,6 +20,8 @@ from capslock.domain import (
     AgentEventKind,
     ApprovalChoice,
     ApprovalDecision,
+    ModelErrorCode,
+    ModelRoutingError,
     RunStepStatus,
 )
 from capslock.interaction import RunInteraction
@@ -29,6 +31,7 @@ from capslock.planning import PlanningService
 from capslock.policy import WorkspacePolicy
 from capslock.runtime import AgentSession, AsyncOpenAIResponsesModel, RunRequest
 from capslock.runtime.model import (
+    ModelDelta,
     ModelMessage,
     ModelResponse,
     ModelToolCall,
@@ -1156,6 +1159,230 @@ def test_async_openai_forwards_provider_response_format() -> None:
         assert "messages" not in captured
         assert result.message.content == '{"ok":true}'
         assert result.usage == ModelUsage(2, 1)
+
+    asyncio.run(scenario())
+
+
+def test_async_openai_maps_incomplete_response_metadata() -> None:
+    async def scenario() -> None:
+        class Responses:
+            async def create(self, **kwargs):
+                return SimpleNamespace(
+                    output=[],
+                    output_text='{"ok":true}',
+                    usage=None,
+                    status="incomplete",
+                    incomplete_details=SimpleNamespace(reason="max_output_tokens"),
+                )
+
+        result = await AsyncOpenAIResponsesModel(
+            SimpleNamespace(responses=Responses())
+        ).complete(model="test", messages=[], tools=[])
+        assert result.completion_status == "incomplete"
+        assert result.incomplete_reason == "max_output_tokens"
+
+    asyncio.run(scenario())
+
+
+def test_tool_loop_recovers_once_from_pre_output_context_overflow(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        repositories = await WorkspaceRepositories.open(
+            tmp_path / "overflow.sqlite3", workspace=tmp_path
+        )
+        try:
+            session, prepared = await workspace_run(repositories)
+            overflow = ModelRoutingError("maximum context length exceeded")
+            overflow.code = ModelErrorCode.CONTEXT_OVERFLOW
+            model = FakeChatModel(overflow, answer("recovered"))
+            events: list[tuple[str, dict[str, object]]] = []
+
+            def factory(run_id: str) -> ExecutionContext:
+                return ExecutionContext(
+                    session_id=session.id,
+                    run_id=run_id,
+                    policy=WorkspacePolicy(tmp_path),
+                    event=lambda kind, **data: events.append((kind, data)),
+                    tasks=repositories.tasks,
+                    sources=repositories.sources,
+                    actions=None,
+                )
+
+            loop = ToolLoop(
+                chat_model=model,
+                model="test",
+                tools=ToolRegistry([]),
+                journal=repositories.run_journal,
+                max_tool_rounds=1,
+                context_factory=factory,
+            )
+            compact_calls = []
+
+            async def compact(messages, *, force=False):
+                compact_calls.append(force)
+                return [{"role": "user", "content": "compacted"}]
+
+            result = await loop.run(
+                [{"role": "user", "content": "large"}],
+                prepared.run.id,
+                emit=lambda kind, data: asyncio.sleep(0),
+                compact_context=compact,
+            )
+            assert result.text == "recovered"
+            assert compact_calls == [False, True]
+            assert model.requests[1]["messages"][0] == {
+                "role": "user",
+                "content": "compacted",
+            }
+            assert [kind for kind, _ in events if kind.startswith("context_overflow")] == [
+                "context_overflow_detected",
+                "context_overflow_recovery_started",
+                "context_overflow_recovery_succeeded",
+            ]
+        finally:
+            await repositories.close()
+
+    asyncio.run(scenario())
+
+
+def test_tool_loop_stops_after_second_context_overflow(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        repositories = await WorkspaceRepositories.open(
+            tmp_path / "overflow-twice.sqlite3", workspace=tmp_path
+        )
+        try:
+            session, prepared = await workspace_run(repositories)
+
+            def overflow():
+                error = ModelRoutingError("maximum context length exceeded")
+                error.code = ModelErrorCode.CONTEXT_OVERFLOW
+                return error
+
+            model = FakeChatModel(overflow(), overflow(), answer("must not run"))
+            loop = ToolLoop(
+                chat_model=model,
+                model="test",
+                tools=ToolRegistry([]),
+                journal=repositories.run_journal,
+                max_tool_rounds=1,
+                context_factory=context_factory(repositories, session.id),
+            )
+            forced = []
+
+            async def compact(messages, *, force=False):
+                forced.append(force)
+                return messages
+
+            with pytest.raises(ModelRoutingError) as error:
+                await loop.run(
+                    [{"role": "user", "content": "large"}],
+                    prepared.run.id,
+                    emit=lambda kind, data: asyncio.sleep(0),
+                    compact_context=compact,
+                )
+            assert error.value.code is ModelErrorCode.CONTEXT_OVERFLOW
+            assert forced == [False, True]
+            assert len(model.requests) == 2
+        finally:
+            await repositories.close()
+
+    asyncio.run(scenario())
+
+
+def test_tool_loop_does_not_recover_overflow_after_visible_delta(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        repositories = await WorkspaceRepositories.open(
+            tmp_path / "partial-overflow.sqlite3", workspace=tmp_path
+        )
+        try:
+            session, prepared = await workspace_run(repositories)
+
+            class PartialStream:
+                calls = 0
+
+                async def stream_complete(self, **request):
+                    self.calls += 1
+                    yield ModelDelta(content="partial")
+                    error = ModelRoutingError("maximum context length exceeded")
+                    error.code = ModelErrorCode.CONTEXT_OVERFLOW
+                    raise error
+
+            model = PartialStream()
+            loop = ToolLoop(
+                chat_model=model,
+                model="test",
+                tools=ToolRegistry([]),
+                journal=repositories.run_journal,
+                max_tool_rounds=1,
+                context_factory=context_factory(repositories, session.id),
+            )
+            compact_calls = []
+
+            async def compact(messages, *, force=False):
+                compact_calls.append(force)
+                return messages
+
+            with pytest.raises(ModelRoutingError, match="output started"):
+                await loop.run(
+                    [],
+                    prepared.run.id,
+                    emit=lambda kind, data: asyncio.sleep(0),
+                    compact_context=compact,
+                )
+            assert model.calls == 1
+            assert compact_calls == [False]
+        finally:
+            await repositories.close()
+
+    asyncio.run(scenario())
+
+
+def test_overflow_recovery_does_not_replay_completed_tool_call(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        repositories = await WorkspaceRepositories.open(
+            tmp_path / "tool-overflow.sqlite3", workspace=tmp_path
+        )
+        executions = 0
+        try:
+            session, prepared = await workspace_run(repositories)
+
+            async def execute(context, arguments):
+                nonlocal executions
+                executions += 1
+                return ToolResult(True, {"ok": True})
+
+            overflow = ModelRoutingError("prompt is too long")
+            overflow.code = ModelErrorCode.CONTEXT_OVERFLOW
+            model = FakeChatModel(
+                ModelResponse(
+                    ModelMessage(None, (ModelToolCall("once", "write_once", "{}"),))
+                ),
+                overflow,
+                answer("recovered"),
+            )
+            loop = ToolLoop(
+                chat_model=model,
+                model="test",
+                tools=ToolRegistry(
+                    [Tool("write_once", "write once", {"type": "object"}, execute)]
+                ),
+                journal=repositories.run_journal,
+                max_tool_rounds=2,
+                context_factory=context_factory(repositories, session.id),
+            )
+
+            async def compact(messages, *, force=False):
+                return messages
+
+            result = await loop.run(
+                [],
+                prepared.run.id,
+                emit=lambda kind, data: asyncio.sleep(0),
+                compact_context=compact,
+            )
+            assert result.text == "recovered"
+            assert executions == 1
+        finally:
+            await repositories.close()
 
     asyncio.run(scenario())
 

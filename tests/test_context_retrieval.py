@@ -7,9 +7,11 @@ from types import SimpleNamespace
 import pytest
 
 from capslock.configuration import ContextSettings
+from capslock.domain import ModelErrorCode, ModelRoutingError
 from capslock.runtime.context import (
     ContextBudgetExceeded,
     ContextBudgetManager,
+    ContextEvaluationPolicy,
     SUMMARY_POLICY_DIGEST,
     _complete_with_limit,
     _fallback_summary,
@@ -236,6 +238,58 @@ def test_micro_compaction_never_replaces_content_without_durable_artifact() -> N
     assert messages[0]["content"] == original
 
 
+def test_evaluation_policy_protects_latest_complete_tool_round() -> None:
+    class Artifacts:
+        async def put(self, **values):
+            content = values["content"]
+            return SimpleNamespace(
+                id=f"artifact-{len(content)}",
+                sha256="a" * 64,
+                preview="preview",
+            )
+
+    manager = ContextBudgetManager(
+        sessions=SimpleNamespace(),
+        compactions=NoCompactions(),
+        settings=ContextSettings(),
+        context_window=100_000,
+        max_output_tokens=1_000,
+        model_profile="test",
+        model_name="test",
+        tool_schemas=[],
+        artifacts=Artifacts(),
+        evaluation_policy=ContextEvaluationPolicy(
+            protect_latest_tool_round=True,
+            minimum_tool_reclaim_tokens=4_096,
+        ),
+    )
+    old_result = "old-result-" * 2_000
+    latest_result = "latest-result-" * 2_000
+    messages = [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{"id": "old", "function": {"name": "read"}}],
+        },
+        {"role": "tool", "tool_call_id": "old", "content": old_result},
+        {"role": "user", "content": "next"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{"id": "latest", "function": {"name": "read"}}],
+        },
+        {"role": "tool", "tool_call_id": "latest", "content": latest_result},
+    ]
+
+    compacted, saved = asyncio.run(
+        manager.micro_compact(messages, session_id="session", run_id="run")
+    )
+
+    assert saved > 4_096
+    assert '"externalized": true' in compacted[1]["content"]
+    assert compacted[-1]["content"] == latest_result
+
+
 def test_hierarchical_summary_submits_front_middle_and_tail_without_slicing() -> None:
     manager = ContextBudgetManager(
         sessions=SimpleNamespace(),
@@ -289,6 +343,81 @@ def test_hierarchical_summary_reuses_unchanged_segment_digests() -> None:
     assert second == first
     assert len(model.requests) == request_count
     assert input_tokens == output_tokens == 0
+
+
+def test_summary_chunks_are_token_budgeted_for_cjk_code_and_json() -> None:
+    manager = ContextBudgetManager(
+        sessions=SimpleNamespace(),
+        compactions=NoCompactions(),
+        settings=ContextSettings(),
+        context_window=4_000,
+        max_output_tokens=500,
+        model_profile="test",
+        model_name="test",
+        tool_schemas=[],
+    )
+    entries = [
+        {"id": "cjk", "role": "user", "content": "中文上下文" * 2_000},
+        {
+            "id": "code",
+            "role": "assistant",
+            "content": "def handler(value):\n    return {'value': value}\n" * 700,
+        },
+        {
+            "id": "json",
+            "role": "tool",
+            "content": json.dumps({"rows": ["值" * 50] * 300}, ensure_ascii=False),
+        },
+    ]
+
+    chunks = manager._summary_chunks(entries, focus="保留精确值", output_limit=500)
+
+    assert len(chunks) > 3
+    assert all(
+        manager._summary_request_fits(
+            chunk, focus="保留精确值", output_limit=500
+        )
+        for chunk in chunks
+    )
+    expanded = [entry for chunk in chunks for entry in chunk]
+    assert {str(entry["id"]) for entry in expanded} == {"cjk", "code", "json"}
+    assert all("source_part" in entry for entry in expanded)
+
+
+def test_provider_overflow_bisects_only_failed_summary_segment() -> None:
+    class OverflowOnce(Summarizer):
+        async def complete(self, **request):
+            self.requests.append(request)
+            if len(self.requests) == 1:
+                error = ModelRoutingError("prompt_too_long")
+                error.code = ModelErrorCode.CONTEXT_OVERFLOW
+                raise error
+            return ModelResponse(ModelMessage(json.dumps(SUMMARY)), ModelUsage(3, 2))
+
+    manager = ContextBudgetManager(
+        sessions=SimpleNamespace(),
+        compactions=NoCompactions(),
+        settings=ContextSettings(),
+        context_window=8_000,
+        max_output_tokens=1_000,
+        model_profile="test",
+        model_name="test",
+        tool_schemas=[],
+    )
+    model = OverflowOnce()
+
+    summary, _, _ = asyncio.run(
+        manager._summarize(
+            [
+                {"id": "left", "role": "user", "content": "left"},
+                {"id": "right", "role": "assistant", "content": "right"},
+            ],
+            model,
+        )
+    )
+
+    assert len(model.requests) == 4
+    assert summary["source_refs"] == ["left", "right"]
 
 
 def test_summary_provenance_is_rebuilt_from_the_current_segment() -> None:
@@ -404,6 +533,43 @@ def test_failed_summary_persists_usage_from_every_rejected_response(tmp_path) ->
     asyncio.run(scenario())
 
 
+def test_truncated_valid_json_summary_uses_degraded_fallback(tmp_path) -> None:
+    async def scenario() -> None:
+        repositories = await WorkspaceRepositories.open(
+            tmp_path / "truncated.sqlite3", workspace=tmp_path
+        )
+        try:
+            session, prepared = await workspace_run(repositories, "truncate")
+            manager = ContextBudgetManager(
+                sessions=repositories.sessions,
+                compactions=repositories.compactions,
+                settings=ContextSettings(),
+                context_window=8_000,
+                max_output_tokens=2_048,
+                model_profile="test",
+                model_name="test",
+                tool_schemas=[],
+            )
+            truncated = ModelResponse(
+                ModelMessage(json.dumps(SUMMARY)),
+                ModelUsage(3, 2),
+                completion_status="incomplete",
+                incomplete_reason="max_output_tokens",
+            )
+            record = await manager.get_or_create_compaction(
+                session_id=session.id,
+                run_id=prepared.run.id,
+                older=[{"id": 1, "role": "user", "content": "history"}],
+                summarizer=FakeChatModel(truncated, truncated),
+            )
+            assert record.summary["degraded"] is True
+            assert "truncated: max_output_tokens" in record.summary["omissions"][0]
+        finally:
+            await repositories.close()
+
+    asyncio.run(scenario())
+
+
 def test_fallback_scans_entire_segment_for_corrections_and_identifiers() -> None:
     entries = [
         {"id": index, "role": "user", "content": f"routine filler {index}"}
@@ -424,6 +590,51 @@ def test_fallback_scans_entire_segment_for_corrections_and_identifiers() -> None
         "CAPSLOCK_MIDDLE_CANARY_15_X7Q9" in item for item in summary["user_feedback"]
     )
     assert summary["degraded"] is True
+
+
+def test_evaluation_exact_anchors_use_current_fields_and_stay_bounded() -> None:
+    manager = ContextBudgetManager(
+        sessions=SimpleNamespace(),
+        compactions=NoCompactions(),
+        settings=ContextSettings(summary_max_tokens=2_048),
+        context_window=16_000,
+        max_output_tokens=2_048,
+        model_profile="test",
+        model_name="test",
+        tool_schemas=[],
+        evaluation_policy=ContextEvaluationPolicy(exact_anchors=True),
+    )
+    entries = [
+        {
+            "id": 1,
+            "role": "user",
+            "content": (
+                "Correction: use /workspace/src/worker.py at SHA "
+                "0123456789abcdef and not the prior file."
+            ),
+        },
+        {
+            "id": 2,
+            "role": "assistant",
+            "content": "pytest failed with RuntimeError: exact failure",
+        },
+        {
+            "id": 3,
+            "role": "user",
+            "content": "Run pytest -q and finish the pending worker.py fix.",
+        },
+    ]
+
+    anchored = manager._with_evaluation_anchors(
+        SUMMARY, entries, output_limit=2_048
+    )
+
+    assert "pending worker.py fix" in anchored["goal"]
+    assert any("/workspace/src/worker.py" in item for item in anchored["files"])
+    assert "0123456789abcdef" in anchored["evidence"]
+    assert any("RuntimeError" in item for item in anchored["failures"])
+    assert set(anchored) == set(SUMMARY)
+    assert manager.estimator.estimate(anchored) <= 2_048
 
 
 def test_runtime_restores_critical_fact_omitted_by_valid_model_summary() -> None:
@@ -709,6 +920,134 @@ def test_checkpoint_compaction_preserves_latest_api_safe_tool_round(tmp_path) ->
             )
             assert any(item.get("tool_calls") for item in compacted)
             assert any(item.get("tool_call_id") == "call" for item in compacted)
+        finally:
+            await repositories.close()
+
+    asyncio.run(scenario())
+
+
+def test_forced_checkpoint_compacts_below_normal_trigger(tmp_path) -> None:
+    async def scenario() -> None:
+        repositories = await WorkspaceRepositories.open(
+            tmp_path / "forced.sqlite3", workspace=tmp_path
+        )
+        try:
+            session, prepared = await workspace_run(repositories, "forced")
+            manager = ContextBudgetManager(
+                sessions=repositories.sessions,
+                compactions=repositories.compactions,
+                settings=ContextSettings(preserve_recent_turns=1),
+                context_window=10_000,
+                max_output_tokens=500,
+                model_profile="test",
+                model_name="test",
+                tool_schemas=[],
+            )
+            messages = [
+                {"role": "system", "content": "policy"},
+                {"role": "user", "content": "old " + "x" * 12_000},
+                {"role": "assistant", "content": "old answer"},
+                {"role": "user", "content": "latest request"},
+            ]
+            assert manager.estimate(messages) < manager.trigger_tokens
+            model = FakeChatModel(answer(json.dumps(SUMMARY)))
+
+            unchanged = await manager.compact_checkpoint(
+                messages,
+                session_id=session.id,
+                run_id=prepared.run.id,
+                summarizer=model,
+            )
+            compacted = await manager.compact_checkpoint(
+                messages,
+                session_id=session.id,
+                run_id=prepared.run.id,
+                summarizer=model,
+                force=True,
+            )
+
+            assert unchanged is messages
+            assert len(model.requests) == 1
+            assert any(
+                '"name":"compaction"' in str(item.get("content"))
+                for item in compacted
+            )
+        finally:
+            await repositories.close()
+
+    asyncio.run(scenario())
+
+
+def test_forced_checkpoint_respects_disabled_auto_compaction() -> None:
+    manager = ContextBudgetManager(
+        sessions=SimpleNamespace(),
+        compactions=NoCompactions(),
+        settings=ContextSettings(auto_compact=False),
+        context_window=10_000,
+        max_output_tokens=500,
+        model_profile="test",
+        model_name="test",
+        tool_schemas=[],
+    )
+    with pytest.raises(ContextBudgetExceeded, match="disabled"):
+        asyncio.run(
+            manager.compact_checkpoint(
+                [{"role": "user", "content": "history"}],
+                session_id="session",
+                run_id="run",
+                summarizer=FakeChatModel(),
+                force=True,
+            )
+        )
+
+
+def test_finalize_transaction_failure_preserves_active_boundary(tmp_path) -> None:
+    async def scenario() -> None:
+        repositories = await WorkspaceRepositories.open(
+            tmp_path / "atomic.sqlite3", workspace=tmp_path
+        )
+        try:
+            session, prepared = await workspace_run(repositories, "atomic")
+
+            async def create(source_digest: str, activate: bool):
+                return await repositories.compactions.create(
+                    session_id=session.id,
+                    run_id=prepared.run.id,
+                    summary=SUMMARY,
+                    first_message_id=1,
+                    last_message_id=2,
+                    source_compaction_id=None,
+                    input_tokens=1,
+                    output_tokens=1,
+                    source_tokens=100,
+                    target_tokens=60,
+                    model_profile="test",
+                    source_digest=source_digest,
+                    activate=activate,
+                )
+
+            original = await create("original", True)
+            candidate = await create("candidate", False)
+            await repositories.database.execute(
+                f"""CREATE TRIGGER fail_candidate_finalize BEFORE UPDATE
+                    ON context_compactions WHEN NEW.id='{candidate.id}'
+                    BEGIN SELECT RAISE(ABORT, 'injected finalize failure'); END"""
+            )
+            with pytest.raises(Exception, match="injected finalize failure"):
+                await repositories.compactions.finalize_and_activate(
+                    session.id,
+                    candidate.id,
+                    source_tokens=200,
+                    result_tokens=50,
+                    quality_status="ok",
+                )
+            active = await repositories.compactions.active(session.id)
+            assert active is not None and active.id == original.id
+            retained = await repositories.compactions.matching(
+                session.id, "candidate"
+            )
+            assert retained is not None
+            assert retained.result_tokens == 0
         finally:
             await repositories.close()
 

@@ -780,6 +780,8 @@ def _classify_error(exc: Exception) -> tuple[ModelErrorCode, bool]:
     name = type(exc).__name__.casefold()
     if isinstance(exc, StrictSchemaError):
         return ModelErrorCode.INVALID_REQUEST, False
+    if status == 413 or _is_context_overflow(exc):
+        return ModelErrorCode.CONTEXT_OVERFLOW, False
     if status == 429 or "ratelimit" in name or "rate_limit" in name:
         return ModelErrorCode.RATE_LIMITED, True
     if status in {401, 403} or "authentication" in name:
@@ -790,6 +792,63 @@ def _classify_error(exc: Exception) -> tuple[ModelErrorCode, bool]:
         status is None or status >= 500 or "timeout" in name or "connection" in name
     )
     return ModelErrorCode.UNAVAILABLE, retryable
+
+
+_CONTEXT_OVERFLOW_CODES = {
+    "context_length_exceeded",
+    "prompt_too_long",
+    "input_too_long",
+    "request_too_large",
+}
+_CONTEXT_OVERFLOW_TEXT = (
+    "context length exceeded",
+    "context_length_exceeded",
+    "prompt is too long",
+    "prompt_too_long",
+    "input is too long",
+    "input_too_long",
+    "maximum context length",
+    "exceeds the context window",
+    "request too large for the model",
+)
+
+
+def _is_context_overflow(exc: Exception) -> bool:
+    """Prefer provider codes, falling back only to explicit overflow wording."""
+
+    values: list[object] = [
+        getattr(exc, "code", None),
+        getattr(exc, "type", None),
+    ]
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        values.extend(_error_values(body))
+    error = getattr(exc, "error", None)
+    if isinstance(error, dict):
+        values.extend(_error_values(error))
+    else:
+        values.extend((getattr(error, "code", None), getattr(error, "type", None)))
+    response = getattr(exc, "response", None)
+    if response is not None:
+        try:
+            payload = response.json()
+        except Exception:
+            payload = None
+        if isinstance(payload, dict):
+            values.extend(_error_values(payload))
+    normalized = {str(value).casefold() for value in values if value is not None}
+    if normalized & _CONTEXT_OVERFLOW_CODES:
+        return True
+    text = str(exc).casefold()
+    return any(marker in text for marker in _CONTEXT_OVERFLOW_TEXT)
+
+
+def _error_values(value: dict[str, object]) -> list[object]:
+    nested = value.get("error")
+    values = [value.get("code"), value.get("type")]
+    if isinstance(nested, dict):
+        values.extend((nested.get("code"), nested.get("type")))
+    return values
 
 
 def _retry_delay(exc: Exception, attempt: int) -> float:

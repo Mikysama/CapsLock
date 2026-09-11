@@ -37,6 +37,8 @@ class ModelUsage:
 class ModelResponse:
     message: ModelMessage
     usage: ModelUsage = ModelUsage()
+    completion_status: str | None = None
+    incomplete_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -544,4 +546,17 @@ def _responses_response(response: Any) -> ModelResponse:
             "".join(content) or None, tuple(calls), "".join(reasoning) or None
         ),
         _usage(getattr(response, "usage", None)),
+        _optional_string(getattr(response, "status", None)),
+        _incomplete_reason(response),
     )
+
+
+def _optional_string(value: object) -> str | None:
+    return str(value) if value is not None and str(value) else None
+
+
+def _incomplete_reason(response: Any) -> str | None:
+    details = getattr(response, "incomplete_details", None)
+    if isinstance(details, dict):
+        return _optional_string(details.get("reason"))
+    return _optional_string(getattr(details, "reason", None))

@@ -152,6 +152,56 @@ class ContextCompactionRepository(Repository):
                 (source_tokens, result_tokens, quality_status, compaction_id),
             )
 
+    async def finalize_and_activate(
+        self,
+        session_id: str,
+        compaction_id: str,
+        *,
+        result_tokens: int,
+        quality_status: str,
+        source_tokens: int | None = None,
+    ) -> CompactionRecord:
+        """Finalize a validated candidate and move the active boundary atomically."""
+
+        async with self.database.transaction() as connection:
+            cursor = await connection.execute(
+                """SELECT * FROM context_compactions WHERE id=? AND session_id=?
+                   AND first_message_id IS NOT NULL AND last_message_id IS NOT NULL
+                   AND valid=1""",
+                (compaction_id, session_id),
+            )
+            record = await cursor.fetchone()
+            await cursor.close()
+            if record is None:
+                raise ValueError(
+                    "only a valid session-history compaction can be activated"
+                )
+            if source_tokens is None:
+                await connection.execute(
+                    """UPDATE context_compactions SET result_tokens=?,quality_status=?
+                       WHERE id=?""",
+                    (result_tokens, quality_status, compaction_id),
+                )
+            else:
+                await connection.execute(
+                    """UPDATE context_compactions SET source_tokens=?,result_tokens=?,
+                       quality_status=? WHERE id=?""",
+                    (source_tokens, result_tokens, quality_status, compaction_id),
+                )
+            await connection.execute(
+                """INSERT INTO session_context_state(
+                   session_id,active_compaction_id,updated_at) VALUES(?,?,?)
+                   ON CONFLICT(session_id) DO UPDATE SET
+                   active_compaction_id=excluded.active_compaction_id,
+                   updated_at=excluded.updated_at""",
+                (session_id, compaction_id, now()),
+            )
+        finalized = await self.one(
+            "SELECT * FROM context_compactions WHERE id=?", (compaction_id,)
+        )
+        assert finalized is not None
+        return _record(finalized)
+
     async def create(
         self,
         *,

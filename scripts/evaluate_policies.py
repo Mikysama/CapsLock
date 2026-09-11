@@ -18,6 +18,8 @@ if str(ROOT) not in sys.path:
 from capslock.evaluation import (  # noqa: E402
     EvaluationRunner,
     build_tasks,
+    context_compaction_candidates,
+    load_long_context_tasks,
     load_matrix,
     propose_memory_weights,
 )
@@ -226,8 +228,24 @@ def _rehash(report: dict) -> None:
 
 async def async_main(args: argparse.Namespace) -> int:
     matrix = load_matrix(args.matrix)
+    if args.strategy == "context-compaction" and args.context_dataset is None:
+        raise ValueError("context-compaction strategy requires --context-dataset")
+    if (
+        args.context_dataset is not None
+        and args.stage == "confirm"
+        and args.repetitions < 3
+    ):
+        raise ValueError("long-context confirmation requires at least 3 repetitions")
+    long_context_tasks = (
+        load_long_context_tasks(
+            args.context_dataset,
+            split="confirm" if args.stage == "confirm" else "tune",
+        )
+        if args.context_dataset is not None
+        else None
+    )
     if args.stage == "deterministic":
-        tasks = build_tasks(split="tune")
+        tasks = long_context_tasks or build_tasks(split="tune")
         if args.strategy == "refine":
             if args.input_report is None:
                 raise ValueError("refine requires --input-report from the OAT stage")
@@ -236,12 +254,16 @@ async def async_main(args: argparse.Namespace) -> int:
             if args.input_report is None:
                 raise ValueError("memory-optimize requires --input-report")
             candidates = _memory_weight_candidates(args.input_report, seed=args.seed)
+        elif args.strategy == "context-compaction":
+            candidates = context_compaction_candidates()
         else:
             candidates = matrix.candidates(strategy="oat")
     else:
         if args.input_report is None:
             raise ValueError("screen and confirm require --input-report")
-        tasks = build_tasks(split="confirm" if args.stage == "confirm" else "tune")
+        tasks = long_context_tasks or build_tasks(
+            split="confirm" if args.stage == "confirm" else "tune"
+        )
         candidates = _candidates_from_report(args.input_report)
     runner = EvaluationRunner(
         matrix,
@@ -289,10 +311,15 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=20260828)
     parser.add_argument(
         "--strategy",
-        choices=("oat", "refine", "memory-optimize"),
+        choices=("oat", "refine", "memory-optimize", "context-compaction"),
         default="oat",
     )
     parser.add_argument("--input-report", type=Path)
+    parser.add_argument(
+        "--context-dataset",
+        type=Path,
+        help="external anonymized long-context dataset for compaction evaluation",
+    )
     parser.add_argument("--peer-report", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()

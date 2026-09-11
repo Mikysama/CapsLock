@@ -12,6 +12,8 @@ import jsonschema
 from capslock.evaluation import (
     EvaluationRunner,
     build_tasks,
+    context_compaction_candidates,
+    load_long_context_tasks,
     load_matrix,
     propose_memory_weights,
 )
@@ -24,6 +26,7 @@ from capslock.evaluation.runner import (
     write_evaluation,
 )
 from capslock.evaluation.runtime_probe import _settings_for_candidate
+from capslock.evaluation.context_compaction import policy_for_candidate
 from capslock.configuration import Settings
 from capslock.evaluation.selection import analyse_candidates
 from capslock.evaluation.statistics import (
@@ -34,6 +37,71 @@ from capslock.evaluation.statistics import (
 
 ROOT = Path(__file__).resolve().parents[1]
 MATRIX = ROOT / "evaluations" / "core-v1.toml"
+
+
+def test_fixed_context_compaction_candidate_matrix_is_evaluation_only() -> None:
+    candidates = context_compaction_candidates()
+    assert [item.name for item in candidates] == [
+        "baseline",
+        "trigger-85",
+        "trigger-90",
+        "dynamic-recent",
+        "protected-tools",
+        "exact-anchors",
+        "combined",
+    ]
+    trigger = policy_for_candidate(candidates[1])
+    assert trigger.minimum_headroom_tokens == 16_384
+    combined = policy_for_candidate(candidates[-1])
+    assert combined.dynamic_recent is True
+    assert combined.protect_latest_tool_round is True
+    assert combined.exact_anchors is True
+    assert baseline_values()["context.trigger_ratio"] == 0.80
+    assert "context.minimum_headroom_tokens" not in baseline_values()
+
+
+def test_long_context_dataset_requires_reviewed_sample_floor(tmp_path: Path) -> None:
+    sessions = []
+    for session_index in range(4):
+        sessions.append(
+            {
+                "id": f"session-{session_index}",
+                "messages": [
+                    {"role": "user", "content": "历史要求"},
+                    {"role": "assistant", "content": "acknowledged"},
+                ],
+                "fact_questions": [
+                    {
+                        "split": "tune",
+                        "prompt": f"fact {index}",
+                        "expected": f"VALUE-{session_index}-{index}",
+                        "position": ("front", "middle", "tail")[index % 3],
+                    }
+                    for index in range(15)
+                ],
+                "continuation_tasks": [
+                    {
+                        "split": "tune",
+                        "prompt": f"continue {index}",
+                        "expected": f"DONE-{session_index}-{index}",
+                        "position": ("front", "middle", "tail")[index % 3],
+                    }
+                    for index in range(8)
+                ],
+            }
+        )
+    path = tmp_path / "long-context.json"
+    path.write_text(json.dumps({"sessions": sessions}), encoding="utf-8")
+
+    tasks = load_long_context_tasks(path, split="tune")
+
+    assert len(tasks) == 92
+    assert sum(item.requirements["kind"] == "fact" for item in tasks) == 60
+    assert {item.requirements["position"] for item in tasks} == {
+        "front",
+        "middle",
+        "tail",
+    }
 
 
 def _policy_script():
