@@ -252,6 +252,22 @@ def test_runtime_outcome_requires_authoritative_terminal_jsonl() -> None:
     )
 
 
+def test_runtime_outcome_reads_tool_counts_from_budget_used() -> None:
+    completed = json.dumps(
+        {
+            "event": "stopped",
+            "status": "stopped",
+            "terminal": True,
+            "data": {
+                "usage": {"input_tokens": 20, "output_tokens": 5},
+                "budget": {"used": {"tool_rounds": 4, "tool_calls": 9}},
+            },
+        }
+    )
+    outcome = _parse_outcome(completed, 0, 1.0)
+    assert (outcome.tool_rounds, outcome.tool_calls) == (4, 9)
+
+
 def test_result_schema_hash_reporting_and_paired_comparison(tmp_path: Path) -> None:
     task = ExternalTask("setupbench", "one", "task", str(tmp_path), language="python")
     baseline = result("one", 1, False)

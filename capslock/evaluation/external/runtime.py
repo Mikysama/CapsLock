@@ -287,6 +287,10 @@ def _parse_outcome(output: str, returncode: int, duration: float) -> RolloutOutc
     data = terminal.get("data") or {}
     usage = data.get("usage") or {}
     governance = data.get("governance") or data.get("limits") or {}
+    budget = data.get("budget") or {}
+    used = budget.get("used") if isinstance(budget, dict) else {}
+    if not isinstance(used, dict):
+        used = {}
     status = str(terminal.get("status") or terminal.get("event") or "failed")
     stop_reason = data.get("stop_reason") or terminal.get("stop_reason")
     return RolloutOutcome(
@@ -295,7 +299,15 @@ def _parse_outcome(output: str, returncode: int, duration: float) -> RolloutOutc
         int(usage.get("input_tokens", usage.get("prompt_tokens", 0))),
         int(usage.get("output_tokens", usage.get("completion_tokens", 0))),
         duration,
-        int(governance.get("tool_rounds", data.get("tool_rounds", 0))),
-        int(governance.get("tool_calls", data.get("tool_calls", 0))),
+        int(
+            governance.get(
+                "tool_rounds", data.get("tool_rounds", used.get("tool_rounds", 0))
+            )
+        ),
+        int(
+            governance.get(
+                "tool_calls", data.get("tool_calls", used.get("tool_calls", 0))
+            )
+        ),
         returncode,
     )
