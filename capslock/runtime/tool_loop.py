@@ -780,7 +780,8 @@ class ToolLoop:
         for item in outcomes:
             outcome = item.outcome
             if (
-                outcome.error_code not in {"invalid_tool_arguments", "unsupported_tool"}
+                outcome.error_code
+                not in {"invalid_tool_arguments", "invalid_path", "unsupported_tool"}
                 or outcome.effective_execution_state
                 is not ToolExecutionState.NOT_STARTED
                 or not isinstance(outcome.data, dict)

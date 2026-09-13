@@ -323,6 +323,18 @@ def test_all_builtin_tools_have_output_contracts_and_selection_metadata() -> Non
         validate_json_schema({}, tool.contract.output_schema)
 
 
+def test_filesystem_path_mistakes_are_repairable_tool_outcomes(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        runtime = workspace_tools()
+        context = _context(tmp_path)
+        for path in ("frame_transform_graph.transform(FunctionTransform", "missing.py"):
+            result = await runtime.invoke("read_file", context, {"path": path})
+            assert result.execution.error_code == "invalid_path"
+            assert result.execution.data["retryable"] is True
+
+    asyncio.run(scenario())
+
+
 def test_filtered_tool_selection_keeps_control_fallbacks() -> None:
     runtime = workspace_tools(selection_mode="filtered")
     schemas, candidates = runtime.model_schemas("search source text in files")

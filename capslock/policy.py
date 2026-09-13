@@ -12,6 +12,12 @@ class PolicyError(ValueError):
     """Raised when an operation falls outside the read-only workspace policy."""
 
 
+class InvalidPathError(ValueError):
+    """A model-repairable path argument error."""
+
+    code = "invalid_path"
+
+
 @dataclass(frozen=True)
 class WorkspacePolicy:
     root: Path

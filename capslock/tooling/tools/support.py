@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from typing import Any
+import re
 
 from ..contracts import ToolOutcome, ToolOutcomeStatus
+from ...policy import InvalidPathError
 
 
 def _outcome(
@@ -24,8 +26,24 @@ def _outcome(
 def _path(arguments: dict[str, Any]) -> str:
     path = arguments.get("path", ".")
     if not isinstance(path, str):
-        raise ValueError("path must be a string")
-    return path
+        raise InvalidPathError("path must be a string")
+    candidate = path.strip()
+    if not candidate:
+        raise InvalidPathError("path must be a non-empty workspace-relative path")
+    # Models occasionally emit source fragments (decorators, calls, or
+    # expressions) in the path slot. Reject these before filesystem resolution
+    # so the normal argument-repair loop can ask for a real repository path.
+    if (
+        "\n" in candidate
+        or "\r" in candidate
+        or candidate.startswith("@")
+        or re.match(r"^[A-Za-z_][A-Za-z0-9_.]*\s*\(", candidate)
+        or re.match(r"^(pytest\.mark\.|classmethod$|staticmethod$|override_settings$)", candidate)
+    ):
+        raise InvalidPathError(
+            f"invalid path expression: {candidate!r}; use a repository-relative file path"
+        )
+    return candidate
 
 
-__all__ = []
+__all__ = ["InvalidPathError"]

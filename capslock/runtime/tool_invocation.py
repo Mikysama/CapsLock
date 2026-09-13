@@ -235,7 +235,7 @@ class InvocationPreparer:
                     )
                 outcome = invocation_result.execution
 
-            if outcome.error_code == "invalid_tool_arguments":
+            if outcome.error_code in {"invalid_tool_arguments", "invalid_path"}:
                 detail = dict(outcome.data) if isinstance(outcome.data, dict) else {}
                 detail.update(
                     {
@@ -255,6 +255,7 @@ class InvocationPreparer:
                 and outcome.error_code
                 in {
                     "invalid_tool_arguments",
+                    "invalid_path",
                     "unsupported_tool",
                 }
             ):

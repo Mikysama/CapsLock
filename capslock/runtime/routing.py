@@ -136,8 +136,8 @@ class ModelBudgetGate:
         profile: ModelProfileSettings,
         messages: list[dict[str, object]],
         tools: list[dict[str, object]],
-    ) -> None:
-        await self.router._budget_gate(run_id, profile, messages, tools)
+    ) -> ModelProfileSettings:
+        return await self.router._budget_gate(run_id, profile, messages, tools)
 
 
 class RouteAttemptExecutor:
@@ -272,7 +272,7 @@ class ModelRouter:
                 continue
             decision_id, client = selection
             for attempt in range(1, self.retries + 2):
-                await self.budget_gate.check(
+                effective_profile = await self.budget_gate.check(
                     run_id, effective_profile, request_messages, tools
                 )
                 call_id, started = await self.attempt_executor.start(
@@ -284,10 +284,7 @@ class ModelRouter:
                         "messages": request_messages,
                         "tools": tools,
                     }
-                    if max_output_tokens is not None:
-                        arguments["max_output_tokens"] = (
-                            effective_profile.max_output_tokens
-                        )
+                    arguments["max_output_tokens"] = effective_profile.max_output_tokens
                     if request_format is not None:
                         arguments["response_format"] = request_format
                     response = await client.complete(**arguments)
@@ -359,7 +356,7 @@ class ModelRouter:
                 previous = profile.name
                 continue
             for attempt in range(1, self.retries + 2):
-                await self.budget_gate.check(
+                effective_profile = await self.budget_gate.check(
                     run_id, effective_profile, request_messages, tools
                 )
                 call_id, started = await self.attempt_executor.start(
@@ -372,10 +369,7 @@ class ModelRouter:
                         "messages": request_messages,
                         "tools": tools,
                     }
-                    if max_output_tokens is not None:
-                        arguments["max_output_tokens"] = (
-                            effective_profile.max_output_tokens
-                        )
+                    arguments["max_output_tokens"] = effective_profile.max_output_tokens
                     if request_format is not None:
                         arguments["response_format"] = request_format
                     async for delta in client.stream_complete(**arguments):
@@ -488,24 +482,33 @@ class ModelRouter:
         profile: ModelProfileSettings,
         messages: list[dict[str, object]],
         tools: list[dict[str, object]],
-    ) -> None:
+    ) -> ModelProfileSettings:
         input_used, output_used, run_cost = await self.audit.usage(run_id)
         current_tokens = input_used + output_used
         base_tokens, base_cost = self._run_budget_base.get()
         current_tokens += base_tokens
         run_cost += base_cost
         estimated_input = _estimate_tokens((messages, tools))
+        override = self._run_limits.get()
+        token_limit = _tighter(
+            self.budget.max_run_tokens,
+            override.max_tokens if override else None,
+        )
+        output_limit = profile.max_output_tokens
+        if token_limit:
+            remaining_output = token_limit - current_tokens - estimated_input
+            # A tiny remainder cannot produce a useful model turn and should
+            # remain a hard stop. For normal remainders, cap this request to
+            # the actual budget instead of reserving the profile default.
+            if remaining_output >= min(16, profile.max_output_tokens):
+                output_limit = min(output_limit, remaining_output)
+        profile = replace(profile, max_output_tokens=max(1, output_limit))
         reserved_tokens = estimated_input + profile.max_output_tokens
         reserved_cost = (
             estimated_input * profile.input_cost_per_million
             + profile.max_output_tokens * profile.output_cost_per_million
         ) / 1_000_000
         checks = []
-        override = self._run_limits.get()
-        token_limit = _tighter(
-            self.budget.max_run_tokens,
-            override.max_tokens if override else None,
-        )
         cost_limit = _tighter(
             self.budget.max_run_usd,
             override.max_budget_usd if override else None,
@@ -565,6 +568,7 @@ class ModelRouter:
                     f"{scope} {limit_type} budget would be exceeded by profile {profile.name}",
                     limit_type=limit_type,
                 )
+        return profile
 
     async def _start_call(
         self,

@@ -365,16 +365,37 @@ async def stream_model_response(
 
 
 def _usage(raw: Any) -> ModelUsage:
-    return ModelUsage(
-        int(
-            getattr(raw, "prompt_tokens", None) or getattr(raw, "input_tokens", 0) or 0
-        ),
-        int(
-            getattr(raw, "completion_tokens", None)
-            or getattr(raw, "output_tokens", 0)
-            or 0
-        ),
-    )
+    """Normalize Chat Completions and Responses usage objects.
+
+    Providers vary between object and mapping responses, and Responses may put
+    cache/reasoning details in nested fields. The top-level input/output values
+    are authoritative; nested values are used only when a top-level value is
+    absent so reasoning tokens are not silently dropped.
+    """
+
+    def value(source: Any, *names: str) -> Any:
+        if source is None:
+            return None
+        for name in names:
+            if isinstance(source, dict):
+                item = source.get(name)
+            else:
+                item = getattr(source, name, None)
+            if item is not None:
+                return item
+        return None
+
+    if raw is None:
+        return ModelUsage()
+    input_value = value(raw, "prompt_tokens", "input_tokens")
+    output_value = value(raw, "completion_tokens", "output_tokens")
+    if output_value is None:
+        details = value(raw, "output_tokens_details", "completion_tokens_details")
+        output_value = value(details, "reasoning_tokens", "reasoning") or 0
+    if input_value is None:
+        details = value(raw, "input_tokens_details", "prompt_tokens_details")
+        input_value = value(details, "cached_tokens", "cache_read_input_tokens") or 0
+    return ModelUsage(int(input_value or 0), int(output_value or 0))
 
 
 def _responses_format(response_format: dict[str, object]) -> dict[str, object]:

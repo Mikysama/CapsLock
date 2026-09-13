@@ -8,11 +8,18 @@ from html import escape
 from dataclasses import dataclass
 
 from ..policy import WorkspacePolicy
+from ..policy import PolicyError
 
 
 _MENTION = re.compile(
     r"(?<!\S)@(?P<path>[^\s@:]+(?:/[^\s@:]+)*)(?::(?P<start>\d+)(?:-(?P<end>\d+))?)?"
 )
+_CODE_IDENTIFIERS = {
+    "classmethod",
+    "staticmethod",
+    "property",
+    "override_settings",
+}
 
 
 @dataclass(frozen=True)
@@ -63,9 +70,14 @@ class LocalAttachmentResolver:
             )
         for match in list(_MENTION.finditer(question))[: self.max_attachments]:
             requested = match.group("path")
-            if requested in {"selection", "diagnostics"}:
+            if requested in {"selection", "diagnostics"} or requested in _CODE_IDENTIFIERS:
                 continue
-            path = self.policy.readable_file(requested)
+            try:
+                path = self.policy.readable_file(requested)
+            except PolicyError:
+                # @name is common in source snippets and issue descriptions;
+                # only an existing readable file should become an attachment.
+                continue
             text = path.read_text(encoding="utf-8")
             lines = text.splitlines()
             start = int(match.group("start") or 1)

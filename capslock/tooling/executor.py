@@ -27,6 +27,7 @@ from .contracts import (
     null_reporter,
 )
 from .schema import SchemaValidationError, compile_json_schema, strip_optional_nulls
+from ..policy import InvalidPathError, PolicyError
 
 
 class ToolExecutor:
@@ -198,6 +199,34 @@ class ToolExecutor:
             )
         except SchemaValidationError as exc:
             outcome = ToolOutcome.failure(str(exc), code=exc.code, data=exc.detail())
+        except InvalidPathError as exc:
+            outcome = ToolOutcome.failure(
+                str(exc),
+                code="invalid_path",
+                data={
+                    "path": "$.path",
+                    "expected": "repository-relative file path",
+                    "received_type": "string",
+                    "retryable": True,
+                    "suggested_tools": [name],
+                    "repair_attempt": 0,
+                },
+            )
+        except PolicyError as exc:
+            message = str(exc)
+            retryable = "file does not exist:" in message or "path is a directory:" in message
+            outcome = ToolOutcome.failure(
+                message,
+                code="invalid_path" if retryable else "policy_denied",
+                data={
+                    "path": "$.path",
+                    "expected": "existing repository file" if name in {"read_file", "edit_file"} else "allowed workspace path",
+                    "received_type": "string",
+                    "retryable": retryable,
+                    "suggested_tools": [name] if retryable else [],
+                    "repair_attempt": 0,
+                },
+            )
         except Exception as exc:
             uncertain = execution_started and (
                 policy.external_side_effects
