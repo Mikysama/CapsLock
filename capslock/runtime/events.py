@@ -201,7 +201,7 @@ def _context_payload(data: dict[str, object]) -> dict[str, object]:
 
     percent = context.get("used_percent", 0.0)
     source = str(context.get("source", "estimate"))
-    return {
+    payload: dict[str, object] = {
         "status": "running",
         "context": {
             "used_tokens": integer("used_tokens"),
@@ -215,6 +215,20 @@ def _context_payload(data: dict[str, object]) -> dict[str, object]:
             "source": source if source in {"estimate", "provider"} else "estimate",
         },
     }
+    compaction = data.get("compaction")
+    if isinstance(compaction, dict):
+
+        def compaction_integer(name: str) -> int:
+            value = compaction.get(name, 0)
+            return max(0, int(value)) if isinstance(value, (int, float)) else 0
+
+        payload["compaction"] = {
+            "before_tokens": compaction_integer("before_tokens"),
+            "after_tokens": compaction_integer("after_tokens"),
+            "saved_tokens": compaction_integer("saved_tokens"),
+            "forced": bool(compaction.get("forced", False)),
+        }
+    return payload
 
 
 def _coalesce_durable_events(events: list[AgentEvent]) -> list[AgentEvent]:

@@ -214,13 +214,17 @@ class ToolExecutor:
             )
         except PolicyError as exc:
             message = str(exc)
-            retryable = "file does not exist:" in message or "path is a directory:" in message
+            retryable = (
+                "file does not exist:" in message or "path is a directory:" in message
+            )
             outcome = ToolOutcome.failure(
                 message,
                 code="invalid_path" if retryable else "policy_denied",
                 data={
                     "path": "$.path",
-                    "expected": "existing repository file" if name in {"read_file", "edit_file"} else "allowed workspace path",
+                    "expected": "existing repository file"
+                    if name in {"read_file", "edit_file"}
+                    else "allowed workspace path",
                     "received_type": "string",
                     "retryable": retryable,
                     "suggested_tools": [name] if retryable else [],

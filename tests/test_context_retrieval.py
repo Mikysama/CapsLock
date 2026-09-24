@@ -238,6 +238,71 @@ def test_micro_compaction_never_replaces_content_without_durable_artifact() -> N
     assert messages[0]["content"] == original
 
 
+@pytest.mark.parametrize("context_window", [100_000, 110])
+def test_forced_single_turn_compaction_keeps_durable_micro_progress(
+    tmp_path, context_window
+) -> None:
+    async def scenario():
+        repositories = await WorkspaceRepositories.open(
+            tmp_path / "state.sqlite3", workspace=tmp_path
+        )
+        try:
+            session, prepared = await workspace_run(repositories)
+            artifacts = ToolArtifactStore(tmp_path / "artifacts", repositories.database)
+            manager = ContextBudgetManager(
+                sessions=repositories.sessions,
+                compactions=NoCompactions(),
+                settings=ContextSettings(inline_tool_result_bytes=1000),
+                context_window=context_window,
+                max_output_tokens=100,
+                model_profile="test",
+                model_name="test",
+                tool_schemas=[],
+                artifacts=artifacts,
+            )
+            original = "x" * 30_000
+            messages = [
+                {"role": "user", "content": "fix it"},
+                {
+                    "role": "assistant",
+                    "tool_calls": [{"id": "call", "function": {"name": "read"}}],
+                },
+                {"role": "tool", "tool_call_id": "call", "content": original},
+            ]
+            if context_window == 110:
+                with pytest.raises(ContextBudgetExceeded):
+                    await manager.compact_checkpoint(
+                        messages,
+                        session_id=session.id,
+                        run_id=prepared.run.id,
+                        summarizer=Summarizer(),
+                        force=True,
+                    )
+                return
+            compacted = await manager.compact_checkpoint(
+                messages,
+                session_id=session.id,
+                run_id=prepared.run.id,
+                summarizer=Summarizer(),
+                force=True,
+            )
+            descriptor = json.loads(compacted[-1]["content"])
+            assert descriptor["externalized"] is True
+            assert descriptor["original_bytes"] == 30_000
+            assert manager.estimate(compacted) <= manager.input_budget
+            assert manager.last_micro_compaction_saved_tokens > 0
+            assert messages[-1]["content"] == original
+            row = await repositories.database.fetch_one(
+                "SELECT size_bytes FROM tool_artifacts WHERE id=?",
+                (descriptor["artifact_id"],),
+            )
+            assert row["size_bytes"] == 30_000
+        finally:
+            await repositories.close()
+
+    asyncio.run(scenario())
+
+
 def test_evaluation_policy_protects_latest_complete_tool_round() -> None:
     class Artifacts:
         async def put(self, **values):
@@ -374,9 +439,7 @@ def test_summary_chunks_are_token_budgeted_for_cjk_code_and_json() -> None:
 
     assert len(chunks) > 3
     assert all(
-        manager._summary_request_fits(
-            chunk, focus="保留精确值", output_limit=500
-        )
+        manager._summary_request_fits(chunk, focus="保留精确值", output_limit=500)
         for chunk in chunks
     )
     expanded = [entry for chunk in chunks for entry in chunk]
@@ -625,9 +688,7 @@ def test_evaluation_exact_anchors_use_current_fields_and_stay_bounded() -> None:
         },
     ]
 
-    anchored = manager._with_evaluation_anchors(
-        SUMMARY, entries, output_limit=2_048
-    )
+    anchored = manager._with_evaluation_anchors(SUMMARY, entries, output_limit=2_048)
 
     assert "pending worker.py fix" in anchored["goal"]
     assert any("/workspace/src/worker.py" in item for item in anchored["files"])
@@ -969,8 +1030,7 @@ def test_forced_checkpoint_compacts_below_normal_trigger(tmp_path) -> None:
             assert unchanged is messages
             assert len(model.requests) == 1
             assert any(
-                '"name":"compaction"' in str(item.get("content"))
-                for item in compacted
+                '"name":"compaction"' in str(item.get("content")) for item in compacted
             )
         finally:
             await repositories.close()
@@ -1043,9 +1103,7 @@ def test_finalize_transaction_failure_preserves_active_boundary(tmp_path) -> Non
                 )
             active = await repositories.compactions.active(session.id)
             assert active is not None and active.id == original.id
-            retained = await repositories.compactions.matching(
-                session.id, "candidate"
-            )
+            retained = await repositories.compactions.matching(session.id, "candidate")
             assert retained is not None
             assert retained.result_tokens == 0
         finally:

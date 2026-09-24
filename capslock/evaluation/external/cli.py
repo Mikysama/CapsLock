@@ -543,12 +543,7 @@ def _report(args: argparse.Namespace) -> int:
 
 
 def _results(path: Path) -> list[TaskResult]:
-    values = [TaskResult(**row) for row in read_jsonl(path)]
-    for value in values:
-        value.validate()
-        if value.result_hash != value.with_hash().result_hash:
-            raise ValueError(f"task result hash mismatch: {value.instance_id}")
-    return values
+    return [TaskResult.from_payload(row) for row in read_jsonl(path)]
 
 
 def _catalog_arguments(values: list[str]) -> dict[str, Path]:

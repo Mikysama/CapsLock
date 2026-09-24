@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -150,6 +151,41 @@ def test_read_only_tools_run_concurrently_and_commit_in_call_order(
             ]
         finally:
             await repositories.close()
+
+    asyncio.run(scenario())
+
+
+def test_execution_batches_use_only_concurrency_safe_policy() -> None:
+    async def scenario() -> None:
+        async def resolve(name, context, arguments):
+            del name, context, arguments
+            return SimpleNamespace(
+                concurrency_safe=True,
+                read_only=False,
+                context_mutation=True,
+                destructive=True,
+                external_side_effects=True,
+            )
+
+        tools = SimpleNamespace(resolve=resolve)
+        loop = ToolLoop(
+            chat_model=object(),
+            model="test-model",
+            tools=tools,
+            journal=object(),
+            max_tool_rounds=1,
+            context_factory=lambda run_id: object(),
+        )
+        calls = (
+            ModelToolCall("first", "tool", "{}"),
+            ModelToolCall("second", "tool", "{}"),
+        )
+
+        batches = await loop._execution_batches(calls, "run")
+
+        assert [[call.id for call in batch] for batch in batches] == [
+            ["first", "second"]
+        ]
 
     asyncio.run(scenario())
 

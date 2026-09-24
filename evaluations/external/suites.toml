@@ -7,7 +7,7 @@ core_repetitions = 3
 full_repetitions = 1
 max_tool_rounds = 32
 max_tool_calls = 256
-max_tokens = 100000
+max_tokens = 128000
 max_duration_seconds = 3600
 
 [models.flash]
@@ -17,6 +17,8 @@ base_url = "https://api.deepseek.com"
 credential_env = "DEEPSEEK_API_KEY"
 input_cost_per_million = 0.44
 output_cost_per_million = 1.32
+context_window = 128000
+max_output_tokens = 8192
 
 [models.pro]
 provider = "deepseek"
@@ -26,6 +28,8 @@ credential_env = "DEEPSEEK_API_KEY"
 # Update these values from the provider price sheet before a scored run.
 input_cost_per_million = 0.0
 output_cost_per_million = 0.0
+context_window = 1000000
+max_output_tokens = 384000
 
 [suites.swebench_verified]
 adapter = "swebench_verified"

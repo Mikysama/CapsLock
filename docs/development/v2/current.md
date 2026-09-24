@@ -1,6 +1,6 @@
 # 当前运行内核与安全边界
 
-本文描述 CapsLock 2.7.6.2 的当前开发边界。产品在本机运行，支持直接能力工具、类型化斜杠命令、可审批 Action、AST 分析与沙箱保护的通用 Shell、session 隔离后台进程、受管理的本地/远程 MCP、LSP、IDE 上下文桥、受控仓库指令，以及单层但可持久化恢复的本机 Agent team；不提供远程控制、后台 daemon、跨机器 Agent 或第三方可执行 Hook。
+本文描述 CapsLock 2.7.6.3 的当前开发边界。产品在本机运行，支持直接能力工具、类型化斜杠命令、可审批 Action、AST 分析与沙箱保护的通用 Shell、session 隔离后台进程、受管理的本地/远程 MCP、LSP、IDE 上下文桥、受控仓库指令，以及单层但可持久化恢复的本机 Agent team；不提供远程控制、后台 daemon、跨机器 Agent 或第三方可执行 Hook。
 
 ## 模块边界
 
@@ -17,7 +17,7 @@
 
 只允许只读、并发安全且不改变上下文的调用并发，提交顺序保持模型 tool-call 顺序。额度检查、attempt reservation、历史追加与计数位于同一个异步临界区，完成状态按持久 `attempt_id` 回填；并发批次不能突破 `max_tool_calls`。审批和用户输入可跨进程恢复；副作用执行状态与结果 delivery 状态独立。`ToolOutcome.execution_state` 使用 `not_started | committed | unknown`，旧 `executed` 保持兼容；输出校验失败不得抹除真实执行状态。
 
-只有确定 `not_started` 的 `invalid_tool_arguments` 与 `unsupported_tool` 可进入参数修复轮。修复预算由 `max_argument_repair_attempts` 控制，允许 0、1 或 2；已知工具只暴露原工具，未知名称按名称、别名、描述和参数字段提供最多三个候选。运行时不静默重写路径、命令、URL或业务参数。修复轮正常消耗 token、tool round 和 tool call 预算，预算耗尽后返回 `argument_repair_exhausted` 并解除工具限制。`unknown`、`committed`、权限拒绝和业务执行失败禁止参数修复。
+只有确定 `not_started` 的 `invalid_tool_arguments`、`invalid_path` 与 `unsupported_tool` 可进入参数修复轮。修复预算由 `max_argument_repair_attempts` 控制，允许 0、1 或 2；已知工具只暴露原工具，未知名称按名称、别名、描述和参数字段提供最多三个候选。运行时不静默重写路径、命令、URL或业务参数。修复轮正常消耗 token、tool round 和 tool call 预算，预算耗尽后返回 `argument_repair_exhausted` 并解除工具限制。`unknown`、`committed`、权限拒绝和业务执行失败禁止参数修复。
 
 工具选择默认处于 `shadow`：模型仍看到完整目录，runtime 记录候选集合、实际调用召回和混淆信息；`filtered` 只有在评测门槛满足后才用于真实裁剪，`full` 是回滚开关。携带工具的请求只选择 `strict_tool_calls=true` 的 provider，并发送 required+nullable strict schema；结构化正文优先选择 `json_schema_outputs=true` 的 provider，无兼容候选时将同一权威 Schema 注入系统 Prompt。调用结果继续由本地 Schema 和语义规则复核；严格工具调用能力缺失时仍 fail closed。单项超过 16 KiB 时使用 content-addressed artifact，批次结果受聚合预算限制。旧大型 Tool Result 只有在 Artifact 持久化成功后才能从模型上下文替换；失败必须保留原文并返回 `context_budget_exceeded`。
 
@@ -26,6 +26,10 @@
 原始 transcript、Tool Result 和 Artifact 是事实来源；compaction summary、FTS 和分段缓存均为可重建派生数据。workspace schema 20 使用 session-scoped `episodic_documents` 与 FTS5 保存来源 ID、run、类型和分块序号，并为 compaction 记录 summary-policy digest、结果 token 与质量状态。文本 Artifact 按 8 KiB 分块，二进制或 prompt-injection quarantine 只索引安全元数据。每轮自动召回最多 5 条、合计 4 KiB，并以不可信 `episodic_recall` section 注入；显式 `search_session_history` 最多返回 20 条，深度读取仍通过 `read_tool_artifact`。
 
 摘要按完整 turn/tool round 和 token 预算进行 map-reduce；超大单条消息继续分片，不允许对整体来源执行字符级截断。summary v3 保留来源覆盖、逐项 source map、用户反馈、当前工作、代码符号、验证状态、降级说明与引用式 working set，v1/v2 继续只读兼容。每个 map 分段按 source digest、模型 profile 与 summary-policy digest 缓存；focus 是独立的低优先级策略，不能改变 schema、安全或来源要求。文件及 Skill 正文不会因恢复自动注入。portable export 不包含 episodic 或摘要分段缓存；升级、导入、branch 和 rewind 必须幂等重建索引。
+
+Provider 在输出任何正文、reasoning 或工具调用之前返回明确 context overflow 时，ToolLoop 强制压缩当前 checkpoint 并仅重试一次；已有输出后不自动重试，已完成工具不会重放。压缩摘要先生成并校验最终请求预算，再事务更新结果与 active 边界；失败保留原有效边界。长上下文的动态 recent、精确锚点等策略仍只由评测注入，不更改生产默认值。
+
+模型预算门按剩余累计 token 预算收窄本次 `max_output_tokens`；累计运行预算和单请求 context window 分别约束。
 
 ## 外部执行
 
@@ -70,6 +74,16 @@ worker workspace 支持 `snapshot`、`worktree` 和 `shared_read`。snapshot/wor
 ## 当前数据协议
 
 当前格式为 config 13、workspace schema 20、memory schema 6、portable archive 7、session export 7、JSONL schema 3、IDE Bridge protocol 1 和 plugin protocol 4。workspace 启动支持 backup-first 的 v6-v19→v20 升级；模型传输只使用 OpenAI Responses API，旧配置中的 Provider 会迁移为 `kind="openai_responses"`，不存在 Chat Completions 回退。重建表的迁移必须显式列出源、目标字段，禁止依赖物理列顺序。memory schema v3-v5 与 config v3-v12 自动备份并升级。迁移失败保留原库和备份，不继续部分升级。
+
+## 外部评测兼容与诊断
+
+External Eval task-result v1 的 `peak_context_tokens`、`context_updates`、`context_compactions` 为可选扩展字段，旧记录先以原字段集合验证哈希，再在内存补零并重算规范化哈希。report、compare、resume、grade 共用读取契约；纯读取不改写旧文件。即时和延迟评分均保留上下文统计。run manifest 的代码、wheel、任务等身份校验不因结果兼容而放宽。
+
+SWE-bench adapter 负责临时 prediction JSONL 和 `-repN` run ID，退出时清理临时文件；旧桥接脚本直接转发 JSONL，避免重复包装，原始 patch 输入仍受支持。
+
+Shell 网络参数继续只有 `[]`（断网）与 `["*"]`（不限目标）两种可执行语义。`CAPSLOCK_EVAL_NETWORK_POLICY=task-allowlist` 保留映射为 `["*"]` 的行为，不提供域名 allowlist；普通权限判定仍执行。该环境变量会影响继承它的 Shell 运行，应只在隔离评测进程设置。Linux DNS 符号链接目标的运行目录只读挂载到沙箱。
+
+成功减少 token 的 active-run 压缩通过 `context_updated.data.compaction` 输出前后 token、节省量与 forced 标记；这些事件用于运行诊断，不是耐久审计日志。峰值 context 是已观测事件的最大值，不等于累计 provider 输入用量。
 
 ## 发布门禁
 

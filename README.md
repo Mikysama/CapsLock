@@ -2,7 +2,7 @@
 
 CapsLock 是一个本机工作区 Agent，用于读取和修改代码、检索证据、运行受沙箱保护的 Shell、查询代码语义，以及按审批策略访问 Web、MCP 和本地插件。Tool Runtime v2 将工具契约、参数级策略、可恢复暂停、调度、富结果与审计统一到异步执行链。
 
-当前源码版本标识为 `2.7.6.2`。本版本将模型传输统一为 OpenAI Responses API，以 Provider strict JSON Schema 约束摘要、Memory、Shell 分类和子 Agent 输出，并保留同一 Schema 驱动的 Prompt 降级与本地校验；同时加入外部基准评测、数据库保留/显式压缩，并将可恢复状态收敛到 workspace schema 20、memory schema 6。当前协议还包括 portable archive 7、session export 7 和 config 13。稳定版本边界见 [2.7.6.2 发布说明](docs/releases/v2.7.6.2.md)，开发边界见 [current](docs/development/v2/current.md)。
+当前源码版本标识为 `2.7.6.3`。本版本改进长上下文压缩和超限恢复、剩余 token 预算分配与路径参数修复，并修复 SWE-bench prediction 转换、评分轮次隔离和旧评测结果兼容读取；新增峰值上下文与压缩次数统计。workspace schema 20、memory schema 6、portable archive 7、session export 7 和 config 13 保持不变。稳定版本边界见 [2.7.6.3 发布说明](docs/releases/v2.7.6.3.md)，开发边界见 [current](docs/development/v2/current.md)。
 
 正式支持矩阵：Linux/macOS，Python 3.12。发布 CI 会在两个操作系统组合中执行测试、构建、依赖审计和安装冒烟。
 

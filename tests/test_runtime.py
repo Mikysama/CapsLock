@@ -1184,7 +1184,11 @@ def test_async_openai_maps_incomplete_response_metadata() -> None:
     asyncio.run(scenario())
 
 
-def test_tool_loop_recovers_once_from_pre_output_context_overflow(tmp_path: Path) -> None:
+@pytest.mark.parametrize("cancel_recovery", [False, True])
+def test_tool_loop_recovers_once_from_pre_output_context_overflow(
+    tmp_path: Path,
+    cancel_recovery: bool,
+) -> None:
     async def scenario() -> None:
         repositories = await WorkspaceRepositories.open(
             tmp_path / "overflow.sqlite3", workspace=tmp_path
@@ -1219,7 +1223,20 @@ def test_tool_loop_recovers_once_from_pre_output_context_overflow(tmp_path: Path
 
             async def compact(messages, *, force=False):
                 compact_calls.append(force)
+                if force and cancel_recovery:
+                    raise asyncio.CancelledError()
                 return [{"role": "user", "content": "compacted"}]
+
+            if cancel_recovery:
+                with pytest.raises(asyncio.CancelledError):
+                    await loop.run(
+                        [{"role": "user", "content": "large"}],
+                        prepared.run.id,
+                        emit=lambda kind, data: asyncio.sleep(0),
+                        compact_context=compact,
+                    )
+                assert len(model.requests) == 1
+                return
 
             result = await loop.run(
                 [{"role": "user", "content": "large"}],
@@ -1233,7 +1250,9 @@ def test_tool_loop_recovers_once_from_pre_output_context_overflow(tmp_path: Path
                 "role": "user",
                 "content": "compacted",
             }
-            assert [kind for kind, _ in events if kind.startswith("context_overflow")] == [
+            assert [
+                kind for kind, _ in events if kind.startswith("context_overflow")
+            ] == [
                 "context_overflow_detected",
                 "context_overflow_recovery_started",
                 "context_overflow_recovery_succeeded",
@@ -1288,7 +1307,9 @@ def test_tool_loop_stops_after_second_context_overflow(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
-def test_tool_loop_does_not_recover_overflow_after_visible_delta(tmp_path: Path) -> None:
+def test_tool_loop_does_not_recover_overflow_after_visible_delta(
+    tmp_path: Path,
+) -> None:
     async def scenario() -> None:
         repositories = await WorkspaceRepositories.open(
             tmp_path / "partial-overflow.sqlite3", workspace=tmp_path

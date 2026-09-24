@@ -63,7 +63,7 @@ DEEPSEEK_API_KEY=... python scripts/evaluate_external.py doctor \
 
 sudo install -d -o "$USER" /opt/capslock
 CAPSLOCK_EVAL_ISOLATED=1 \
-CAPSLOCK_EVAL_NETWORK_POLICY=provider-only \
+CAPSLOCK_EVAL_NETWORK_POLICY=task-allowlist \
 DEEPSEEK_API_KEY=... python scripts/evaluate_external.py run \
   --cache /srv/capslock-eval \
   --suite swebench_verified \
@@ -98,9 +98,11 @@ workspace. Grader infrastructure failures retain the workspace so `grade` can re
   surrounding Modal/Harbor worker using pinned images. This repository's Python layer
   validates the declared resource class and consumes its isolated workspace; it does
   not itself create cloud resources.
-- The model client may reach only the configured provider host. Task shells are offline
-  unless a task manifest carries a reviewed artifact-host allowlist enforced by the
-  surrounding runner.
+- With `provider-only`, only the model client may reach the configured provider host;
+  task shells are offline. With `task-allowlist`, the current Linux/macOS sandbox
+  uses its supported unrestricted-network mode for task shells, so dependency
+  installation and test downloads can reach the public network. Use this only on a
+  disposable worker and keep the run isolated.
 - `CAPSLOCK_HOME`, project state, and workspaces are fresh for every task. Memory, MCP,
   plugins, project/user skills, Web, worktrees, and delegation are disabled.
 - SetupBench and Terminal-Bench preparation must run the injected-runtime no-op baseline.
@@ -111,3 +113,30 @@ scored environment until maintainers update them from the current provider price
 The environment flags are assertions checked by the runner; the disposable worker and
 egress proxy are responsible for enforcing the actual filesystem and network boundary.
 Set `CAPSLOCK_EVAL_RUNTIME_ROOT` only when `/opt/capslock` is unavailable.
+
+The flash track is pinned to a `128000` token context window and an `8192` token
+single-response output limit. The external `max_tokens` setting is the cumulative
+rollout budget, not a provider context-window setting. Reports therefore expose both
+cumulative provider input usage (`input_tokens`) and peak per-request context usage
+(`peak_context_tokens`), plus the number of successful context compactions.
+
+## Result compatibility and SWE-bench bridging
+
+Task-result schema v1 keeps context diagnostics optional for older artifacts. All
+result readers verify the hash over the exact stored field set before adding
+default zeros and computing a normalized in-memory hash. Read-only report and
+comparison commands do not rewrite source artifacts. Resume still requires the
+same run identity (including code and wheel hashes); compatibility does not allow
+resuming a run with a different runtime. New and deferred results retain all three
+context metrics, including through subsequent grading.
+
+The SWE-bench adapter writes a temporary prediction JSONL and scopes `--run-id`
+with an idempotent `-repN` suffix. If no run ID is supplied, the evaluation run ID
+is used. It removes its sidecar on success, failure or timeout. The legacy
+`scripts/swebench_patch_bridge.py` wrapper passes existing JSONL through unchanged;
+it only converts raw patches, so old installations can safely keep the wrapper.
+
+`CAPSLOCK_EVAL_NETWORK_POLICY=task-allowlist` deliberately retains `network=["*"]`.
+This is unrestricted networking, not a hostname filter. Set it only for isolated
+evaluation processes; inherited values also affect ordinary Shell normalization.
+Permission checks still apply after normalization.

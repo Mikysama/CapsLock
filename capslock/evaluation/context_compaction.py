@@ -49,9 +49,7 @@ def policy_for_candidate(candidate: PolicyCandidate) -> ContextEvaluationPolicy:
     values = candidate.values
     protected = bool(values.get("context.protected_tools", 0))
     return ContextEvaluationPolicy(
-        minimum_headroom_tokens=int(
-            values.get("context.minimum_headroom_tokens", 0)
-        ),
+        minimum_headroom_tokens=int(values.get("context.minimum_headroom_tokens", 0)),
         dynamic_recent=bool(values.get("context.dynamic_recent", 0)),
         protect_latest_tool_round=protected,
         minimum_tool_reclaim_tokens=4_096 if protected else 0,

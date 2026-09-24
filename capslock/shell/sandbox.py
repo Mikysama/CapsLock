@@ -89,6 +89,16 @@ def sandboxed_command(
             for system_path in ("/usr", "/etc"):
                 if Path(system_path).exists():
                     argv.extend(("--ro-bind", system_path, system_path))
+            # /etc/resolv.conf is commonly a symlink into /run on systemd hosts.
+            # Mount that target explicitly; otherwise --share-net still has no DNS
+            # inside the namespace and package installation fails mysteriously.
+            resolver = Path("/etc/resolv.conf").resolve()
+            if resolver.parent != Path("/etc") and resolver.is_file():
+                current = Path(resolver.anchor)
+                for part in resolver.parent.parts[1:]:
+                    current /= part
+                    argv.extend(("--dir", str(current)))
+                argv.extend(("--ro-bind", str(resolver.parent), str(resolver.parent)))
             for link_path in ("/bin", "/sbin", "/lib", "/lib64"):
                 target = (
                     Path(link_path).readlink() if Path(link_path).is_symlink() else None

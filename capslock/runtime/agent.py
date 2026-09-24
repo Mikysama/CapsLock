@@ -645,13 +645,32 @@ class AgentSession:
 
             async def compact_context(active_messages, *, force: bool = False):
                 self.context_budget.tool_schemas = active_tools.schemas
-                return await self.context_budget.compact_checkpoint(
+                before_tokens = self.context_budget.estimate(active_messages)
+                compacted = await self.context_budget.compact_checkpoint(
                     active_messages,
                     session_id=self.session_id,
                     run_id=run_id,
                     summarizer=model_session.for_role(ModelRole.FAST),
                     force=force,
                 )
+                after_tokens = self.context_budget.estimate(compacted)
+                if after_tokens < before_tokens:
+                    await emit(
+                        AgentEventKind.CONTEXT_UPDATED,
+                        {
+                            "status": "running",
+                            "context": self._context_event_data(
+                                after_tokens, source="estimate"
+                            ),
+                            "compaction": {
+                                "before_tokens": before_tokens,
+                                "after_tokens": after_tokens,
+                                "saved_tokens": before_tokens - after_tokens,
+                                "forced": force,
+                            },
+                        },
+                    )
+                return compacted
 
             loop_started = time.perf_counter()
             loop_status = "ok"

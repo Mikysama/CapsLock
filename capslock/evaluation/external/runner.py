@@ -138,11 +138,7 @@ class ExternalBatchRunner:
         task_root = self.run_root / "tasks" / task.instance_id / str(ordinal)
         result_path = task_root / "result.json"
         if result_path.exists():
-            result = TaskResult(**read_json(result_path))
-            result.validate()
-            expected = result.with_hash().result_hash
-            if result.result_hash != expected:
-                raise RuntimeError(f"result hash mismatch: {result_path}")
+            result = TaskResult.from_payload(read_json(result_path))
             if not result.infrastructure_error or (
                 result.grader_status == GraderStatus.INFRASTRUCTURE_ERROR
             ):
@@ -208,6 +204,9 @@ class ExternalBatchRunner:
                     "",
                     outcome.infrastructure_error,
                     stderr_path=str(stderr.relative_to(self.run_root)),
+                    peak_context_tokens=outcome.peak_context_tokens,
+                    context_updates=outcome.context_updates,
+                    context_compactions=outcome.context_compactions,
                 ).with_hash()
                 write_json(result_path, result.payload())
                 if not pending_grade:
@@ -260,6 +259,9 @@ class ExternalBatchRunner:
                 str(grade.log_path.relative_to(self.run_root)),
                 grade.infrastructure_error or outcome.infrastructure_error,
                 stderr_path=str(stderr.relative_to(self.run_root)),
+                peak_context_tokens=outcome.peak_context_tokens,
+                context_updates=outcome.context_updates,
+                context_compactions=outcome.context_compactions,
             ).with_hash()
         except Exception as exc:  # noqa: BLE001 - suite adapters are an error boundary
             stderr.parent.mkdir(parents=True, exist_ok=True)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 from pathlib import PurePosixPath
@@ -119,6 +120,14 @@ class ShellPermissionSpec(DefaultPermissionSpec):
             )
         normalized["sandbox"] = normalized.get("sandbox", "default")
         normalized["network"] = sorted(set(normalized.get("network", [])))
+        if (
+            getattr(tool, "name", None) == "shell"
+            and os.environ.get("CAPSLOCK_EVAL_NETWORK_POLICY") == "task-allowlist"
+        ):
+            # The Linux/macOS shell backends support only all-or-nothing networking.
+            # This opt-in external-eval mode deliberately gives task commands the
+            # unrestricted side of that boundary so dependency installation works.
+            normalized["network"] = ["*"]
         return normalized
 
     def hard_check(self, tool, arguments, policy, context):

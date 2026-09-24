@@ -38,7 +38,10 @@ def _path(arguments: dict[str, Any]) -> str:
         or "\r" in candidate
         or candidate.startswith("@")
         or re.match(r"^[A-Za-z_][A-Za-z0-9_.]*\s*\(", candidate)
-        or re.match(r"^(pytest\.mark\.|classmethod$|staticmethod$|override_settings$)", candidate)
+        or re.match(
+            r"^(pytest\.mark\.|classmethod$|staticmethod$|override_settings$)",
+            candidate,
+        )
     ):
         raise InvalidPathError(
             f"invalid path expression: {candidate!r}; use a repository-relative file path"

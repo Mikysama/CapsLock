@@ -461,9 +461,7 @@ class ToolLoop:
         governor: RunGovernor | None = None,
         authorize_limit: Callable[[BudgetSnapshot], Awaitable[bool]] | None = None,
         chat_model: ChatModel | None = None,
-        compact_context: Callable[
-            ..., Awaitable[list[dict[str, object]]]
-        ]
+        compact_context: Callable[..., Awaitable[list[dict[str, object]]]]
         | None = None,
         usage_observer: Callable[
             [list[dict[str, object]], list[dict[str, object]], int], Awaitable[None]
@@ -585,7 +583,7 @@ class ToolLoop:
                 runtime_context.event("context_overflow_recovery_started")
                 try:
                     messages[:] = await compact_context(messages, force=True)
-                except BaseException as recovery_error:
+                except Exception as recovery_error:
                     runtime_context.event(
                         "context_overflow_recovery_failed",
                         reason=str(recovery_error) or type(recovery_error).__name__,
@@ -910,13 +908,7 @@ class ToolLoop:
                 policy = await self.tools.resolve(
                     call.name, self.context_factory(run_id), arguments
                 )
-                safe = bool(
-                    policy.read_only
-                    and policy.concurrency_safe
-                    and not policy.context_mutation
-                    and not policy.destructive
-                    and not policy.external_side_effects
-                )
+                safe = policy.concurrency_safe
             except (SchemaValidationError, ValueError, json.JSONDecodeError):
                 safe = False
             if safe:

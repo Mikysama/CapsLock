@@ -26,7 +26,13 @@ from capslock.domain import (
 )
 from capslock.memory import MemoryService
 from capslock.memory.embeddings import ExternalEmbeddingConfig
-from capslock.runtime.model import ModelDelta, ModelMessage, ModelResponse, ModelUsage, _usage
+from capslock.runtime.model import (
+    ModelDelta,
+    ModelMessage,
+    ModelResponse,
+    ModelUsage,
+    _usage,
+)
 from capslock.runtime.model import ModelRunContext
 from capslock.runtime.routing import ModelRouter, _classify_error, _retry_delay
 from capslock.storage.memory_repositories import MemoryRepositories
@@ -433,7 +439,9 @@ def test_router_uses_request_output_cap_for_provider_and_budget(tmp_path: Path) 
     asyncio.run(scenario())
 
 
-def test_router_dynamically_reserves_only_remaining_token_budget(tmp_path: Path) -> None:
+def test_router_dynamically_reserves_only_remaining_token_budget(
+    tmp_path: Path,
+) -> None:
     async def scenario() -> None:
         repositories = await WorkspaceRepositories.open(
             tmp_path / "dynamic-budget.sqlite3", workspace=tmp_path

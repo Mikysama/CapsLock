@@ -9,9 +9,7 @@ from typing import Any
 from .models import EvaluationTask
 
 
-def load_long_context_tasks(
-    path: Path, *, split: str
-) -> tuple[EvaluationTask, ...]:
+def load_long_context_tasks(path: Path, *, split: str) -> tuple[EvaluationTask, ...]:
     document = json.loads(path.read_text(encoding="utf-8"))
     sessions = document.get("sessions") if isinstance(document, dict) else None
     if not isinstance(sessions, list) or len(sessions) < 4:
@@ -43,11 +41,16 @@ def load_long_context_tasks(
                 prompt = str(case.get("prompt", "")).strip()
                 expected = str(case.get("expected", "")).strip()
                 position = str(case.get("position", "middle"))
-                if not prompt or not expected or position not in {
-                    "front",
-                    "middle",
-                    "tail",
-                }:
+                if (
+                    not prompt
+                    or not expected
+                    or position
+                    not in {
+                        "front",
+                        "middle",
+                        "tail",
+                    }
+                ):
                     raise ValueError(
                         f"invalid long-context case {session_id}:{field}:{index}"
                     )
@@ -64,9 +67,7 @@ def load_long_context_tasks(
                             "expected_answer": expected,
                             "pressure": float(case.get("pressure", 0.9)),
                             "required_turns": int(case.get("required_turns", 6)),
-                            "required_tokens": int(
-                                case.get("required_tokens", 32_000)
-                            ),
+                            "required_tokens": int(case.get("required_tokens", 32_000)),
                             "compaction_failures": 0,
                             "in_budget": True,
                             "capacity_case": False,

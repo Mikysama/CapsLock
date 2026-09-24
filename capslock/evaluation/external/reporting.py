@@ -26,6 +26,8 @@ def build_report(
     costs = [item.cost_usd for item in results]
     durations = [item.duration_seconds for item in results]
     tool_calls = [item.tool_calls for item in results]
+    peak_context_tokens = [item.peak_context_tokens for item in results]
+    context_compactions = [item.context_compactions for item in results]
     report: dict[str, Any] = {
         "schema_version": 1,
         "suite": results[0].suite if results else "unknown",
@@ -50,6 +52,9 @@ def build_report(
         "p95_cost_usd": percentile(costs, 0.95),
         "median_tool_calls": median(tool_calls) if results else 0.0,
         "p95_tool_calls": percentile(tool_calls, 0.95),
+        "median_peak_context_tokens": median(peak_context_tokens) if results else 0.0,
+        "p95_peak_context_tokens": percentile(peak_context_tokens, 0.95),
+        "total_context_compactions": sum(context_compactions),
         "failure_categories": dict(
             sorted(
                 Counter(

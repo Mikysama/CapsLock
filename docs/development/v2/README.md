@@ -1,6 +1,6 @@
 # CapsLock v2 开发者文档
 
-本目录记录 CapsLock v2 的架构、开发过程、安全边界与发布验证。当前稳定版本为 `2.7.6.2`；协议为 Tool Runtime v2、permissions v2、config 13、workspace schema 20、memory schema 6 和 plugin protocol 4。
+本目录记录 CapsLock v2 的架构、开发过程、安全边界与发布验证。当前稳定版本为 `2.7.6.3`；协议为 Tool Runtime v2、permissions v2、config 13、workspace schema 20、memory schema 6 和 plugin protocol 4。
 
 ## 文档入口
 
@@ -32,6 +32,9 @@
 - [v2.7.6 发布说明](../../releases/v2.7.6.md)：统一上下文压缩管线、summary v3、引用式工作集、降级与防抖。
 - [v2.7.6.1 发布说明](../../releases/v2.7.6.1.md)：集中行为默认值、版本化策略评测、Memory RecallPolicy 与参数修复预算。
 - [v2.7.6.2 发布说明](../../releases/v2.7.6.2.md)：Responses-only Provider、统一结构化输出、外部基准评测与数据库维护。
+
+- [v2.7.6.3 发布说明](../../releases/v2.7.6.3.md)：长上下文恢复、预算与路径修复、评测格式兼容和评分隔离。
+- [v2.7.6.3 开发与验证](v2.7.6.3.md)：结果哈希兼容规则、grader 协作、上下文指标和发布检查。
 
 ## 当前稳定边界
 

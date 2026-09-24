@@ -333,9 +333,7 @@ def analyse_candidates(
         base_input_cost = float(base["tokens"]["input_per_task"])
         chosen_input_cost = float(chosen["tokens"]["input_per_task"])
         cost_gain = (
-            0.0
-            if base_input_cost == 0
-            else 1 - chosen_input_cost / base_input_cost
+            0.0 if base_input_cost == 0 else 1 - chosen_input_cost / base_input_cost
         )
         latency_gain = (
             0.0
@@ -344,16 +342,12 @@ def analyse_candidates(
         )
         no_resource_regression = (
             chosen_input_cost <= base_input_cost
-            and chosen["latency_seconds"]["p95"]
-            <= base["latency_seconds"]["p95"]
+            and chosen["latency_seconds"]["p95"] <= base["latency_seconds"]["p95"]
         )
         should_update = (
             chosen["fingerprint"] != baseline.fingerprint
             and no_resource_regression
-            and (
-                _dominates(chosen, base)
-                or success_gain >= 0.01
-            )
+            and (_dominates(chosen, base) or success_gain >= 0.01)
         )
         recommendation = {
             "candidate": chosen["name"],

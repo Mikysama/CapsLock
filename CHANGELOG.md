@@ -4,6 +4,25 @@
 
 ## [Unreleased]
 
+## [2.7.6.3] - 2026-09-24
+
+### Added
+
+- 新增长上下文压缩候选与位置敏感评测；外部评测记录峰值 context、context 更新次数和减量压缩次数。
+
+### Fixed
+
+- 上下文超限在产生输出前执行一次强制压缩恢复；压缩结果完成验证后才更新 active 边界，保留完整工具轮与原有失败恢复边界，压缩取消不再误报模型失败。
+- 按剩余累计 token 预算收窄模型输出，改善 usage 归一化、装饰器附件识别与路径参数修复。
+- SWE-bench adapter 统一临时 prediction JSONL 和 repetition run ID；旧脚本兼容 JSONL 直通，避免二次包装，评分结束清理 sidecar。
+- 旧外部评测 v1 结果先验证原字段哈希再归一化，兼容缺省 context 字段并保持篡改检测；即时和延迟评分均保留诊断指标。
+- 修复预算终止时的工具计数、保留已跟踪源码并过滤未跟踪缓存的 patch 收集和 Linux 沙箱 DNS 解析目录挂载。
+
+### Compatibility
+
+- Shell `network=["*"]` 继续表示不限目标；评测 `task-allowlist` 映射保持不变，不表示主机白名单。
+- config 13、workspace schema 20、memory schema 6 及其余稳定协议不变；task-result v1 的 context 指标为可选扩展，不调整生产行为默认值。
+
 ## [2.7.6.2] - 2026-09-08
 
 ### Added

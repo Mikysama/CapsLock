@@ -18,6 +18,21 @@ if TYPE_CHECKING:
     from ..runtime import CapsLockRuntime, RolloutOutcome
 
 
+_RUNTIME_GENERATED_DIRS = (
+    ".venv",
+    "venv",
+    ".tox",
+    ".pytest_cache",
+    ".mypy_cache",
+    "__pycache__",
+    ".eggs",
+)
+_RUNTIME_GENERATED_DIR_SET = frozenset(_RUNTIME_GENERATED_DIRS)
+# Preserve tracked source even when its directory resembles generated output.
+# Untracked cache/virtualenv files are filtered separately; build/dist use Git ignore.
+_PATCH_EXCLUDES = (":(exclude).capslock/**",)
+
+
 @dataclass(frozen=True)
 class AdapterContext:
     suite: SuiteDefinition
@@ -152,6 +167,9 @@ class OfficialAdapter:
                     "grader environment keys must use CAPSLOCK_EVAL_ prefix"
                 )
             environment[str(key)] = self._expand(str(value), task, artifact, context)
+        command, temporary_files = self._prepare_grade_command(
+            command, task, artifact, context
+        )
         log_path = artifact.path.parent / "grader.log"
         try:
             completed = subprocess.run(
@@ -170,6 +188,9 @@ class OfficialAdapter:
         except (OSError, subprocess.TimeoutExpired) as exc:
             log_path.write_text(f"{type(exc).__name__}: {exc}\n", encoding="utf-8")
             return GradeOutcome(False, f"{type(exc).__name__}: {exc}", log_path, {})
+        finally:
+            for path in temporary_files:
+                path.unlink(missing_ok=True)
         passed = self.normalise_grade(task, completed.returncode, log_path)
         return GradeOutcome(
             passed,
@@ -205,6 +226,16 @@ class OfficialAdapter:
                 f"grader command is not an accepted {self.id} harness command; expected {allowed}"
             )
 
+    def _prepare_grade_command(
+        self,
+        command: list[str],
+        task: ExternalTask,
+        artifact: Artifact,
+        context: AdapterContext,
+    ) -> tuple[list[str], tuple[Path, ...]]:
+        del task, artifact, context
+        return command, ()
+
     @staticmethod
     def _expand(
         value: str, task: ExternalTask, artifact: Artifact, context: AdapterContext
@@ -236,6 +267,7 @@ class OfficialAdapter:
         untracked = [
             value.decode(errors="surrogateescape") for value in untracked if value
         ]
+        untracked = [value for value in untracked if not _is_runtime_generated(value)]
         if untracked:
             subprocess.run(
                 ["git", "add", "--intent-to-add", "--", *untracked],
@@ -251,7 +283,7 @@ class OfficialAdapter:
                 "--binary",
                 "--",
                 ".",
-                ":(exclude).capslock/**",
+                *_PATCH_EXCLUDES,
             ],
             cwd=workspace,
             capture_output=True,
@@ -269,7 +301,7 @@ class OfficialAdapter:
                 "--numstat",
                 "--",
                 ".",
-                ":(exclude).capslock/**",
+                *_PATCH_EXCLUDES,
             ],
             cwd=workspace,
             capture_output=True,
@@ -291,6 +323,10 @@ class OfficialAdapter:
             changed_files,
             changed_lines,
         )
+
+
+def _is_runtime_generated(path: str) -> bool:
+    return any(part in _RUNTIME_GENERATED_DIR_SET for part in Path(path).parts)
 
 
 def _workspace_tree(workspace: Path) -> list[dict[str, object]]:

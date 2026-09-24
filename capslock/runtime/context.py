@@ -230,9 +230,7 @@ class ContextBudgetManager:
         used = 0
         recent_token_limit = self.settings.preserve_recent_tokens
         if self.evaluation_policy is not None and self.evaluation_policy.dynamic_recent:
-            recent_token_limit = min(
-                32_768, max(8_192, int(self.input_budget * 0.10))
-            )
+            recent_token_limit = min(32_768, max(8_192, int(self.input_budget * 0.10)))
         for unit in reversed(units):
             amount = estimate_tokens(unit)
             if selected and (
@@ -840,15 +838,13 @@ class ContextBudgetManager:
                 index
                 for index in oversized
                 if index < recent_start
-                and str(messages[index].get("tool_call_id", ""))
-                not in protected_ids
+                and str(messages[index].get("tool_call_id", "")) not in protected_ids
             ]
             preferred.extend(
                 index
                 for index in oversized
                 if index >= recent_start
-                and str(messages[index].get("tool_call_id", ""))
-                not in protected_ids
+                and str(messages[index].get("tool_call_id", "")) not in protected_ids
             )
             selected = set()
             reclaimed = 0
@@ -992,6 +988,9 @@ class ContextBudgetManager:
             older.extend(units.pop(0))
         recent = [item for unit in units for item in unit]
         if not older:
+            if _saved > 0 and estimate <= self.input_budget:
+                self.observe_compaction_progress(before_summary_tokens, estimate)
+                return messages
             self.failures += 1
             raise ContextBudgetExceeded("active run context exceeds the model budget")
         source = [
@@ -1117,9 +1116,7 @@ class ContextBudgetManager:
             self.max_output_tokens,
             max_summary_tokens or self.settings.summary_max_tokens,
         )
-        chunks = self._summary_chunks(
-            entries, focus=focus, output_limit=output_limit
-        )
+        chunks = self._summary_chunks(entries, focus=focus, output_limit=output_limit)
         if len(chunks) == 1:
             summary, input_tokens, output_tokens = await self._summarize_segment(
                 chunks[0],
@@ -1157,11 +1154,10 @@ class ContextBudgetManager:
             {"id": f"map:{index}", "role": "summary", "content": summary}
             for index, summary in enumerate(summaries)
         ]
-        while len(
-            self._summary_chunks(
-                reduction, focus=focus, output_limit=output_limit
-            )
-        ) > 1:
+        while (
+            len(self._summary_chunks(reduction, focus=focus, output_limit=output_limit))
+            > 1
+        ):
             next_level: list[dict[str, object]] = []
             reduction_chunks = self._summary_chunks(
                 reduction, focus=focus, output_limit=output_limit
@@ -1206,9 +1202,7 @@ class ContextBudgetManager:
             output_limit=output_limit,
         )
         final = _with_critical_facts(final, entries)
-        final = self._with_evaluation_anchors(
-            final, entries, output_limit=output_limit
-        )
+        final = self._with_evaluation_anchors(final, entries, output_limit=output_limit)
         final = _with_source_coverage(final, entries)
         final["working_set"] = working_set or []
         final = _fit_summary_to_limit(final, output_limit)
@@ -1244,9 +1238,7 @@ class ContextBudgetManager:
                 expanded.append(entry)
                 continue
             expanded.extend(
-                self._split_summary_entry(
-                    entry, focus=focus, output_limit=output_limit
-                )
+                self._split_summary_entry(entry, focus=focus, output_limit=output_limit)
             )
         chunks: list[list[dict[str, object]]] = []
         current: list[dict[str, object]] = []
@@ -1373,10 +1365,7 @@ class ContextBudgetManager:
                 entries, summarizer, focus=focus, output_limit=output_limit
             )
         except ModelRoutingError as exc:
-            if (
-                exc.code is not ModelErrorCode.CONTEXT_OVERFLOW
-                or overflow_depth >= 4
-            ):
+            if exc.code is not ModelErrorCode.CONTEXT_OVERFLOW or overflow_depth >= 4:
                 raise
             halves = _bisect_summary_segment(entries)
             if halves is None:
@@ -1384,15 +1373,13 @@ class ContextBudgetManager:
             mapped: list[dict[str, object]] = []
             input_tokens = output_tokens = 0
             for index, half in enumerate(halves):
-                partial, current_input, current_output = (
-                    await self._summarize_segment(
-                        half,
-                        summarizer,
-                        focus=focus,
-                        policy_digest=policy_digest,
-                        output_limit=output_limit,
-                        overflow_depth=overflow_depth + 1,
-                    )
+                partial, current_input, current_output = await self._summarize_segment(
+                    half,
+                    summarizer,
+                    focus=focus,
+                    policy_digest=policy_digest,
+                    output_limit=output_limit,
+                    overflow_depth=overflow_depth + 1,
                 )
                 input_tokens += current_input
                 output_tokens += current_output
@@ -1632,9 +1619,7 @@ def _with_source_coverage(
 ) -> dict[str, object]:
     normalized = _validate_summary(summary)
     ordered_allowed = [
-        str(item["id"])
-        for item in entries
-        if item.get("id") is not None
+        str(item["id"]) for item in entries if item.get("id") is not None
     ]
     allowed = set(ordered_allowed)
     covered = [ref for ref in normalized["source_refs"] if ref in allowed]
@@ -1972,9 +1957,7 @@ def _with_exact_anchors(
         "改为",
         "以此为准",
     )
-    path_pattern = re.compile(
-        r"(?<![\w])(?:[A-Za-z]:\\\\|\.\.?/|/)[^\s\"'`<>]+"
-    )
+    path_pattern = re.compile(r"(?<![\w])(?:[A-Za-z]:\\\\|\.\.?/|/)[^\s\"'`<>]+")
     sha_pattern = re.compile(r"\b[0-9a-fA-F]{7,64}\b")
     symbol_pattern = re.compile(
         r"\b[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*|"
@@ -2002,9 +1985,13 @@ def _with_exact_anchors(
             line_folded = stripped.casefold()
             if command_pattern.match(stripped):
                 apply("current_work", stripped)
-            if any(marker in line_folded for marker in ("error", "failed", "exception")):
+            if any(
+                marker in line_folded for marker in ("error", "failed", "exception")
+            ):
                 apply("failures", stripped)
-            if any(marker in line_folded for marker in ("passed", "verified", "验证通过")):
+            if any(
+                marker in line_folded for marker in ("passed", "verified", "验证通过")
+            ):
                 apply("verification", stripped)
         if anchor_tokens >= anchor_limit:
             break

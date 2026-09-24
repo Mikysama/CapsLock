@@ -124,6 +124,8 @@ class ModelTrack:
     credential_env: str
     input_cost_per_million: float = 0.0
     output_cost_per_million: float = 0.0
+    context_window: int = 128_000
+    max_output_tokens: int = 8_192
 
     def __post_init__(self) -> None:
         if not all((self.name, self.provider, self.model, self.base_url)):
@@ -132,6 +134,10 @@ class ModelTrack:
             raise ValueError("credential_env must be an uppercase environment name")
         if min(self.input_cost_per_million, self.output_cost_per_million) < 0:
             raise ValueError("model pricing cannot be negative")
+        if self.context_window <= 0 or self.max_output_tokens <= 0:
+            raise ValueError("model token limits must be positive")
+        if self.max_output_tokens > self.context_window:
+            raise ValueError("model output limit cannot exceed context window")
 
 
 @dataclass(frozen=True)
@@ -305,6 +311,26 @@ class TaskResult:
     infrastructure_error: str | None = None
     result_hash: str = ""
     stderr_path: str = ""
+    peak_context_tokens: int = 0
+    context_updates: int = 0
+    context_compactions: int = 0
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> "TaskResult":
+        """Verify stored v1 bytes semantically before adding optional defaults.
+
+        Early v1 results omitted context diagnostics. Validate their original
+        field set, then return a normalized, freshly hashed in-memory result.
+        Reading never rewrites the source artifact or accepts an invalid hash.
+        """
+        result = cls(**payload)
+        result.validate()
+        expected = canonical_hash(
+            {key: value for key, value in payload.items() if key != "result_hash"}
+        )
+        if result.result_hash != expected:
+            raise ValueError(f"task result hash mismatch: {result.instance_id}")
+        return result.with_hash()
 
     def payload(self, *, include_hash: bool = True) -> dict[str, Any]:
         value = redact_secrets(asdict(self))
@@ -338,6 +364,9 @@ class TaskResult:
                 self.tool_calls,
                 self.changed_files,
                 self.changed_lines,
+                self.peak_context_tokens,
+                self.context_updates,
+                self.context_compactions,
             )
             < 0
         ):

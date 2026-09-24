@@ -4,7 +4,7 @@
 
 ## 稳定契约
 
-CapsLock 2.7.6.2 支持 Linux/macOS 与 Python 3.12。当前协议为 `permissions_version = 2`、`config_version = 13`、workspace schema 20、memory schema 6、portable archive 7、session export 7、JSONL schema 3、IDE Bridge protocol 1 和插件 manifest/protocol/grant 4。config v3-v12、workspace schema v6-v19 与 memory schema v3-v5 使用 backup-first 自动迁移。模型 Provider 只使用 OpenAI Responses API，不兼容 Chat Completions。
+CapsLock 2.7.6.3 支持 Linux/macOS 与 Python 3.12。当前协议为 `permissions_version = 2`、`config_version = 13`、workspace schema 20、memory schema 6、portable archive 7、session export 7、JSONL schema 3、IDE Bridge protocol 1 和插件 manifest/protocol/grant 4。config v3-v12、workspace schema v6-v19 与 memory schema v3-v5 使用 backup-first 自动迁移。模型 Provider 只使用 OpenAI Responses API，不兼容 Chat Completions。
 
 公开运行入口为 `AgentSession.run_stream(RunRequest)`。CLI 通过应用查询面读取状态，不应依赖 repository 聚合对象。
 
@@ -244,7 +244,7 @@ capslock trace prune [--days N]
 `remaining_tokens`、`used_percent` 和 `source`。context build 后先发
 `source=estimate`；每次 provider usage 返回后发 `source=provider`，usage 缺失时继续
 使用 estimate。该实时状态事件由 `exec --json` 输出，但不写入 run journal；终止
-事件仍保持唯一。
+事件仍保持唯一。成功减少 token 的 active-run 压缩还附带可选 `data.compaction`，包含 `before_tokens`、`after_tokens`、`saved_tokens` 和 `forced`。
 
 `thinking.data.text` 是模型提供方显式返回的 reasoning；`text_delta.data.text` 是最终回答的流式正文。TUI 分区渲染二者，`completed.data.answer` 只包含最终回答。
 

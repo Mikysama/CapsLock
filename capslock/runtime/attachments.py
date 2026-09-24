@@ -70,7 +70,10 @@ class LocalAttachmentResolver:
             )
         for match in list(_MENTION.finditer(question))[: self.max_attachments]:
             requested = match.group("path")
-            if requested in {"selection", "diagnostics"} or requested in _CODE_IDENTIFIERS:
+            if (
+                requested in {"selection", "diagnostics"}
+                or requested in _CODE_IDENTIFIERS
+            ):
                 continue
             try:
                 path = self.policy.readable_file(requested)

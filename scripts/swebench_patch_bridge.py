@@ -19,6 +19,10 @@ def main(argv: list[str]) -> int:
     if predictions_index + 1 >= len(argv) or instance_index + 1 >= len(argv):
         raise SystemExit("SWE-bench bridge received an incomplete prediction command")
     artifact = Path(argv[predictions_index + 1]).resolve()
+    # The production adapter already owns JSONL conversion, cleanup and run IDs.
+    # Keep this legacy wrapper composable without wrapping JSON inside model_patch.
+    if artifact.suffix == ".jsonl":
+        return subprocess.run([executable, *argv], check=False).returncode
     instance_id = argv[instance_index + 1]
     prediction = artifact.with_name(f"{artifact.name}.prediction.jsonl")
     payload = {
@@ -54,7 +58,8 @@ def _repetition_run_id(base_run_id: str, artifact: Path) -> str:
     ordinal = artifact.parent.name
     if not ordinal.isdigit():
         return base_run_id
-    return f"{base_run_id}-rep{int(ordinal)}"
+    suffix = f"-rep{int(ordinal)}"
+    return base_run_id if base_run_id.endswith(suffix) else base_run_id + suffix
 
 
 if __name__ == "__main__":

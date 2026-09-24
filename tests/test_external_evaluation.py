@@ -7,9 +7,9 @@ from pathlib import Path
 import jsonschema
 import pytest
 
-from capslock.evaluation.external.adapters import adapter_for
+from capslock.evaluation.external.adapters import AdapterContext, Artifact, adapter_for
 from capslock.evaluation.external.catalog import load_catalog
-from capslock.evaluation.external.cli import main as external_main
+from capslock.evaluation.external.cli import main as external_main, _results
 from capslock.evaluation.external.contracts import (
     ArtifactKind,
     ExternalTask,
@@ -27,7 +27,11 @@ from capslock.evaluation.external.quarantine import (
 )
 from capslock.evaluation.external.reporting import build_report, compare_reports
 from capslock.evaluation.external.runner import ExternalBatchRunner
-from capslock.evaluation.external.runtime import RuntimeLimits, _parse_outcome
+from capslock.evaluation.external.runtime import (
+    CapsLockRuntime,
+    RuntimeLimits,
+    _parse_outcome,
+)
 from capslock.evaluation.external.sampling import select_core_tasks
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -38,10 +42,45 @@ def test_external_registry_defines_pinned_suites_and_tracks() -> None:
     registry = load_registry(EXTERNAL / "suites.toml")
 
     assert set(registry.models) == {"flash", "pro"}
+    assert registry.model("flash").context_window == 128_000
+    assert registry.model("flash").max_output_tokens == 8_192
+    assert registry.model("pro").context_window == 1_000_000
+    assert registry.model("pro").max_output_tokens == 384_000
+    assert registry.defaults.max_tokens == 128_000
     assert len(registry.suites) == 6
     assert all(len(item.upstream_revision) == 40 for item in registry.suites.values())
     assert registry.suite("terminal_bench").full_split == "4.0.0"
     assert registry.suite("swebench_live").excluded_splits == ("windows",)
+
+
+def test_external_runtime_writes_model_limits_to_generated_config(
+    tmp_path: Path,
+) -> None:
+    config_root = tmp_path / ".capslock"
+    config_root.mkdir()
+    (config_root / "config.toml").write_text(
+        "[models.primary]\ncontext_window = 1\nmax_output_tokens = 1\n",
+        encoding="utf-8",
+    )
+    track = ModelTrack(
+        "flash",
+        "deepseek",
+        "deepseek-v4-flash",
+        "https://api.deepseek.com",
+        "DEEPSEEK_API_KEY",
+        context_window=128_000,
+        max_output_tokens=8_192,
+    )
+
+    CapsLockRuntime._harden_generated_config(tmp_path, track)
+
+    import tomllib
+
+    model = tomllib.loads((config_root / "config.toml").read_text())["models"][
+        "primary"
+    ]
+    assert model["context_window"] == 128_000
+    assert model["max_output_tokens"] == 8_192
 
 
 def test_catalog_rejects_hidden_fields_and_duplicate_ids(tmp_path: Path) -> None:
@@ -185,9 +224,121 @@ def test_official_adapter_command_boundaries(
         adapter._validate_grade_command(rejected)
 
 
+def test_swebench_grader_receives_temporary_prediction_jsonl(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = tmp_path / "harness"
+    harness.mkdir()
+    executable = harness / "swebench"
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, pathlib, sys\n"
+        "args = sys.argv[1:]\n"
+        "predictions = pathlib.Path(args[args.index('--predictions') + 1])\n"
+        "if predictions.suffix != '.jsonl':\n"
+        "    raise SystemExit('prediction path must be jsonl')\n"
+        "row = json.loads(predictions.read_text().splitlines()[0])\n"
+        "assert row['instance_id'] == 'demo__repo-1'\n"
+        "assert 'diff --git' in row['model_patch']\n"
+        "print('resolved: True')\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{harness}:{__import__('os').environ['PATH']}")
+    artifact_path = tmp_path / "solution.patch"
+    artifact_path.write_text(
+        "diff --git a/example.py b/example.py\n--- a/example.py\n+++ b/example.py\n",
+        encoding="utf-8",
+    )
+    definition = load_registry(EXTERNAL / "suites.toml").suite("swebench_verified")
+    adapter = adapter_for(definition)
+    task = ExternalTask(
+        definition.id,
+        "demo__repo-1",
+        "fix it",
+        str(tmp_path),
+        grader={
+            "command": [
+                "swebench",
+                "eval",
+                "verified",
+                "--predictions",
+                "{artifact}",
+                "--instance",
+                "{instance_id}",
+            ],
+            "cwd": "harness",
+            "success_substring": "resolved: True",
+        },
+    )
+    context = AdapterContext(
+        definition,
+        harness,
+        tmp_path / "run",
+        tmp_path / "workspace",
+        "run-id",
+        1,
+    )
+    outcome = adapter.grade(
+        task,
+        Artifact(ArtifactKind.GIT_PATCH, artifact_path, "patch-sha"),
+        context,
+    )
+
+    assert outcome.passed is True
+    assert not artifact_path.with_suffix(".prediction.jsonl").exists()
+
+
 def test_patch_collection_includes_staged_and_untracked_files(
     tmp_path: Path,
 ) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    subprocess.run(["git", "init", "-q", str(source)], check=True)
+    subprocess.run(
+        ["git", "-C", str(source), "config", "user.email", "eval@example.com"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(source), "config", "user.name", "External Eval"],
+        check=True,
+    )
+    (source / "tracked.txt").write_text("before\n")
+    (source / "build").mkdir()
+    (source / "build" / "config.py").write_text("before\n")
+    subprocess.run(["git", "-C", str(source), "add", "build/config.py"], check=True)
+    subprocess.run(["git", "-C", str(source), "add", "tracked.txt"], check=True)
+    subprocess.run(["git", "-C", str(source), "commit", "-qm", "base"], check=True)
+    workspace = tmp_path / "workspace"
+    definition = load_registry(EXTERNAL / "suites.toml").suite("swebench_verified")
+    adapter = adapter_for(definition)
+    task = ExternalTask(
+        definition.id,
+        "patch-fixture",
+        "change files",
+        str(source),
+    )
+    adapter.prepare(task, workspace)
+    (workspace / "tracked.txt").write_text("after\n")
+    subprocess.run(["git", "-C", str(workspace), "add", "tracked.txt"], check=True)
+    (workspace / "new.txt").write_text("new\n")
+    (workspace / "build" / "config.py").write_text("after\n")
+    (workspace / "build" / "helper.py").write_text("new helper\n")
+    (workspace / ".capslock").mkdir()
+    (workspace / ".capslock" / "private.txt").write_text("private\n")
+
+    artifact = adapter.collect(task, workspace, tmp_path / "solution.patch")
+    patch = artifact.path.read_text()
+
+    assert "tracked.txt" in patch
+    assert "new.txt" in patch
+    assert "build/config.py" in patch
+    assert "build/helper.py" in patch
+    assert ".capslock" not in patch
+    assert artifact.changed_files == 4
+
+
+def test_patch_collection_excludes_runtime_virtualenv_files(tmp_path: Path) -> None:
     source = tmp_path / "source"
     source.mkdir()
     subprocess.run(["git", "init", "-q", str(source)], check=True)
@@ -206,25 +357,19 @@ def test_patch_collection_includes_staged_and_untracked_files(
     definition = load_registry(EXTERNAL / "suites.toml").suite("swebench_verified")
     adapter = adapter_for(definition)
     task = ExternalTask(
-        definition.id,
-        "patch-fixture",
-        "change files",
-        str(source),
+        definition.id, "virtualenv-fixture", "change files", str(source)
     )
     adapter.prepare(task, workspace)
     (workspace / "tracked.txt").write_text("after\n")
-    subprocess.run(["git", "-C", str(workspace), "add", "tracked.txt"], check=True)
-    (workspace / "new.txt").write_text("new\n")
-    (workspace / ".capslock").mkdir()
-    (workspace / ".capslock" / "private.txt").write_text("private\n")
+    (workspace / ".venv" / "bin").mkdir(parents=True)
+    (workspace / ".venv" / "bin" / "python").write_text("runtime\n")
 
     artifact = adapter.collect(task, workspace, tmp_path / "solution.patch")
     patch = artifact.path.read_text()
 
     assert "tracked.txt" in patch
-    assert "new.txt" in patch
-    assert ".capslock" not in patch
-    assert artifact.changed_files == 2
+    assert ".venv" not in patch
+    assert artifact.changed_files == 1
 
 
 def test_runtime_outcome_requires_authoritative_terminal_jsonl() -> None:
@@ -268,6 +413,41 @@ def test_runtime_outcome_reads_tool_counts_from_budget_used() -> None:
     assert (outcome.tool_rounds, outcome.tool_calls) == (4, 9)
 
 
+def test_runtime_outcome_distinguishes_peak_context_from_cumulative_usage() -> None:
+    output = "\n".join(
+        json.dumps(item)
+        for item in (
+            {
+                "event": "context_updated",
+                "data": {"context": {"used_tokens": 40_000}},
+            },
+            {
+                "event": "context_updated",
+                "data": {
+                    "context": {"used_tokens": 25_000},
+                    "compaction": {"saved_tokens": 15_000},
+                },
+            },
+            {
+                "event": "completed",
+                "status": "completed",
+                "terminal": True,
+                "data": {
+                    "usage": {"input_tokens": 120_000, "output_tokens": 2_000},
+                    "governance": {"tool_rounds": 3, "tool_calls": 4},
+                },
+            },
+        )
+    )
+
+    outcome = _parse_outcome(output, 0, 1.0)
+
+    assert outcome.input_tokens == 120_000
+    assert outcome.peak_context_tokens == 40_000
+    assert outcome.context_updates == 2
+    assert outcome.context_compactions == 1
+
+
 def test_result_schema_hash_reporting_and_paired_comparison(tmp_path: Path) -> None:
     task = ExternalTask("setupbench", "one", "task", str(tmp_path), language="python")
     baseline = result("one", 1, False)
@@ -285,6 +465,115 @@ def test_result_schema_hash_reporting_and_paired_comparison(tmp_path: Path) -> N
     for schema_name, payload in (("task-result-v1.json", candidate.payload()),):
         schema = json.loads((EXTERNAL / "schemas" / schema_name).read_text())
         jsonschema.validate(payload, schema)
+
+
+@pytest.mark.parametrize("include_context", [False, True])
+def test_stored_results_verify_original_hash_before_normalizing(
+    tmp_path: Path, include_context: bool
+) -> None:
+    payload = result("legacy", 1, False).payload()
+    if not include_context:
+        for name in ("peak_context_tokens", "context_updates", "context_compactions"):
+            payload.pop(name)
+    payload["result_hash"] = canonical_hash(
+        {key: value for key, value in payload.items() if key != "result_hash"}
+    )
+    path = tmp_path / "results.jsonl"
+    write_jsonl(path, [payload])
+    original = path.read_bytes()
+    loaded = _results(path)
+    assert len(loaded) == 1
+    assert loaded[0].peak_context_tokens == 0
+    assert loaded[0].result_hash == loaded[0].with_hash().result_hash
+    assert path.read_bytes() == original
+    jsonschema.validate(
+        payload, json.loads((EXTERNAL / "schemas/task-result-v1.json").read_text())
+    )
+
+    payload["input_tokens"] = 999
+    write_jsonl(path, [payload])
+    with pytest.raises(ValueError, match="hash mismatch"):
+        _results(path)
+
+
+@pytest.mark.parametrize("ordinal", [1, 2])
+@pytest.mark.parametrize("bridge_wrapper", [False, True])
+@pytest.mark.parametrize("grader_exit", [0, 1])
+def test_swebench_prediction_bridge_preserves_patch_and_isolates_repetitions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ordinal: int,
+    bridge_wrapper: bool,
+    grader_exit: int,
+) -> None:
+    import sys
+
+    harness = tmp_path / "harness"
+    harness.mkdir()
+    capture = tmp_path / "captured.json"
+    grader = harness / "swebench-real"
+    grader.write_text(
+        f"#!{sys.executable}\n"
+        "import json, pathlib, sys\n"
+        "args = sys.argv[1:]\n"
+        "prediction = pathlib.Path(args[args.index('--predictions') + 1])\n"
+        "row = json.loads(prediction.read_text())\n"
+        f"pathlib.Path({str(capture)!r}).write_text(json.dumps({{"
+        "'row': row, 'run_id': args[args.index('--run-id') + 1]}))\n"
+        f"raise SystemExit({grader_exit})\n"
+    )
+    grader.chmod(0o755)
+    entry = harness / "swebench"
+    if bridge_wrapper:
+        entry.write_text(
+            f"#!{sys.executable}\nimport runpy\n"
+            f"runpy.run_path({str(ROOT / 'scripts/swebench_patch_bridge.py')!r}, run_name='__main__')\n"
+        )
+        entry.chmod(0o755)
+    else:
+        entry.symlink_to(grader)
+    monkeypatch.setenv("PATH", f"{harness}:{__import__('os').environ['PATH']}")
+    monkeypatch.setenv("CAPSLOCK_EVAL_SWEBENCH_BIN", str(grader))
+    task_root = tmp_path / "tasks" / "demo__repo-1" / str(ordinal)
+    task_root.mkdir(parents=True)
+    patch = task_root / "solution.patch"
+    patch_text = (
+        "diff --git a/example.py b/example.py\n--- a/example.py\n+++ b/example.py\n"
+    )
+    patch.write_text(patch_text)
+    definition = load_registry(EXTERNAL / "suites.toml").suite("swebench_verified")
+    task = ExternalTask(
+        definition.id,
+        "demo__repo-1",
+        "fix it",
+        str(tmp_path),
+        grader={
+            "command": [
+                "swebench",
+                "eval",
+                "verified",
+                "--predictions",
+                "{artifact}",
+                "--instance",
+                "{instance_id}",
+                "--run-id",
+                "benchmark",
+            ],
+            "cwd": "harness",
+        },
+    )
+    outcome = adapter_for(definition).grade(
+        task,
+        Artifact(ArtifactKind.GIT_PATCH, patch, "a" * 64),
+        AdapterContext(definition, harness, tmp_path, tmp_path, "benchmark", ordinal),
+    )
+    captured = json.loads(capture.read_text())
+    assert captured["row"]["model_patch"] == patch_text
+    assert captured["row"]["instance_id"] == "demo__repo-1"
+    assert captured["run_id"] == f"benchmark-rep{ordinal}"
+    assert outcome.passed is (grader_exit == 0)
+    assert not list(task_root.glob("*.prediction.jsonl"))
+    assert patch.read_text() == patch_text
 
 
 def test_runner_is_resumable_and_keeps_hidden_grader_outside_workspace(
@@ -352,6 +641,14 @@ def test_runner_is_resumable_and_keeps_hidden_grader_outside_workspace(
         run_id="fixed-run",
     )
     first = runner.run()
+    stored_path = runner.run_root / "tasks" / "fixture" / "1" / "result.json"
+    stored = read_json(stored_path)
+    for name in ("peak_context_tokens", "context_updates", "context_compactions"):
+        stored.pop(name)
+    stored["result_hash"] = canonical_hash(
+        {key: value for key, value in stored.items() if key != "result_hash"}
+    )
+    write_json(stored_path, stored)
     second = runner.run()
 
     assert first["resolve_rate"] == second["resolve_rate"] == 1
@@ -452,6 +749,9 @@ def test_deferred_grade_invokes_official_harness_and_cleans_workspace(
 
     assert report["infrastructure_valid"] is False
     assert pending["grader_status"] == "not_run"
+    assert pending["peak_context_tokens"] == 40
+    assert pending["context_updates"] == 1
+    assert pending["context_compactions"] == 1
     assert (task_root / "workspace").is_dir()
     assert (
         external_main(
@@ -471,6 +771,8 @@ def test_deferred_grade_invokes_official_harness_and_cleans_workspace(
     graded = read_json(task_root / "result.json")
     assert graded["grader_status"] == "passed"
     assert graded["resolved"] is True
+    assert graded["peak_context_tokens"] == 40
+    assert graded["context_compactions"] == 1
     assert not (task_root / "workspace").exists()
     assert "test-credential" not in (task_root / "grader.log").read_text()
     for schema_name, payload in (
@@ -541,6 +843,10 @@ if command == 'init':
     (root / 'config.toml').write_text('config_version = 13\\n')
 else:
     print(os.environ['CAPSLOCK_EVAL_API_KEY'], file=sys.stderr)
+    print(json.dumps({
+        'event': 'context_updated',
+        'data': {'context': {'used_tokens': 40}, 'compaction': {'saved_tokens': 10}},
+    }))
     print(json.dumps({
         'event': 'completed',
         'status': 'completed',

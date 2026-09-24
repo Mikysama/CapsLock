@@ -36,6 +36,7 @@ from capslock.shell import (
     sandboxed_command,
 )
 from capslock.storage.repositories import WorkspaceRepositories
+from capslock.tooling.permission_policy.specs import ShellPermissionSpec
 from tests.helpers import StubActionHandler, workspace_run
 
 
@@ -515,6 +516,62 @@ def test_sandbox_rejects_host_scoped_network_before_allocating_temporary(
             network=["example.com"],
         )
     assert allocations == []
+
+
+def test_external_task_network_policy_promotes_shell_network_to_unrestricted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CAPSLOCK_EVAL_NETWORK_POLICY", "task-allowlist")
+    context = SimpleNamespace(policy=WorkspacePolicy(tmp_path))
+
+    normalized = ShellPermissionSpec().normalize(
+        SimpleNamespace(name="shell"),
+        {"command": "python -m pip install pytest", "cwd": "."},
+        context,
+    )
+
+    assert normalized["network"] == ["*"]
+
+
+def test_provider_only_network_policy_keeps_shell_offline_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CAPSLOCK_EVAL_NETWORK_POLICY", "provider-only")
+    context = SimpleNamespace(policy=WorkspacePolicy(tmp_path))
+
+    normalized = ShellPermissionSpec().normalize(
+        SimpleNamespace(name="shell"),
+        {"command": "python -m pytest", "cwd": "."},
+        context,
+    )
+
+    assert normalized["network"] == []
+
+
+def test_linux_network_sandbox_mounts_resolver_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("capslock.shell.sandbox.platform.system", lambda: "Linux")
+    monkeypatch.setattr("capslock.shell.sandbox.shutil.which", lambda _name: "bwrap")
+
+    command = sandboxed_command(
+        command="getent hosts pypi.org",
+        workspace=tmp_path,
+        cwd=tmp_path,
+        network=["*"],
+    )
+    try:
+        resolver = Path("/etc/resolv.conf").resolve()
+        if resolver.parent != Path("/etc") and resolver.is_file():
+            expected = ("--ro-bind", str(resolver.parent), str(resolver.parent))
+            assert any(
+                command.argv[index : index + 3] == expected
+                for index in range(len(command.argv) - 2)
+            )
+    finally:
+        import shutil
+
+        shutil.rmtree(command.temporary, ignore_errors=True)
 
 
 def test_shell_launch_failure_cleans_temporary_directory(

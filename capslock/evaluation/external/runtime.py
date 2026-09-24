@@ -34,6 +34,9 @@ class RolloutOutcome:
     tool_calls: int
     returncode: int
     infrastructure_error: str | None = None
+    peak_context_tokens: int = 0
+    context_updates: int = 0
+    context_compactions: int = 0
 
 
 class CapsLockRuntime:
@@ -109,7 +112,7 @@ class CapsLockRuntime:
                 initialized.returncode,
                 "CapsLock benchmark workspace initialization failed",
             )
-        self._harden_generated_config(workspace)
+        self._harden_generated_config(workspace, self.track)
         prompt = self.prompt_template.replace(
             "{problem_statement}", problem_statement.strip()
         )
@@ -197,7 +200,7 @@ class CapsLockRuntime:
                 state.unlink()
 
     @staticmethod
-    def _harden_generated_config(workspace: Path) -> None:
+    def _harden_generated_config(workspace: Path, track: ModelTrack) -> None:
         import tomlkit
 
         path = workspace / ".capslock" / "config.toml"
@@ -217,6 +220,12 @@ class CapsLockRuntime:
             "maintenance_enabled": False,
             "policy": "off",
         }
+        models = document.get("models")
+        if isinstance(models, dict):
+            for profile in models.values():
+                if isinstance(profile, dict):
+                    profile["context_window"] = track.context_window
+                    profile["max_output_tokens"] = track.max_output_tokens
         path.write_text(tomlkit.dumps(document), encoding="utf-8")
 
 
@@ -284,6 +293,19 @@ def _parse_outcome(output: str, returncode: int, duration: float) -> RolloutOutc
             returncode,
             "CapsLock JSONL did not contain a terminal event",
         )
+    context_events = [
+        event for event in events if event.get("event") == "context_updated"
+    ]
+    peak_context_tokens = max(
+        (
+            int(((event.get("data") or {}).get("context") or {}).get("used_tokens", 0))
+            for event in context_events
+        ),
+        default=0,
+    )
+    context_compactions = sum(
+        1 for event in context_events if (event.get("data") or {}).get("compaction")
+    )
     data = terminal.get("data") or {}
     usage = data.get("usage") or {}
     governance = data.get("governance") or data.get("limits") or {}
@@ -310,4 +332,8 @@ def _parse_outcome(output: str, returncode: int, duration: float) -> RolloutOutc
             )
         ),
         returncode,
+        None,
+        peak_context_tokens,
+        len(context_events),
+        context_compactions,
     )
