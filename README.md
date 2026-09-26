@@ -2,7 +2,7 @@
 
 CapsLock 是一个本机工作区 Agent，用于读取和修改代码、检索证据、运行受沙箱保护的 Shell、查询代码语义，以及按审批策略访问 Web、MCP 和本地插件。Tool Runtime v2 将工具契约、参数级策略、可恢复暂停、调度、富结果与审计统一到异步执行链。
 
-当前源码版本为 `2.7.6.4`。数据格式为 workspace schema 21、memory schema 6、portable archive 8、session export 8 和 config 14，JSONL 保持 3。行为变化、验收边界与回退说明见 [优化交付说明](docs/reliability-optimization.md) 和 [2.7.6.4 发布说明](docs/releases/v2.7.6.4.md)。
+当前源码版本为 `2.7.6.4`。数据格式为 workspace schema 22、memory schema 6、portable archive 9、session export 9 和 config 14，JSONL 保持 3。行为变化、验收边界与回退说明见 [优化交付说明](docs/reliability-optimization.md) 和 [2.7.6.4 发布说明](docs/releases/v2.7.6.4.md)。
 
 正式支持矩阵：Linux/macOS，Python 3.12。发布 CI 会在两个操作系统组合中执行测试、构建、依赖审计和安装冒烟。
 
@@ -480,7 +480,7 @@ CapsLock 只接受 canonical 布局：
 
 `events.jsonl` 中的连续正文/思考 delta 汇总为 `workflow_stream_summary`，只记录各类块数、字符数、UTF-8 字节数及首末时间和事件序号，不逐块重复记录正文。工具事件、无正文的思考开始事件及终态仍保留；实时 TUI、`exec --json` 和数据库事件内容不变。汇总在下一个非 delta 事件或正常关闭时写入；进程异常退出可能丢失尚未汇总的诊断计数。
 
-工作区库和记忆库使用不同的 SQLite `application_id`。当前 workspace schema 为 21，memory schema 为 6；workspace schema v6-v20 与 memory schema v3-v5 在 WAL checkpoint 和 SQLite backup 后事务升级。schema 20 合并流式事件和 checkpoint 存储，移除可由权威数据替代的快照表，并保留 Agent 恢复、安全审计与状态机数据。portable archive 与 session export 当前为 version 8，portable archive 读取兼容 version 3–7。旧 application ID、其他非当前 schema 或未知已有表均拒绝启动。
+工作区库和记忆库使用不同的 SQLite `application_id`。当前 workspace schema 为 22，memory schema 为 6；workspace schema v6-v21 与 memory schema v3-v5 在 WAL checkpoint 和 SQLite backup 后事务升级。schema 20 合并流式事件和 checkpoint 存储，移除可由权威数据替代的快照表，并保留 Agent 恢复、安全审计与状态机数据。portable archive 与 session export 当前为 version 9，portable archive 读取兼容 version 3–8。旧 application ID、其他非当前 schema 或未知已有表均拒绝启动。
 
 ## 架构
 

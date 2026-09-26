@@ -18,6 +18,7 @@ from ..application.foreground import (
     ControllerEventKind,
     ForegroundRunController,
 )
+from ..application.mailbox import mailbox_notice
 from ..domain import (
     ActionRecord,
     AgentEvent,
@@ -433,7 +434,11 @@ class _RunRenderer:
         }:
             await self._tool_completed(event)
         elif event.kind is AgentEventKind.CONTEXT_UPDATED:
-            context = event.data.get("context", {})
+            notice = mailbox_notice(event.data.get("mailbox"))
+            if notice and notice != self.state.get("mailbox_notice"):
+                await self.writer.print(system_message(notice))
+            self.state["mailbox_notice"] = notice
+            context = event.data.get("context")
             if isinstance(context, dict):
                 used = context.get("used_tokens")
                 limit = context.get("limit_tokens")

@@ -50,6 +50,7 @@ WORKSPACE_IMPORT_SPECS = tuple(
         ("agent_approval_links", "id"),
         ("agent_messages", "id"),
         ("agent_mailbox", "id"),
+        ("mailbox_deliveries", ("recipient_session_id", "message_id")),
         ("agent_outputs", "task_id"),
         ("performance_spans", "id"),
     )
@@ -81,6 +82,8 @@ MEMORY_PRIMARY = {item.name: item.primary_key for item in MEMORY_IMPORT_SPECS}
 
 REFERENCE_FIELDS = {
     "session_id": "sessions",
+    "recipient_session_id": "sessions",
+    "reply_to_message_id": "agent_mailbox",
     "owner_session_id": "sessions",
     "run_id": "runs",
     "work_item_id": "work_items",

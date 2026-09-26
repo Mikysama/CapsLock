@@ -7,6 +7,7 @@ from enum import StrEnum
 from typing import Any
 
 from ...domain import AgentEvent, AgentEventKind
+from ...application.mailbox import mailbox_metadata, mailbox_notice
 
 
 class MessageKind(StrEnum):
@@ -154,6 +155,8 @@ def toggle_details(state: TuiState) -> TuiState:
 
 def reduce_event(state: TuiState, event: AgentEvent) -> TuiState:
     if event.run_id in state.terminal_runs and not event.terminal:
+        if event.kind is AgentEventKind.CONTEXT_UPDATED:
+            return _mailbox_updated(state, event)
         return state
     if event.kind is AgentEventKind.QUEUED:
         return replace(state, active_run_id=event.run_id, activity="Thinking")
@@ -366,8 +369,21 @@ def _tool_completed(
     return replace(state, messages=tuple(messages), activity="Thinking")
 
 
+def _mailbox_updated(state: TuiState, event: AgentEvent) -> TuiState:
+    metadata = mailbox_metadata(event.data.get("mailbox"))
+    notice = mailbox_notice(metadata)
+    if notice:
+        return replace(state, notification=notice)
+    if metadata.get("pending_count") == 0 and (state.notification or "").startswith(
+        "Agent mailbox: "
+    ):
+        return replace(state, notification=None)
+    return state
+
+
 def _context_updated(state: TuiState, event: AgentEvent) -> TuiState:
-    value = event.data.get("context", {})
+    state = _mailbox_updated(state, event)
+    value = event.data.get("context")
     if not isinstance(value, dict):
         return state
     used = value.get("used_tokens")

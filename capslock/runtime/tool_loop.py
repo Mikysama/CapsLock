@@ -486,6 +486,8 @@ class ToolLoop:
         user_goal: str | None = None,
         external_input_provider: Callable[[], Awaitable[list[dict[str, object]]]]
         | None = None,
+        mailbox_receiver: Any | None = None,
+        completion_barrier: Callable[[], Awaitable[bool]] | None = None,
     ) -> ToolLoopResult:
         active_model = chat_model or self.chat_model
         evidence, source_ids, memories = {}, set(), {}
@@ -496,6 +498,8 @@ class ToolLoop:
         selection_state = SelectionState(user_goal or "")
         previous_prefix = None
         while True:
+            if mailbox_receiver is not None:
+                await mailbox_receiver.poll(messages)
             if external_input_provider is not None:
                 incoming = await external_input_provider()
                 if incoming:
@@ -714,6 +718,22 @@ class ToolLoop:
                     status=RunStepStatus.COMPLETED,
                     checkpoint={"messages": messages},
                 )
+                if completion_barrier is not None and not await completion_barrier():
+                    continue
+                if (
+                    mailbox_receiver is not None
+                    and not await mailbox_receiver.try_finish(messages)
+                ):
+                    # Preserve the already emitted answer, then handle late actionable input.
+                    if governor is not None:
+                        await governor.record_round()
+                    else:
+                        turn += 1
+                        if turn > self.max_tool_rounds:
+                            raise ToolLoopError(
+                                "mailbox continuation exceeded round budget"
+                            )
+                    continue
                 return ToolLoopResult(
                     text,
                     evidence,
@@ -818,6 +838,8 @@ class ToolLoop:
                 paused.input_tokens = input_tokens
                 paused.output_tokens = output_tokens
                 raise
+            if mailbox_receiver is not None:
+                await mailbox_receiver.confirm_manual(messages)
             if self.max_argument_repair_attempts:
                 pending_repair = self._repair_directive(round_outcomes)
                 repair_attempt = active_repair_attempt if pending_repair else 0

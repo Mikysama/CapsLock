@@ -35,7 +35,17 @@ class RunGovernor:
         self.models = models
         self.run_id = run_id
         self.snapshot = snapshot
-        self.history = history
+        accounting = next(
+            (
+                item["_collaboration_accounted"]
+                for item in history
+                if "_collaboration_accounted" in item
+            ),
+            {},
+        )
+        self.history = [
+            item for item in history if "_collaboration_accounted" not in item
+        ]
         self.loop_settings = loop_settings
         self.started = time.monotonic()
         self.base_duration_ms = snapshot.duration_ms
@@ -45,6 +55,15 @@ class RunGovernor:
         self.observed_input_tokens = 0
         self.observed_output_tokens = 0
         self._tool_attempt_lock = asyncio.Lock()
+        self._collaboration_budget: Any = None
+        self._child_usage: dict[str, float] = (
+            accounting if accounting.get("run_id") == run_id else {}
+        )
+        if self._child_usage:
+            self.base_input_tokens -= int(self._child_usage.get("input_tokens", 0))
+            self.base_output_tokens -= int(self._child_usage.get("output_tokens", 0))
+            self.base_cost_usd -= float(self._child_usage.get("cost_usd", 0))
+        self._child_reserved: dict[str, float] = {}
 
     @classmethod
     async def create(
@@ -63,18 +82,42 @@ class RunGovernor:
         )
         return cls(governance, models, run_id, snapshot, history, loop_settings)
 
+    def attach_collaboration_budget(self, repository: Any) -> None:
+        self._collaboration_budget = repository
+
+    def available_remaining(self) -> dict[str, Any]:
+        remaining = dict(self.snapshot.as_dict()["remaining"])
+        for key, value in self._child_reserved.items():
+            if remaining.get(key) is not None:
+                remaining[key] = max(0, remaining[key] - value)
+        return remaining
+
     async def current(self) -> BudgetSnapshot:
         input_tokens, output_tokens, cost = await self.models.usage(self.run_id)
+        usage: dict[str, float] = {}
+        if self._collaboration_budget is not None:
+            budget = await self._collaboration_budget.parent_budget(self.run_id)
+            usage = budget["settled"]
+            self._child_reserved = budget["reserved"]
         self.snapshot = replace(
             self.snapshot,
             duration_ms=self.base_duration_ms
             + round((time.monotonic() - self.started) * 1000),
             input_tokens=self.base_input_tokens
-            + max(input_tokens, self.observed_input_tokens),
+            + max(input_tokens, self.observed_input_tokens)
+            + int(usage.get("input_tokens", 0)),
             output_tokens=self.base_output_tokens
-            + max(output_tokens, self.observed_output_tokens),
-            cost_usd=self.base_cost_usd + cost,
+            + max(output_tokens, self.observed_output_tokens)
+            + int(usage.get("output_tokens", 0)),
+            cost_usd=self.base_cost_usd + cost + usage.get("cost_usd", 0),
+            tool_rounds=self.snapshot.tool_rounds
+            + int(
+                usage.get("tool_rounds", 0) - self._child_usage.get("tool_rounds", 0)
+            ),
+            tool_calls=self.snapshot.tool_calls
+            + int(usage.get("tool_calls", 0) - self._child_usage.get("tool_calls", 0)),
         )
+        self._child_usage = {**usage, "run_id": self.run_id} if usage else {}
         await self._save()
         return self.snapshot
 
@@ -107,7 +150,7 @@ class RunGovernor:
 
     async def before_model(self) -> None:
         await self._check_common()
-        if self.snapshot.tool_rounds >= self.snapshot.limits.max_tool_rounds:
+        if self.available_remaining()["tool_rounds"] <= 0:
             await self.stop(StopReason.MAX_TOOL_ROUNDS)
 
     async def record_round(self) -> BudgetSnapshot:
@@ -127,7 +170,7 @@ class RunGovernor:
         async with self._tool_attempt_lock:
             await self._check_common()
             limit = self.snapshot.limits.max_tool_calls
-            if limit is not None and self.snapshot.tool_calls >= limit:
+            if limit is not None and self.available_remaining()["tool_calls"] <= 0:
                 await self.stop(StopReason.MAX_TOOL_CALLS)
             safe_arguments = redact(arguments)
             assert isinstance(safe_arguments, dict)
@@ -229,11 +272,11 @@ class RunGovernor:
             limits.max_duration_seconds * 1000
         ):
             await self.stop(StopReason.MAX_DURATION)
-        if limits.max_tokens is not None and snapshot.tokens >= limits.max_tokens:
+        if limits.max_tokens is not None and self.available_remaining()["tokens"] <= 0:
             await self.stop(StopReason.MAX_TOKENS)
         if (
             limits.max_budget_usd is not None
-            and snapshot.cost_usd >= limits.max_budget_usd
+            and self.available_remaining()["budget_usd"] <= 0
         ):
             await self.stop(StopReason.MAX_BUDGET_USD)
 
@@ -286,4 +329,7 @@ class RunGovernor:
         return None
 
     async def _save(self) -> None:
-        await self.governance.save(self.run_id, self.snapshot, self.history)
+        history = self.history
+        if self._child_usage:
+            history = [*history[-63:], {"_collaboration_accounted": self._child_usage}]
+        await self.governance.save(self.run_id, self.snapshot, history)

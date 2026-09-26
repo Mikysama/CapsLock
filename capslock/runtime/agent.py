@@ -168,6 +168,7 @@ class AgentSession:
         loop_detection: LoopDetectionSettings = LoopDetectionSettings(),
         interaction: RunInteraction | None = None,
         collaboration: Any = None,
+        mailbox_receipts: Any = None,
         artifacts: Any = None,
         permission_engine: Any = None,
         process_manager: Any = None,
@@ -214,6 +215,11 @@ class AgentSession:
             permission_mode=permission_mode
         )
         self.collaboration = collaboration
+        self.mailbox_receipts = mailbox_receipts
+        self._mailbox_service = collaboration
+        self._mailbox_task_id: str | None = None
+        self._mailbox_parent_run_id: str | None = None
+        self._active_mailbox = None
         self.artifacts = artifacts
         self.permission_engine = permission_engine
         self.process_manager = process_manager
@@ -331,6 +337,12 @@ class AgentSession:
     ) -> None:
         """Install a provider drained only at model/tool loop boundaries."""
         self._external_input_provider = provider
+
+    def configure_mailbox(self, service, *, task_id: str, parent_run_id: str) -> None:
+        """Bind a child to its immutable task's parent-side communication service."""
+        self._mailbox_service = service
+        self._mailbox_task_id = task_id
+        self._mailbox_parent_run_id = parent_run_id
 
     @property
     def permission_mode(self) -> PermissionMode:
@@ -549,6 +561,8 @@ class AgentSession:
             limits=limits,
         )
         prepared, governor = active.prepared, active.governor
+        if self.collaboration is not None:
+            governor.attach_collaboration_budget(self.collaboration.repository)
         run_id, started = active.run_id, active.started
         is_init = prepared.work_item.kind is RunKind.INIT
         active_tools = self.tools.filtered(INIT_TOOL_NAMES) if is_init else self.tools
@@ -586,6 +600,54 @@ class AgentSession:
         publish, emit = publisher.publish, publisher.emit
 
         try:
+            if (
+                self._mailbox_service is not None
+                and self.mailbox_receipts is not None
+                and self._mailbox_service.mailbox_enabled
+                and not is_init
+            ):
+                from .mailbox import MailboxReceiver
+
+                service = self._mailbox_service
+                address = (
+                    await service.mailbox_address(self._mailbox_task_id, "child")
+                    if self._mailbox_task_id
+                    else f"session:{self.session_id}"
+                )
+                task_ids = (
+                    [self._mailbox_task_id]
+                    if self._mailbox_task_id
+                    else await service.receiver_scope(
+                        self.session_id, run_id, resume_from_run_id
+                    )
+                )
+                if resume_from_run_id:
+                    await self.mailbox_receipts.rebind_pending(
+                        self.session_id,
+                        [resume_from_run_id],
+                        run_id,
+                        task_ids=task_ids,
+                    )
+                self._active_mailbox = MailboxReceiver(
+                    source=service.repository,
+                    receipts=self.mailbox_receipts,
+                    registry=service._mailbox_wakeup,
+                    address=address,
+                    session_id=self.session_id,
+                    run_id=run_id,
+                    task_ids=task_ids,
+                    context_budget=self.context_budget,
+                    service=service,
+                    emit=emit,
+                )
+                self._active_mailbox.scope_loader = (
+                    None
+                    if self._mailbox_task_id
+                    else lambda: service.receiver_scope(
+                        self.session_id, run_id, resume_from_run_id
+                    )
+                )
+                await self._active_mailbox.start()
             await emit(
                 AgentEventKind.QUEUED,
                 {"position": prepared.work_item.position, "status": "running"},
@@ -783,6 +845,48 @@ class AgentSession:
                 )
 
             try:
+
+                async def completion_barrier() -> bool:
+                    if self.collaboration is None:
+                        return True
+                    snapshot = await governor.current()
+                    remaining = snapshot.as_dict()["remaining"]["duration_ms"]
+                    deadline = (
+                        None
+                        if remaining is None
+                        else time.monotonic() + remaining / 1000
+                    )
+                    activity = await self.collaboration.wait_foreground(
+                        run_id, deadline
+                    )
+                    if activity["wake_reason"] == "timeout":
+                        await governor.before_model()
+                    tasks = activity.get("tasks", [])
+                    if activity["wake_reason"] == "message_available":
+                        await governor.record_round()
+                        return False
+                    if tasks:
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": "[Untrusted child Agent task results]\n"
+                                + json.dumps(tasks, ensure_ascii=False),
+                            }
+                        )
+                        from ..domain import RunStepKind, RunStepStatus
+
+                        step = await self.journal.create_step(
+                            run_id, RunStepKind.MAILBOX
+                        )
+                        await self.journal.finish_step(
+                            step.id,
+                            status=RunStepStatus.COMPLETED,
+                            checkpoint={"messages": messages},
+                        )
+                        await governor.record_round()
+                        return False
+                    return True
+
                 result = await active_tool_loop.run(
                     messages,
                     run_id,
@@ -795,6 +899,10 @@ class AgentSession:
                     response_format=response_format,
                     user_goal=prepared.work_item.question,
                     external_input_provider=self._external_input_provider,
+                    mailbox_receiver=self._active_mailbox,
+                    completion_barrier=completion_barrier
+                    if self.collaboration is not None
+                    else None,
                 )
             except asyncio.CancelledError:
                 loop_status = "cancelled"
@@ -1107,6 +1215,15 @@ class AgentSession:
             raise
         finally:
             try:
+                if self._active_mailbox is not None:
+                    await self._active_mailbox.close()
+                    self._active_mailbox = None
+                if self.collaboration is not None:
+                    finished = await self.runs.require(
+                        run_id, session_id=self.session_id
+                    )
+                    if finished.status not in {"waiting_approval", "waiting_input"}:
+                        await self.collaboration.cancel_foreground(run_id)
                 await publisher.close()
             finally:
                 if self.planning is not None and not is_init:

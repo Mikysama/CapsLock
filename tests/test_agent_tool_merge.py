@@ -14,6 +14,7 @@ from capslock.collaboration import (
     AgentTaskContract,
     AgentWorkspaceManager,
     CollaborationService,
+    MailboxMessageKind,
 )
 from capslock.policy import WorkspacePolicy
 from capslock.storage.repositories import WorkspaceRepositories
@@ -24,6 +25,7 @@ from capslock.tooling.executor import ToolExecutor
 from capslock.tooling.tools.collaboration import (
     agent_control_tools,
     child_mailbox_tools,
+    resolve_agent_operation,
 )
 from tests.helpers import workspace_run
 
@@ -203,7 +205,7 @@ def test_foreign_session_cannot_control_merged_targets(
 
 @pytest.mark.parametrize(
     "operation",
-    ["old_stop_task", "old_stop_agent", "old_task_message", "old_team_message"],
+    ["old_stop_task", "old_stop_agent", "old_team_message"],
 )
 def test_historical_calls_remain_executable(tmp_path: Path, operation: str) -> None:
     async def scenario():
@@ -211,14 +213,6 @@ def test_historical_calls_remain_executable(tmp_path: Path, operation: str) -> N
             name, arguments = {
                 "old_stop_task": ("stop_agent_task", {"task_id": tasks[0].task_id}),
                 "old_stop_agent": ("stop_agent", {"agent_id": workers[0]["id"]}),
-                "old_task_message": (
-                    "send_agent_message",
-                    {
-                        "task_id": tasks[0].task_id,
-                        "kind": "response",
-                        "payload": {"text": "answer"},
-                    },
-                ),
                 "old_team_message": (
                     "send_team_message",
                     {
@@ -230,6 +224,85 @@ def test_historical_calls_remain_executable(tmp_path: Path, operation: str) -> N
             }[operation]
             result = await _executor().invoke(name, context, arguments)
             assert result.outcome.ok, result.outcome.error
+
+    asyncio.run(scenario())
+
+
+def test_task_message_requires_canonical_target_at_execution_and_routing(tmp_path):
+    tool = next(
+        tool for tool in agent_control_tools() if tool.name == "send_agent_message"
+    )
+    assert tool.contract.input_schema == tool.schema()["function"]["parameters"]
+    assert "task_id" not in tool.contract.input_schema["properties"]
+
+    async def scenario():
+        async with _agents(tmp_path) as (repos, context, _team, _workers, tasks):
+            arguments = {
+                "task_id": tasks[0].task_id,
+                "kind": "instruction",
+                "payload": {"text": "must not be sent"},
+            }
+            result = await _executor().invoke("send_agent_message", context, arguments)
+            assert not result.outcome.ok
+            assert result.outcome.error_code == "invalid_tool_arguments"
+            assert result.outcome.executed is False
+            assert not await repos.collaboration.receive_mailbox(
+                tasks[0].task_id, recipient="child"
+            )
+            with pytest.raises(ValueError, match="target_type"):
+                resolve_agent_operation("send_agent_message", arguments)
+
+    asyncio.run(scenario())
+
+
+def test_child_reply_preserves_correlation_and_rejects_wrong_recipient(tmp_path):
+    async def scenario():
+        async with _agents(tmp_path) as (repos, context, _team, _workers, tasks):
+            sent = []
+            for task in tasks:
+                result = await _executor().invoke(
+                    "send_agent_message",
+                    context,
+                    {
+                        "target_type": "task",
+                        "target_id": task.task_id,
+                        "kind": "instruction",
+                        "payload": {"text": "inspect"},
+                    },
+                )
+                assert result.outcome.ok, result.outcome.error
+                sent.append(result.outcome.data)
+            executor = ToolExecutor(
+                ToolCatalog(child_mailbox_tools(context.collaboration, tasks[0]))
+            )
+            reply = await executor.invoke(
+                "send_parent_message",
+                context,
+                {
+                    "kind": "response",
+                    "payload": {"text": "done"},
+                    "reply_to_message_id": sent[0]["id"],
+                },
+            )
+            assert reply.outcome.ok, reply.outcome.error
+            assert reply.outcome.data["reply_to_message_id"] == sent[0]["id"]
+            stored = await repos.collaboration.mailbox_message(reply.outcome.data["id"])
+            assert stored["reply_to_message_id"] == sent[0]["id"]
+            before = await repos.collaboration.one(
+                "SELECT count(*) AS count FROM agent_mailbox"
+            )
+            with pytest.raises(ValueError, match="sender and recipient"):
+                await context.collaboration.send_child_message(
+                    tasks[0].task_id,
+                    parent_run_id=context.run_id,
+                    kind=MailboxMessageKind.RESPONSE,
+                    payload={"text": "wrong thread"},
+                    reply_to_message_id=sent[1]["id"],
+                )
+            after = await repos.collaboration.one(
+                "SELECT count(*) AS count FROM agent_mailbox"
+            )
+            assert after == before
 
     asyncio.run(scenario())
 
@@ -370,6 +443,7 @@ def test_provider_null_placeholders_keep_canonical_message_route(
                     "target_type": "agent",
                     "target_id": workers[0]["id"],
                     "payload": {"text": "hello"},
+                    "reply_to_message_id": None,
                     "kind": None,
                     "broadcast": None,
                 },
@@ -397,6 +471,7 @@ def test_strict_provider_schema_accepts_non_task_message_kind_null(
             "target_type": target_type,
             "target_id": "target",
             "payload": {},
+            "reply_to_message_id": None,
             "kind": None,
             "broadcast": True if target_type == "team" else None,
         }

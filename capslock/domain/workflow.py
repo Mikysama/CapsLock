@@ -129,6 +129,7 @@ class RunStepKind(StrEnum):
     MODEL = "model"
     TOOL = "tool"
     APPROVAL = "approval"
+    MAILBOX = "mailbox"
 
 
 class RunStepStatus(StrEnum):

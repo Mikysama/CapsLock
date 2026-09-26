@@ -126,10 +126,19 @@ def child_mailbox_tools(
         return []
 
     async def read_parent_messages(
-        _context: ExecutionContext, _arguments: dict[str, Any]
+        context: ExecutionContext, arguments: dict[str, Any]
     ) -> ToolOutcome:
+        timeout = float(arguments.get("timeout", 60))
+        if context.governor is not None:
+            remaining = context.governor.remaining_seconds()
+            if remaining is not None:
+                timeout = min(timeout, remaining)
         values = await collaboration.read_child_messages(
-            contract.task_id, parent_run_id=contract.parent_run_id
+            contract.task_id,
+            parent_run_id=contract.parent_run_id,
+            wait=bool(arguments.get("wait", False)),
+            timeout=timeout,
+            reply_to_message_id=arguments.get("reply_to_message_id"),
         )
         return ToolOutcome.success({"messages": values})
 
@@ -163,6 +172,7 @@ def child_mailbox_tools(
             parent_run_id=contract.parent_run_id,
             kind=kind,
             payload=payload,
+            reply_to_message_id=arguments.get("reply_to_message_id"),
         )
         return ToolOutcome.success(value)
 
@@ -192,7 +202,15 @@ def child_mailbox_tools(
         define_tool(
             "read_parent_messages",
             "Read new instructions, responses, or cancellation notices from the parent Agent.",
-            {"type": "object", "properties": {}, "additionalProperties": False},
+            {
+                "type": "object",
+                "properties": {
+                    "wait": {"type": "boolean"},
+                    "timeout": {"type": "number", "minimum": 0, "maximum": 60},
+                    "reply_to_message_id": {"type": "string"},
+                },
+                "additionalProperties": False,
+            },
             read_parent_messages,
             policy=ResolvedToolPolicy(read_only=True, open_world=True),
         ),
@@ -207,6 +225,7 @@ def child_mailbox_tools(
                         "enum": ["question", "progress", "response", "artifact_offer"],
                     },
                     "payload": {"type": "object"},
+                    "reply_to_message_id": {"type": "string"},
                 },
                 "required": ["kind", "payload"],
                 "additionalProperties": False,
@@ -334,17 +353,11 @@ async def _delegate(
     data = {
         "tasks": model_tasks,
         "background": background,
+        "wake_reason": "message_available"
+        if not background
+        and any(output.state.value in service._ACTIVE_STATES for output in outputs)
+        else "task_completed",
     }
-    usage = {
-        name: sum(float(output.usage.get(name, 0)) for output in outputs)
-        for name in ("cost_usd",)
-    }
-    usage.update(
-        {
-            name: sum(int(output.usage.get(name, 0)) for output in outputs)
-            for name in ("input_tokens", "output_tokens", "tool_rounds", "tool_calls")
-        }
-    )
     return _outcome(
         True,
         data,
@@ -363,7 +376,6 @@ async def _delegate(
                 ]
             }
         },
-        external_usage=usage,
     )
 
 
@@ -414,7 +426,7 @@ def agent_control_tools() -> list[ToolDefinition]:
             "Send a bounded message to an explicitly selected task, persistent Agent, or team. "
             "Task messages require kind; Agent and team messages are instructions. "
             "Team messages require explicit broadcast=true.",
-            _agent_message_schema(compatibility=True),
+            _agent_message_schema(),
             _send_routed_agent_message,
             validate=_validate_agent_message,
             policy=ResolvedToolPolicy(
@@ -622,7 +634,6 @@ def agent_control_tools() -> list[ToolDefinition]:
     ]
     schemas = {
         "stop_agent": _agent_stop_schema(),
-        "send_agent_message": _agent_message_schema(),
     }
     return [
         replace(
@@ -668,13 +679,14 @@ def _agent_stop_schema(*, compatibility: bool = False) -> dict[str, Any]:
     return schema
 
 
-def _agent_message_schema(*, compatibility: bool = False) -> dict[str, Any]:
-    schema: dict[str, Any] = {
+def _agent_message_schema() -> dict[str, Any]:
+    return {
         "type": "object",
         "properties": {
             "target_type": {"type": "string", "enum": ["task", "agent", "team"]},
             "target_id": {"type": "string", "minLength": 1},
             "payload": {"type": "object"},
+            "reply_to_message_id": {"type": "string"},
             "kind": {
                 "type": ["string", "null"],
                 "enum": ["instruction", "response", "cancel", None],
@@ -688,26 +700,6 @@ def _agent_message_schema(*, compatibility: bool = False) -> dict[str, Any]:
         "required": ["target_type", "target_id", "payload"],
         "additionalProperties": False,
     }
-    if compatibility:
-        schema["properties"]["task_id"] = {"type": "string"}
-        schema["required"] = ["payload"]
-        schema["oneOf"] = [
-            {
-                "required": ["target_type", "target_id"],
-                "not": {"required": ["task_id"]},
-            },
-            {
-                "required": ["task_id", "kind"],
-                "not": {
-                    "anyOf": [
-                        {"required": ["target_type"]},
-                        {"required": ["target_id"]},
-                        {"required": ["broadcast"]},
-                    ]
-                },
-            },
-        ]
-    return schema
 
 
 def resolve_agent_operation(
@@ -716,14 +708,8 @@ def resolve_agent_operation(
     """Resolve explicit routes to historical operations for execution and policy checks."""
     if name not in {"stop_agent", "send_agent_message"}:
         return name, dict(arguments)
-    historical_id = "agent_id" if name == "stop_agent" else "task_id"
-    if historical_id in arguments:
-        allowed = (
-            {historical_id}
-            if name == "stop_agent"
-            else {historical_id, "kind", "payload"}
-        )
-        if set(arguments) - allowed:
+    if name == "stop_agent" and "agent_id" in arguments:
+        if set(arguments) - {"agent_id"}:
             raise ValueError(
                 "legacy and explicit Agent target arguments cannot be combined"
             )
@@ -758,6 +744,11 @@ def resolve_agent_operation(
             "task_id": target_id,
             "kind": arguments["kind"],
             "payload": payload,
+            **(
+                {"reply_to_message_id": arguments["reply_to_message_id"]}
+                if "reply_to_message_id" in arguments
+                else {}
+            ),
         }
     if "kind" in arguments:
         raise ValueError("kind is permitted only for task messages")
@@ -1022,6 +1013,7 @@ async def _send_agent_message(
         session_id=context.session_id,
         kind=MailboxMessageKind(str(arguments["kind"])),
         payload=dict(arguments["payload"]),
+        reply_to_message_id=arguments.get("reply_to_message_id"),
     )
     return ToolOutcome.success(value)
 
@@ -1068,11 +1060,16 @@ async def _get_agent_task(
         return ToolOutcome.failure(
             "multi-Agent collaboration is not configured", code="agents_unavailable"
         )
+    timeout = min(float(arguments.get("timeout", 60)), 60)
+    if context.governor is not None:
+        remaining = context.governor.remaining_seconds()
+        if remaining is not None:
+            timeout = min(timeout, remaining)
     value = await context.collaboration.status(
         str(arguments["task_id"]),
         session_id=context.session_id,
         wait=bool(arguments.get("wait", False)),
-        timeout=float(arguments.get("timeout", 60)),
+        timeout=timeout,
     )
     return ToolOutcome.success(value)
 
@@ -1097,7 +1094,13 @@ async def _reserve_parent_budget(
     governor = context.governor
     if governor is None:
         return contracts
+    if context.collaboration is not None and hasattr(
+        governor, "attach_collaboration_budget"
+    ):
+        governor.attach_collaboration_budget(context.collaboration.repository)
     remaining = (await governor.current()).as_dict()["remaining"]
+    if hasattr(governor, "available_remaining"):
+        remaining = governor.available_remaining()
     count = len(contracts)
     rounds = int(remaining["tool_rounds"]) - 1
     if rounds < count:

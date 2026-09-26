@@ -41,8 +41,8 @@ from .specs import (
 
 
 EXPORT_FORMAT = "capslock-lifecycle-export"
-ARCHIVE_VERSION = 8
-SUPPORTED_ARCHIVE_VERSIONS = frozenset({3, 4, 5, 6, 7, ARCHIVE_VERSION})
+ARCHIVE_VERSION = 9
+SUPPORTED_ARCHIVE_VERSIONS = frozenset({3, 4, 5, 6, 7, 8, ARCHIVE_VERSION})
 MAX_ARCHIVE_RECORDS = 100_000
 
 

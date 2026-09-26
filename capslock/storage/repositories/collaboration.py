@@ -344,13 +344,18 @@ class CollaborationRepository(Repository):
     async def send_mailbox(
         self,
         *,
-        task_id: str,
+        task_id: str | None,
         parent_run_id: str,
         sender: str,
         recipient: str,
         kind: MailboxMessageKind,
         payload: dict[str, Any],
         ttl_seconds: int = 3600,
+        sender_address: str | None = None,
+        recipient_address: str | None = None,
+        reply_to_message_id: str | None = None,
+        worker_id: str | None = None,
+        owner_session_id: str | None = None,
     ) -> dict[str, Any]:
         if (sender, recipient) not in {
             ("parent", "child"),
@@ -361,30 +366,79 @@ class CollaborationRepository(Repository):
             raise ValueError("invalid agent mailbox route")
         if not isinstance(kind, MailboxMessageKind):
             raise ValueError("invalid agent mailbox message kind")
-        safe = redact(payload)
-        encoded = json.dumps(safe, ensure_ascii=False, sort_keys=True, default=str)
+        encoded = json.dumps(
+            redact(payload), ensure_ascii=False, sort_keys=True, default=str
+        )
         if len(encoded.encode("utf-8")) > 32_000:
             raise ValueError("agent mailbox message exceeds 32 KiB")
+        owner = await self.one(
+            "SELECT session_id FROM runs WHERE id=?", (parent_run_id,)
+        )
+        if owner is None or (
+            owner_session_id is not None and owner_session_id != owner["session_id"]
+        ):
+            raise ValueError("parent run does not belong to mailbox owner")
+        owner_session_id = str(owner["session_id"])
+        task = await self.get_task(task_id) if task_id is not None else None
+        if task_id is not None and (
+            task is None or task["owner_session_id"] != owner_session_id
+        ):
+            raise ValueError("child task does not exist or belongs to another owner")
+        if task is not None:
+            team_id, worker_id = task.get("team_id"), task.get("assigned_worker_id")
+        else:
+            worker = await self.one(
+                """SELECT w.team_id,t.session_id FROM agent_workers w
+                JOIN agent_teams t ON t.id=w.team_id WHERE w.id=?""",
+                (worker_id,),
+            )
+            if worker is None or worker["session_id"] != owner_session_id:
+                raise ValueError("worker does not belong to mailbox owner")
+            team_id = worker["team_id"]
+        parent_address = f"session:{owner_session_id}"
+        child_address = f"worker:{worker_id}" if worker_id else f"task:{task_id}"
+        expected_recipient = parent_address if recipient == "parent" else child_address
+        if recipient_address is not None and recipient_address != expected_recipient:
+            raise ValueError("mailbox recipient address does not match route")
+        recipient_address = expected_recipient
+        if sender_address is None:
+            sender_address = (
+                parent_address
+                if sender == "parent"
+                else child_address
+                if sender == "child"
+                else "system"
+            )
+        if reply_to_message_id is not None:
+            original = await self.mailbox_message(reply_to_message_id)
+            if (
+                original is None
+                or original.get("recipient_address") != sender_address
+                or original.get("sender_address") != recipient_address
+            ):
+                raise ValueError("mailbox reply does not match sender and recipient")
+        attempt = (
+            await self.one(
+                "SELECT id FROM agent_attempts WHERE task_id=? ORDER BY ordinal DESC LIMIT 1",
+                (task_id,),
+            )
+            if task_id
+            else None
+        )
         identifier = f"mail_{uuid.uuid4().hex}"
         created = datetime.now(UTC)
         expires = created + timedelta(seconds=min(max(ttl_seconds, 1), 86_400))
-        task = await self.get_task(task_id)
-        if task is None:
-            raise ValueError("child task does not exist")
-        attempt = await self.one(
-            "SELECT id FROM agent_attempts WHERE task_id=? ORDER BY ordinal DESC LIMIT 1",
-            (task_id,),
-        )
         await self.execute(
             """INSERT INTO agent_mailbox(id,task_id,parent_run_id,team_id,worker_id,attempt_id,
-               sender,recipient,message_kind,payload_json,payload_sha256,created_at,expires_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               sender,recipient,message_kind,payload_json,payload_sha256,created_at,expires_at,
+               sender_address,recipient_address,reply_to_message_id)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 identifier,
                 task_id,
                 parent_run_id,
-                task.get("team_id"),
-                task.get("assigned_worker_id"),
+                team_id,
+                worker_id,
                 None if attempt is None else str(attempt["id"]),
                 sender,
                 recipient,
@@ -393,9 +447,85 @@ class CollaborationRepository(Repository):
                 hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
                 created.isoformat(),
                 expires.isoformat(),
+                sender_address,
+                recipient_address,
+                reply_to_message_id,
             ),
         )
         return (await self.mailbox_message(identifier)) or {}
+
+    async def read_mailbox_batch(
+        self,
+        address: str,
+        *,
+        task_ids: list[str] | None = None,
+        limit: int = 32,
+        max_bytes: int = 65_536,
+        actionable_only: bool = False,
+        reply_to_message_id: str | None = None,
+    ) -> dict[str, Any]:
+        from .mailbox import bounded_messages
+
+        limit = min(max(int(limit), 1), 32)
+        max_bytes = min(max(int(max_bytes), 0), 65_536)
+        clause = "recipient_address=? AND delivery_suspended=0 AND status IN ('queued','delivered') AND (expires_at IS NULL OR expires_at>?)"
+        values: list[Any] = [address, now()]
+        if task_ids is not None:
+            # task-less messages are deliberately addressed to a persistent worker.
+            placeholders = ",".join("?" for _ in task_ids)
+            clause += f" AND (task_id IS NULL OR task_id IN ({placeholders}))"
+            values.extend(task_ids)
+        if reply_to_message_id is not None:
+            clause += " AND reply_to_message_id=?"
+            values.append(reply_to_message_id)
+        groups = ["message_kind IN ('instruction','question','response','cancel')"]
+        if not actionable_only:
+            groups.append("message_kind IN ('progress','artifact_offer')")
+        rows = []
+        for group in groups:
+            rows.append(
+                await self.all(
+                    f"SELECT * FROM agent_mailbox WHERE {clause} AND {group} ORDER BY created_at,id LIMIT ?",
+                    (*values, limit + 1),
+                )
+            )
+        active = [_mailbox(dict(row)) for row in rows[0]]
+        passive = [] if actionable_only else [_mailbox(dict(row)) for row in rows[1]]
+        priority = min(24, limit) if passive else limit
+        candidates = active[:priority] + passive + active[priority:]
+        return bounded_messages(candidates, limit=limit, max_bytes=max_bytes)
+
+    async def activate_suspended(self, address: str, task_ids: list[str]) -> int:
+        """Explicit follow-up/resume only: reactivate selected archival messages."""
+        placeholders = ",".join("?" for _ in task_ids)
+        return await self.execute(
+            f"UPDATE agent_mailbox SET delivery_suspended=0 WHERE recipient_address=? AND delivery_suspended=1 AND (task_id IS NULL OR task_id IN ({placeholders}))",
+            (address, *task_ids),
+        )
+
+    async def acknowledge_mailbox_batch(self, ids: list[str], *, address: str) -> None:
+        """Called only after the recipient database commits durable receipts."""
+        if not ids:
+            return
+        identifiers = list(dict.fromkeys(ids))
+        placeholders = ",".join("?" for _ in identifiers)
+        async with self.database.transaction() as connection:
+            rows = await (
+                await connection.execute(
+                    f"SELECT id,recipient_address,status FROM agent_mailbox WHERE id IN ({placeholders})",
+                    identifiers,
+                )
+            ).fetchall()
+            if len(rows) != len(identifiers) or any(
+                row["recipient_address"] != address
+                or row["status"] not in {"queued", "delivered", "acknowledged"}
+                for row in rows
+            ):
+                raise ValueError("mailbox messages do not belong to recipient")
+            await connection.execute(
+                f"UPDATE agent_mailbox SET status='acknowledged',delivered_at=coalesce(delivered_at,?),acknowledged_at=coalesce(acknowledged_at,?) WHERE id IN ({placeholders})",
+                (now(), now(), *identifiers),
+            )
 
     async def mailbox_message(self, identifier: str) -> dict[str, Any] | None:
         row = await self.one("SELECT * FROM agent_mailbox WHERE id=?", (identifier,))
@@ -408,51 +538,51 @@ class CollaborationRepository(Repository):
         recipient: str,
         mark_delivered: bool = True,
     ) -> list[dict[str, Any]]:
-        timestamp = now()
-        await self.execute(
-            """UPDATE agent_mailbox SET status='expired' WHERE task_id=? AND recipient=?
-               AND status IN ('queued','delivered') AND expires_at IS NOT NULL AND expires_at<=?""",
-            (task_id, recipient, timestamp),
-        )
-        if mark_delivered:
-            await self.execute(
-                """UPDATE agent_mailbox SET status='delivered',delivered_at=coalesce(delivered_at,?)
-                   WHERE task_id=? AND recipient=? AND status='queued'""",
-                (timestamp, task_id, recipient),
+        task = await self.get_task(task_id)
+        if task is None or recipient not in {"parent", "child"}:
+            return []
+        address = (
+            f"session:{task['owner_session_id']}"
+            if recipient == "parent"
+            else (
+                f"worker:{task['assigned_worker_id']}"
+                if task.get("assigned_worker_id")
+                else f"task:{task_id}"
             )
-        rows = await self.all(
-            """SELECT * FROM agent_mailbox WHERE task_id=? AND recipient=?
-               AND status IN ('queued','delivered') ORDER BY created_at,id""",
-            (task_id, recipient),
         )
-        return [_mailbox(dict(row)) for row in rows]
+        batch = await self.read_mailbox_batch(address, task_ids=[task_id])
+        messages = batch["messages"]
+        if mark_delivered and messages:
+            await self._mark_mailbox_delivered(messages)
+        return messages
 
     async def receive_worker_mailbox(
-        self, worker_id: str, *, mark_delivered: bool = True
+        self,
+        worker_id: str,
+        *,
+        mark_delivered: bool = True,
     ) -> list[dict[str, Any]]:
+        messages = (await self.read_mailbox_batch(f"worker:{worker_id}"))["messages"]
+        if mark_delivered and messages:
+            await self._mark_mailbox_delivered(messages)
+        return messages
+
+    async def _mark_mailbox_delivered(self, messages: list[dict[str, Any]]) -> None:
         timestamp = now()
+        identifiers = [message["id"] for message in messages]
+        placeholders = ",".join("?" for _ in identifiers)
         await self.execute(
-            """UPDATE agent_mailbox SET status='expired' WHERE worker_id=? AND recipient='child'
-               AND status IN ('queued','delivered') AND expires_at IS NOT NULL AND expires_at<=?""",
-            (worker_id, timestamp),
+            f"UPDATE agent_mailbox SET status='delivered',delivered_at=coalesce(delivered_at,?) WHERE id IN ({placeholders}) AND status='queued'",
+            (timestamp, *identifiers),
         )
-        if mark_delivered:
-            await self.execute(
-                """UPDATE agent_mailbox SET status='delivered',delivered_at=coalesce(delivered_at,?)
-                   WHERE worker_id=? AND recipient='child' AND status='queued'""",
-                (timestamp, worker_id),
-            )
-        rows = await self.all(
-            """SELECT * FROM agent_mailbox WHERE worker_id=? AND recipient='child'
-               AND status IN ('queued','delivered') ORDER BY created_at,id""",
-            (worker_id,),
-        )
-        return [_mailbox(dict(row)) for row in rows]
+        for message in messages:
+            if message["status"] == "queued":
+                message["status"], message["delivered_at"] = "delivered", timestamp
 
     async def acknowledge_mailbox(self, identifier: str, *, recipient: str) -> None:
         updated = await self.execute(
             """UPDATE agent_mailbox SET status='acknowledged',acknowledged_at=?
-               WHERE id=? AND recipient=? AND status='delivered'""",
+               WHERE id=? AND recipient=? AND status IN ('delivered','acknowledged')""",
             (now(), identifier, recipient),
         )
         if not updated:
@@ -1131,6 +1261,57 @@ class CollaborationRepository(Repository):
         await self.execute(
             "UPDATE agent_workspaces SET retained=1 WHERE task_id=?", (task_id,)
         )
+
+    async def parent_budget(self, run_id: str) -> dict[str, dict[str, float]]:
+        """Read settled attempts and live reservations once per owning run."""
+        rows = await self.all(
+            """SELECT a.state,a.usage_json,a.reservation_json
+               FROM agent_attempts a JOIN agent_tasks t ON t.id=a.task_id
+               WHERE t.parent_run_id=?""",
+            (run_id,),
+        )
+        settled = {
+            key: 0.0
+            for key in (
+                "input_tokens",
+                "output_tokens",
+                "cost_usd",
+                "tool_rounds",
+                "tool_calls",
+            )
+        }
+        reserved = {
+            key: 0.0 for key in ("tokens", "budget_usd", "tool_rounds", "tool_calls")
+        }
+        for row in rows:
+            reservation = json.loads(str(row["reservation_json"] or "{}"))
+            if not reservation.get("_account_usage_in_parent_session"):
+                continue
+            usage = json.loads(str(row["usage_json"] or "{}"))
+            for key in settled:
+                settled[key] += max(0.0, float(usage.get(key, 0) or 0))
+            if str(row["state"]) in {
+                "created",
+                "claimed",
+                "starting",
+                "running",
+                "suspended",
+            }:
+                for key, limit, used in (
+                    (
+                        "tokens",
+                        "max_tokens",
+                        int(usage.get("input_tokens", 0))
+                        + int(usage.get("output_tokens", 0)),
+                    ),
+                    ("budget_usd", "max_budget_usd", usage.get("cost_usd", 0)),
+                    ("tool_rounds", "max_tool_rounds", usage.get("tool_rounds", 0)),
+                    ("tool_calls", "max_tool_calls", usage.get("tool_calls", 0)),
+                ):
+                    reserved[key] += max(
+                        0.0, float(reservation.get(limit, 0) or 0) - float(used or 0)
+                    )
+        return {"settled": settled, "reserved": reserved}
 
 
 def _mailbox(row: dict[str, Any]) -> dict[str, Any]:

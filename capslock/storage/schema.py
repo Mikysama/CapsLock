@@ -2,7 +2,7 @@
 
 WORKSPACE_APPLICATION_ID = 0x434C4B32  # CLK2
 MEMORY_APPLICATION_ID = 0x434C4D32  # CLM2
-WORKSPACE_SCHEMA_VERSION = 21
+WORKSPACE_SCHEMA_VERSION = 22
 MEMORY_SCHEMA_VERSION = 6
 
 WORKSPACE_SCHEMA = """
@@ -80,7 +80,7 @@ CREATE TABLE run_steps (
   id TEXT PRIMARY KEY,
   run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
   ordinal INTEGER NOT NULL CHECK(ordinal>=0),
-  kind TEXT NOT NULL CHECK(kind IN ('model','tool','approval')),
+  kind TEXT NOT NULL CHECK(kind IN ('model','tool','approval','mailbox')),
   status TEXT NOT NULL CHECK(status IN ('running','waiting_approval','waiting_input','completed','failed','cancelled')),
   checkpoint_json TEXT CHECK(checkpoint_json IS NULL OR json_valid(checkpoint_json)),
   started_at TEXT NOT NULL,
@@ -713,11 +713,15 @@ CREATE TABLE agent_messages (
 ) STRICT;
 CREATE TABLE agent_mailbox (
   id TEXT PRIMARY KEY,
-  task_id TEXT NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
+  task_id TEXT REFERENCES agent_tasks(id) ON DELETE CASCADE,
   parent_run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
   team_id TEXT REFERENCES agent_teams(id) ON DELETE CASCADE,
   worker_id TEXT REFERENCES agent_workers(id) ON DELETE SET NULL,
   attempt_id TEXT REFERENCES agent_attempts(id) ON DELETE SET NULL,
+  sender_address TEXT,
+  recipient_address TEXT,
+  reply_to_message_id TEXT,
+  delivery_suspended INTEGER NOT NULL DEFAULT 0 CHECK(delivery_suspended IN (0,1)),
   sender TEXT NOT NULL CHECK(sender IN ('parent','child','system')),
   recipient TEXT NOT NULL CHECK(recipient IN ('parent','child')),
   message_kind TEXT NOT NULL CHECK(message_kind IN ('instruction','question','response','progress','artifact_offer','cancel')),
@@ -732,6 +736,28 @@ CREATE TABLE agent_mailbox (
 CREATE INDEX idx_agent_mailbox_delivery ON agent_mailbox(task_id,recipient,status,created_at);
 CREATE INDEX idx_agent_mailbox_worker_delivery
   ON agent_mailbox(worker_id,recipient,status,created_at);
+CREATE INDEX idx_agent_mailbox_address_pending ON agent_mailbox(recipient_address,created_at,id)
+  WHERE status IN ('queued','delivered');
+CREATE INDEX idx_agent_mailbox_address_actionable ON agent_mailbox(recipient_address,created_at,id)
+  WHERE status IN ('queued','delivered') AND message_kind IN ('instruction','question','response','cancel');
+CREATE INDEX idx_agent_mailbox_address_passive ON agent_mailbox(recipient_address,created_at,id)
+  WHERE status IN ('queued','delivered') AND message_kind IN ('progress','artifact_offer');
+CREATE TABLE mailbox_deliveries (
+  receipt_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+  recipient_session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  message_id TEXT NOT NULL,
+  task_id TEXT,
+  message_kind TEXT NOT NULL,
+  envelope_json TEXT NOT NULL CHECK(json_valid(envelope_json)),
+  envelope_sha256 TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'received' CHECK(status IN ('received','delivered','historical')),
+  received_at TEXT NOT NULL,
+  delivered_at TEXT,
+  UNIQUE(recipient_session_id,message_id)
+) STRICT;
+CREATE INDEX idx_mailbox_deliveries_pending ON mailbox_deliveries(recipient_session_id,run_id,receipt_sequence)
+  WHERE status='received';
 CREATE TABLE agent_outputs (
   task_id TEXT PRIMARY KEY REFERENCES agent_tasks(id) ON DELETE CASCADE,
   attempt_id TEXT REFERENCES agent_attempts(id) ON DELETE SET NULL,

@@ -45,11 +45,11 @@ Linux/macOS CI 都安装并检查 ripgrep、执行完整测试和离线门禁。
 
 | 数据 | 开发格式 | 兼容入口 |
 |---|---|---|
-| workspace SQLite | 21 | 6–20 backup-first 升级 |
+| workspace SQLite | 22 | 6–21 backup-first 升级 |
 | Memory SQLite | 6 | 保留原迁移行为 |
 | config | 14 | 3–13 备份后原子升级；13→14 不改默认配置 |
-| portable archive | 8 | 读取3–7，保留缺失字段为空 |
-| session JSON export | 8 | 现有导出接口；不新增独立 JSON 导入器 |
+| portable archive | 9 | 读取3–8，保留缺失字段为空 |
+| session JSON export | 9 | 现有导出接口；不新增独立 JSON 导入器 |
 | JSONL events | 3 | 仅增加可选 data 字段 |
 
 数据库备份位于数据库同目录 `backups/capslock-v<source>-<timestamp>.sqlite3`；配置备份为 `config.toml.v<source>-<timestamp>.bak`。升级先备份，失败恢复，重复启动不重复升级。
@@ -58,11 +58,11 @@ Linux/macOS CI 都安装并检查 ripgrep、执行完整测试和离线门禁。
 
 ## 本次验证记录（2026-09-26，Linux / Python 3.12）
 
-- 完整 pytest：1265 passed、1 skipped。
+- 完整 pytest：1296 passed、1 skipped（544.45 秒）。此后补充两个索引回归用例，最终数据库测试文件单独验证为 8 passed（9.89 秒）；最终测试集共 1299 项。
 - 固定离线内核门禁：60/60，通过；0 基础设施失败，0 Provider 调用。此次运行一次，三次重复稳定性字段保持 null，未伪造重复结果。
 - 普通磁盘 profile 与迁移回归包含在全量 pytest 中，覆盖备份、恢复及归档兼容。
 - 确定性 Agent 评测无回归；Memory 评测 100/100。
 - Ruff lint/format、compileall、依赖一致性、仓库卫生、diff 空白检查、wheel/sdist 构建、Twine 检查和版本一致性检查通过。
 - 未执行 macOS 本地验证、付费真实模型确认或发布部署。macOS 和完整发布流水线仍须 CI 验证。
 
-离线报告保存在本机 `/tmp/capslock-offline-2.7.6.4.json`；跨平台与完整发布流水线仍以 CI 结果为准。
+离线报告保存在本机 `/tmp/capslock-offline-2764-mailbox.json`；跨平台与完整发布流水线仍以 CI 结果为准。

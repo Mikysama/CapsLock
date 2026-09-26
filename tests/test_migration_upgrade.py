@@ -133,7 +133,7 @@ async def seed_layout(workspace, home):
         exported = await SessionManager(repositories, workspace=workspace).export(
             session.id, "session.json"
         )
-        assert json.loads((exported / "session.json").read_text())["version"] == 8
+        assert json.loads((exported / "session.json").read_text())["version"] == 9
     finally:
         await repositories.close()
         await memory.close()
@@ -185,7 +185,7 @@ def test_database_upgrade_rollback_and_retry_preserves_rows(tmp_path, monkeypatc
             await upgrade_workspace_schema(layout.database, connection)
             assert (await (await connection.execute("PRAGMA user_version")).fetchone())[
                 0
-            ] == 21
+            ] == 22
             row = await (
                 await connection.execute(
                     "SELECT " + ",".join(DETAIL_FIELDS) + " FROM model_calls"
@@ -257,7 +257,7 @@ def test_database_restoration_survives_migration_report_write_failure(
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("archive_version", [7, 8])
+@pytest.mark.parametrize("archive_version", [7, 8, 9])
 def test_portable_old_and_current_archives_keep_unknown_telemetry_null(
     tmp_path, archive_version
 ):
@@ -267,7 +267,7 @@ def test_portable_old_and_current_archives_keep_unknown_telemetry_null(
         with zipfile.ZipFile(archive) as bundle:
             files = {name: bundle.read(name) for name in bundle.namelist()}
         manifest = json.loads(files["manifest.json"])
-        assert manifest["version"] == 8
+        assert manifest["version"] == 9
         if archive_version == 7:
             data = json.loads(files["data.json"])
             for row in data["workspace"]["sessions"]:
@@ -281,6 +281,8 @@ def test_portable_old_and_current_archives_keep_unknown_telemetry_null(
                 files["data.json"]
             ).hexdigest()
             files["manifest.json"] = json.dumps(manifest).encode()
+        manifest["version"] = archive_version
+        files["manifest.json"] = json.dumps(manifest).encode()
         portable = tmp_path / "portable.clexport"
         with zipfile.ZipFile(portable, "w") as bundle:
             for name, content in files.items():
@@ -311,7 +313,7 @@ def test_portable_old_and_current_archives_keep_unknown_telemetry_null(
             ).fetchone() == (12, 7)
         roundtrip = service.export(tmp_path / "roundtrip.clexport")
         with zipfile.ZipFile(roundtrip) as bundle:
-            assert json.loads(bundle.read("manifest.json"))["version"] == 8
+            assert json.loads(bundle.read("manifest.json"))["version"] == 9
             row = json.loads(bundle.read("data.json"))["workspace"]["model_calls"][0]
             assert all(row[field] is None for field in DETAIL_FIELDS)
 

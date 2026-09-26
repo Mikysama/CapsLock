@@ -18,6 +18,7 @@ from .components import (
     CollaborationArtifactPublisher,
     CollaborationAudit,
     CollaborationMailbox,
+    child_address,
 )
 from .models import (
     AgentMessageKind,
@@ -29,7 +30,7 @@ from .models import (
 )
 from .verifier import AgentOutputVerifier, VerificationError
 from .workspace import AgentWorkspaceManager, WorkspaceSnapshot
-from .wakeup import MailboxWakeupRegistry
+from .wakeup import MailboxSnapshot, MailboxWakeupRegistry
 
 ChildRunner = Callable[
     [AgentTaskContract, WorkspaceSnapshot], Awaitable[dict[str, Any]]
@@ -89,6 +90,10 @@ class CollaborationService:
         self._attempts: dict[str, str] = {}
         self._workers: dict[str, str] = {}
         self._mailbox_wakeup = MailboxWakeupRegistry()
+        self._mailbox_locks: dict[str, asyncio.Lock] = {}
+        self._mailbox_receivers: dict[str, Any] = {}
+        self._foreground: dict[str, set[str]] = {}
+        self._wait_cursors: dict[str, MailboxSnapshot] = {}
         # Admission is owned by the workspace service, not by an individual
         # delegate() call.  This is the actual max-concurrency boundary.
         self._semaphore = asyncio.Semaphore(self.max_concurrency)
@@ -100,6 +105,7 @@ class CollaborationService:
             active_states=set(self._ACTIVE_STATES),
             cancel=self.cancel,
             notify=self._notify_mailbox,
+            mailbox_lock=self.mailbox_lock,
         )
         self._artifact_publisher = CollaborationArtifactPublisher(
             repository=repository,
@@ -192,7 +198,7 @@ class CollaborationService:
                         contract.task_id,
                         worker_id,
                         reservation=dict(contract.limits),
-                        account_usage=background,
+                        account_usage=True,
                     )
                     self._attempts[contract.task_id] = str(claim["attempt_id"])
                     self._workers[contract.task_id] = worker_id
@@ -243,20 +249,43 @@ class CollaborationService:
                 )
                 for contract in contracts
             ]
+        run_id = contracts[0].parent_run_id
+        self._foreground.setdefault(run_id, set()).update(identifiers)
         try:
-            return await asyncio.gather(*tasks)
+            activity = await self.wait_for_activity(
+                identifiers,
+                f"session:{session_id}",
+                deadline=None,
+            )
+            if activity["wake_reason"] == "message_available":
+                outputs = []
+                for contract, task in zip(contracts, tasks, strict=True):
+                    if task.done() and not task.cancelled():
+                        outputs.append(task.result())
+                    else:
+                        record = await self.repository.get_task(contract.task_id)
+                        outputs.append(
+                            ValidatedAgentOutput(
+                                task_id=contract.task_id,
+                                state=AgentTaskState(str(record["state"])),
+                                summary="Child still running; parent mailbox requires attention.",
+                            )
+                        )
+                return outputs
+            outputs = await asyncio.gather(*tasks)
+            self._foreground[run_id].difference_update(identifiers)
+            for contract, task in zip(contracts, tasks, strict=True):
+                self._background_done(contract.task_id, task)
+            return outputs
         except asyncio.CancelledError:
             for task in tasks:
                 if not task.done():
                     task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+            self._foreground.get(run_id, set()).difference_update(identifiers)
+            for contract, task in zip(contracts, tasks, strict=True):
+                self._background_done(contract.task_id, task)
             raise
-        finally:
-            for contract in contracts:
-                self._tasks.pop(contract.task_id, None)
-                self._contracts.pop(contract.task_id, None)
-                self._attempts.pop(contract.task_id, None)
-                self._workers.pop(contract.task_id, None)
 
     def _background_done(
         self, task_id: str, task: asyncio.Task[ValidatedAgentOutput]
@@ -362,16 +391,18 @@ class CollaborationService:
                 raise ValueError("child task does not belong to this session")
         if parent_run_id is None and session_id is None:
             raise ValueError("child task ownership scope is required")
+        activity: dict[str, Any] = {}
         if wait and task_id in self._tasks:
-            try:
-                async with asyncio.timeout(min(max(timeout, 0.1), 60)):
-                    await asyncio.shield(self._tasks[task_id])
-            except TimeoutError:
-                pass
+            activity = await self.wait_for_activity(
+                [task_id],
+                f"session:{record['owner_session_id']}",
+                deadline=asyncio.get_running_loop().time() + min(max(timeout, 0), 60),
+            )
             record = await self.repository.get_task(task_id)
             assert record is not None
         output = await self.repository.get_output(task_id)
         return {
+            **activity,
             "task_id": task_id,
             "state": str(record["state"]),
             "error": record.get("error"),
@@ -421,6 +452,7 @@ class CollaborationService:
         session_id: str | None = None,
         kind: MailboxMessageKind,
         payload: dict[str, Any],
+        reply_to_message_id: str | None = None,
     ) -> dict[str, Any]:
         return await self._mailbox.send_message(
             task_id,
@@ -428,22 +460,192 @@ class CollaborationService:
             session_id=session_id,
             kind=kind,
             payload=payload,
+            reply_to_message_id=reply_to_message_id,
         )
 
-    async def register_mailbox_runtime(self, task_id: str) -> asyncio.Event:
-        """Register a running child runtime for low-latency mailbox wakeups."""
-        return await self._mailbox_wakeup.register(str(task_id))
+    def mailbox_lock(self, address: str) -> asyncio.Lock:
+        return self._mailbox_locks.setdefault(address, asyncio.Lock())
 
-    async def unregister_mailbox_runtime(self, task_id: str) -> None:
-        await self._mailbox_wakeup.unregister(str(task_id))
+    async def mailbox_address(self, task_id: str, recipient: str = "child") -> str:
+        task = await self.repository.get_task(task_id)
+        if task is None:
+            raise ValueError("child task does not exist")
+        return (
+            child_address(task)
+            if recipient == "child"
+            else f"session:{task['owner_session_id']}"
+        )
+
+    async def register_mailbox_runtime(self, address: str) -> MailboxSnapshot:
+        if ":" not in address:
+            address = await self.mailbox_address(address)
+        return await self._mailbox_wakeup.register(address)
+
+    async def unregister_mailbox_runtime(self, address: str) -> None:
+        if ":" not in address:
+            address = await self.mailbox_address(address)
+        self._mailbox_receivers.pop(address, None)
+        self._wait_cursors.pop(address, None)
+        await self._mailbox_wakeup.unregister(address)
+
+    def bind_mailbox_receiver(self, address: str, receiver: Any) -> None:
+        self._mailbox_receivers[address] = receiver
+
+    def unbind_mailbox_receiver(self, address: str) -> None:
+        self._mailbox_receivers.pop(address, None)
+
+    async def mailbox_snapshot(self, address: str) -> MailboxSnapshot | None:
+        return await self._mailbox_wakeup.snapshot(address)
+
+    async def wait_for_mailbox_since(
+        self,
+        address: str,
+        previous: MailboxSnapshot,
+        timeout: float | None = None,
+        *,
+        actionable_only: bool = False,
+    ) -> MailboxSnapshot | None:
+        return await self._mailbox_wakeup.wait_since(
+            address, previous, timeout, actionable_only=actionable_only
+        )
 
     async def wait_for_mailbox(
         self, task_id: str, timeout: float | None = None
     ) -> bool:
-        return await self._mailbox_wakeup.wait(str(task_id), timeout)
+        address = task_id if ":" in task_id else await self.mailbox_address(task_id)
+        return await self._mailbox_wakeup.wait(address, timeout)
 
-    async def _notify_mailbox(self, task_id: str) -> None:
-        await self._mailbox_wakeup.notify(str(task_id))
+    async def _notify_mailbox(self, address: str, actionable: bool = True) -> bool:
+        return await self._mailbox_wakeup.notify(address, actionable=actionable)
+
+    async def receiver_scope(
+        self, session_id: str, run_id: str, resume_from_run_id: str | None = None
+    ) -> list[str]:
+        run_ids = [run_id]
+        previous = resume_from_run_id
+        while previous and previous not in run_ids:
+            row = await self.repository.one(
+                "SELECT session_id,parent_run_id FROM runs WHERE id=?", (previous,)
+            )
+            if row is None or str(row["session_id"]) != session_id:
+                break
+            run_ids.append(previous)
+            previous = row["parent_run_id"]
+        placeholders = ",".join("?" for _ in run_ids)
+        rows = await self.repository.all(
+            f"SELECT id FROM agent_tasks WHERE owner_session_id=? AND parent_run_id IN ({placeholders})",
+            (session_id, *run_ids),
+        )
+        return [str(row["id"]) for row in rows]
+
+    async def wait_for_activity(
+        self, task_ids: Sequence[str], receiver: str, deadline: float | None
+    ) -> dict[str, Any]:
+        """Wait for owned tasks or actionable mail without cancelling child work."""
+        snapshot = await self._mailbox_wakeup.snapshot(receiver)
+        previous = self._wait_cursors.get(
+            receiver,
+            MailboxSnapshot(
+                generation=snapshot.generation if snapshot else 0,
+            ),
+        )
+        bound = self._mailbox_receivers.get(receiver)
+        if bound is not None and getattr(bound, "_version", None) is not None:
+            previous = bound._version
+            if int(getattr(bound, "actionable_count", 0)):
+                return {
+                    "wake_reason": "message_available",
+                    "pending_message_count": bound.actionable_count,
+                }
+        running = [self._tasks[key] for key in task_ids if key in self._tasks]
+        pending = [task for task in running if not task.done()]
+        if not pending:
+            return {"wake_reason": "task_completed", "pending_message_count": 0}
+        waiter = None
+        try:
+            while pending:
+                remaining = (
+                    None
+                    if deadline is None
+                    else max(0.0, deadline - asyncio.get_running_loop().time())
+                )
+                if remaining == 0:
+                    return {"wake_reason": "timeout", "pending_message_count": 0}
+                if snapshot is not None:
+                    waiter = asyncio.create_task(
+                        self._mailbox_wakeup.wait_since(
+                            receiver,
+                            previous,
+                            timeout=min(30, remaining) if remaining is not None else 30,
+                            actionable_only=True,
+                        )
+                    )
+                    watched = [*pending, waiter]
+                else:
+                    watched = pending
+                done, _ = await asyncio.wait(
+                    watched, timeout=remaining, return_when=asyncio.FIRST_COMPLETED
+                )
+                if not done:
+                    return {"wake_reason": "timeout", "pending_message_count": 0}
+                if waiter is not None and waiter in done:
+                    current = waiter.result()
+                    waiter = None
+                    if current is not None and not current.closed:
+                        self._wait_cursors[receiver] = current
+                        bound = self._mailbox_receivers.get(receiver)
+                        count = max(1, int(getattr(bound, "actionable_count", 0)))
+                        return {
+                            "wake_reason": "message_available",
+                            "pending_message_count": count,
+                        }
+                    if current is not None and current.closed:
+                        snapshot = None
+                elif waiter is not None:
+                    waiter.cancel()
+                    await asyncio.gather(waiter, return_exceptions=True)
+                    waiter = None
+                pending = [task for task in pending if not task.done()]
+            return {"wake_reason": "task_completed", "pending_message_count": 0}
+        finally:
+            if waiter is not None:
+                waiter.cancel()
+                await asyncio.gather(waiter, return_exceptions=True)
+
+    async def wait_foreground(
+        self, run_id: str, deadline: float | None = None
+    ) -> dict[str, Any]:
+        identifiers = sorted(self._foreground.get(run_id, set()))
+        if not identifiers:
+            return {
+                "wake_reason": "task_completed",
+                "pending_message_count": 0,
+                "tasks": [],
+            }
+        row = await self.repository.one(
+            "SELECT session_id FROM runs WHERE id=?", (run_id,)
+        )
+        activity = await self.wait_for_activity(
+            identifiers, f"session:{row['session_id']}", deadline
+        )
+        statuses = [await self.status(key, parent_run_id=run_id) for key in identifiers]
+        for key in identifiers:
+            task = self._tasks.get(key)
+            if activity["wake_reason"] == "task_completed" and (
+                task is None or task.done()
+            ):
+                self._foreground.get(run_id, set()).discard(key)
+                if task is not None:
+                    self._background_done(key, task)
+        return {**activity, "tasks": statuses}
+
+    async def cancel_foreground(self, run_id: str) -> None:
+        for task_id in list(self._foreground.pop(run_id, set())):
+            task = self._tasks.get(task_id)
+            if task is not None and not task.done():
+                await self.cancel(task_id)
+            if task is not None:
+                self._background_done(task_id, task)
 
     async def drain_child_messages(
         self, task_id: str, *, parent_run_id: str
@@ -479,6 +681,24 @@ class CollaborationService:
         parent_run_id: str | None = None,
         session_id: str | None = None,
     ) -> list[dict[str, Any]]:
+        task = await self.repository.get_task(task_id)
+        if (
+            task is None
+            or (
+                session_id is not None
+                and str(task.get("owner_session_id")) != session_id
+            )
+            or (
+                parent_run_id is not None
+                and str(task["parent_run_id"]) != parent_run_id
+            )
+        ):
+            raise ValueError("child task does not belong to this controller")
+        if parent_run_id is None and session_id is None:
+            raise ValueError("child task ownership scope is required")
+        receiver = self._mailbox_receivers.get(f"session:{task['owner_session_id']}")
+        if receiver is not None:
+            return await receiver.receive_messages(task_id=task_id)
         return await self._mailbox.read_messages(
             task_id, parent_run_id=parent_run_id, session_id=session_id
         )
@@ -501,14 +721,44 @@ class CollaborationService:
         parent_run_id: str,
         kind: MailboxMessageKind,
         payload: dict[str, Any],
+        reply_to_message_id: str | None = None,
     ) -> dict[str, Any]:
         return await self._mailbox.send_child_message(
-            task_id, parent_run_id=parent_run_id, kind=kind, payload=payload
+            task_id,
+            parent_run_id=parent_run_id,
+            kind=kind,
+            payload=payload,
+            reply_to_message_id=reply_to_message_id,
         )
 
     async def read_child_messages(
-        self, task_id: str, *, parent_run_id: str
+        self,
+        task_id: str,
+        *,
+        parent_run_id: str,
+        wait: bool = False,
+        timeout: float = 60,
+        reply_to_message_id: str | None = None,
     ) -> list[dict[str, Any]]:
+        task = await self.repository.get_task(task_id)
+        if task is None or str(task["parent_run_id"]) != parent_run_id:
+            raise ValueError("child task does not belong to this run")
+        address = child_address(task)
+        receiver = self._mailbox_receivers.get(address)
+        if receiver is not None:
+            if wait:
+                await receiver.wait_for_message(
+                    min(max(timeout, 0), 60), reply_to_message_id=reply_to_message_id
+                )
+            return await receiver.receive_messages(
+                task_id=task_id, reply_to_message_id=reply_to_message_id
+            )
+        if wait:
+            previous = await self._mailbox_wakeup.snapshot(address)
+            if previous is not None:
+                await self._mailbox_wakeup.wait_since(
+                    address, previous, min(max(timeout, 0), 60), actionable_only=True
+                )
         return await self._mailbox.read_child_messages(
             task_id, parent_run_id=parent_run_id
         )
@@ -795,27 +1045,41 @@ class CollaborationService:
         for worker in workers:
             target = await self.repository.one(
                 """SELECT id,parent_run_id FROM agent_tasks WHERE assigned_worker_id=?
-                   ORDER BY CASE WHEN state IN ('created','ready','claimed','running','waiting_approval')
-                                 THEN 0 ELSE 1 END,created_at DESC LIMIT 1""",
+                   AND state IN ('created','ready','claimed','running','waiting_approval')
+                   ORDER BY created_at DESC,id LIMIT 1""",
                 (str(worker["id"]),),
             )
-            if target is None:
-                continue
-            delivered_message = await self.repository.send_mailbox(
-                task_id=str(target["id"]),
-                parent_run_id=str(target["parent_run_id"]),
+            parent_run_id = (
+                str(target["parent_run_id"]) if target else source_parent_run_id
+            )
+            if not parent_run_id:
+                owner_run = await self.repository.one(
+                    "SELECT id FROM runs WHERE session_id=? ORDER BY started_at DESC,id LIMIT 1",
+                    (session_id,),
+                )
+                if owner_run is None:
+                    raise ValueError("team owner has no run for mailbox provenance")
+                parent_run_id = str(owner_run["id"])
+            address = f"worker:{worker['id']}"
+            delivered_message = await self._mailbox._send(
+                address,
+                task_id=str(target["id"]) if target else None,
+                parent_run_id=parent_run_id,
+                worker_id=str(worker["id"]),
+                owner_session_id=session_id,
                 sender="system",
                 recipient="child",
+                sender_address=f"worker:{source_agent_id}"
+                if source_agent_id
+                else f"session:{session_id}",
                 kind=MailboxMessageKind.INSTRUCTION,
                 payload={
                     "from_agent_id": source_agent_id or "controller",
                     "content_trust": "untrusted_agent",
                     "payload": payload,
                 },
-                ttl_seconds=self.message_ttl_seconds,
             )
             delivered.append(delivered_message)
-            await self._notify_mailbox(str(target["id"]))
         return {
             "team_id": team_id,
             "broadcast": broadcast,

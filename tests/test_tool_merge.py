@@ -204,6 +204,17 @@ def test_catalog_keeps_only_explicitly_granted_historical_definitions():
         ("stop_agent_task", {"task_id": "t"}, "stop_agent_task"),
         (
             "send_agent_message",
+            {
+                "target_type": "task",
+                "target_id": "t",
+                "kind": "response",
+                "payload": {},
+                "reply_to_message_id": "message",
+            },
+            "send_agent_message",
+        ),
+        (
+            "send_agent_message",
             {"target_type": "team", "target_id": "t", "broadcast": True, "payload": {}},
             "send_team_message",
         ),
@@ -243,7 +254,8 @@ def test_merged_and_historical_permission_resume_executes_once(
             runtime = ToolRuntime([tool], middleware=(PermissionMiddleware(engine),))
             model_arguments = dict(arguments)
             if null_placeholders and name == "send_agent_message":
-                model_arguments["kind"] = None
+                model_arguments.setdefault("kind", None)
+                model_arguments.setdefault("reply_to_message_id", None)
             model = FakeChatModel(
                 ModelResponse(
                     ModelMessage(

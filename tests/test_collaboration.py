@@ -546,7 +546,7 @@ def test_fresh_workspace_contains_collaboration_tables(tmp_path: Path) -> None:
         )
         try:
             version = await repositories.database.fetch_one("PRAGMA user_version")
-            assert int(version[0]) == 21
+            assert int(version[0]) == 22
             tables = await repositories.database.fetch_all(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'agent_%'"
             )

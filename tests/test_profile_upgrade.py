@@ -40,7 +40,7 @@ def test_workspace_upgrade_preserves_sessions_and_unknown_usage(tmp_path: Path) 
         repo = await WorkspaceRepositories.open(path, workspace=tmp_path)
         try:
             version = await repo.database.fetch_one("PRAGMA user_version")
-            assert version[0] == 21
+            assert version[0] == 22
             session = await repo.sessions.create("old-model")
             assert session.model_profile is None
             selected = await repo.sessions.set_model_profile(

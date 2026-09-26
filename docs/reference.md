@@ -65,7 +65,7 @@ Markdown 镜像位于 `.capslock/state/plans/<session-id>/<plan-id>.md`。数据
 
 内置父 Agent 工具目录在 Shell、Worktree、Agent 功能均开启时有 **49 个公开工具**（不含动态 MCP、插件、LSP）。`agents.enabled=false` 时不注册 Agent 控制与委派工具。`stop_agent` 使用 `target_type=task/agent` 和 `target_id`，分别停止任务或 worker。
 
-`create_file`、`get_task`、`stop_agent_task`、父 Agent 的 `send_team_message` 四个历史执行定义保留，用于旧会话/检查点恢复；它们不进入模型 schema、工具发现或候选列表。旧 `stop_agent(agent_id)` 和 `send_agent_message(task_id, kind, payload)` 参数仍可恢复。子 Agent 的受限 `send_team_message` 邮箱协议保持原状。权限仍按原 Agent 操作匹配；旧允许规则不会扩展到新增目标，相关旧名称上的 deny/ask 仍生效。文件创建与精确任务查询也保留旧入口的限制。
+`create_file`、`get_task`、`stop_agent_task`、父 Agent 的 `send_team_message` 四个历史执行定义保留，用于旧会话/检查点恢复；它们不进入模型 schema、工具发现或候选列表。旧 `stop_agent(agent_id)` 参数仍可恢复。`send_agent_message` 的模型与执行接口统一要求 `target_type` 和 `target_id`，不再接受 `task_id` 参数；旧参数形式的未完成调用在重新执行校验时返回 `invalid_tool_arguments`，不会发送消息。历史记录仍可读取和导出，需要继续发送时应使用新参数发起调用。task 回复可携带 `reply_to_message_id`，父子双向回复均校验原消息的收发地址。子 Agent 的受限 `send_team_message` 邮箱协议保持原状。权限仍按原 Agent 操作匹配；旧允许规则不会扩展到新增目标，相关旧名称上的 deny/ask 仍生效。文件创建与精确任务查询也保留旧入口的限制。
 
 `list_files` 返回 `entries=[{path,type}]`、`count`、`offset`、`next_offset`、`truncated`、`stop_reason`，保留 `files` 字段（当前页的文件路径）。每页按路径排序；扫描最多 `max_files` 个目录项，达到扫描上限时返回 `stop_reason=scan_limit`，只对该有界快照分页。目录发生变化时应从 offset 0 重新读取；递归/模式查询使用 `glob_files`。
 
@@ -285,7 +285,9 @@ worker workspace 支持 `snapshot`、`worktree`、`shared_read`。前两者记�
 
 team task 只有在全部依赖成功后才从 blocked 转为 ready，同一 worker 同时只运行一个任务；claim token 与 attempt ordinal 防止重复领取。每次 attempt 记录预算 reserve/settle/release ledger、child approval link 和 checkpoint。恢复必须复用原 attempt 与 child session/workspace，并重新验证 contract digest；只有显式 resumable checkpoint 可以恢复，未知副作用不得自动重放。子快照排除 `.git`、`.capslock`、环境文件和符号链接，并使用自己的 workspace/memory 数据库。后台任务通过 `agent_mailbox` 交换 instruction/question/response/progress/artifact offer/cancel，team message 可点对点或广播；消息先脱敏并限制为 32 KiB，读取时复验 SHA-256，状态为 queued/delivered/acknowledged/expired，正文始终视为不可信数据。`AgentOutputVerifier` 校验输出对象、allowlist 路径、必需检查、文件大小和 SHA-256；未通过的输出只返回失败诊断。
 
-workspace schema 21 使用 Agent team/worker/task/dependency/attempt/checkpoint/budget/approval/workspace/mailbox、performance span、Tool invocation、input request、session lineage、active compaction、episodic document、session worktree 与 Plan Mode 表保存可恢复状态、审计与验证结果。Agent capability 以校验过 digest 的 task contract 为权威来源，citation 以终态 run event 为权威来源。portable archive 默认不包含 artifact 正文，也不包含可重建的 episodic 与摘要分段索引。
+workspace schema 22 使用 Agent team/worker/task/dependency/attempt/checkpoint/budget/approval/workspace/mailbox、performance span、Tool invocation、input request、session lineage、active compaction、episodic document、session worktree 与 Plan Mode 表保存可恢复状态、审计与验证结果。Agent capability 以校验过 digest 的 task contract 为权威来源，citation 以终态 run event 为权威来源。portable archive 默认不包含 artifact 正文，也不包含可重建的 episodic 与摘要分段索引。
+
+活跃父子 Agent 由运行时自动收信；消息变更触发通知，活跃端每 30 秒只读补查。每批最多 32 封、64 KiB，并受剩余上下文预算限制。问题、回复和指令可让协作等待提前返回；普通进展不单独触发模型调用。空闲 worker 和已结束运行的来信只排队，必须显式 follow-up 或恢复才处理。ACK 表示接收端已可靠保存，不能作为模型完成请求的证明。两套 TUI 和 stdio/JSONL 使用可选 `context_updated.data.mailbox` 只展示数量、大小、活跃状态和唤醒原因，不在诊断中输出正文。完整语义、崩溃恢复与性能验证见 [Agent 通信与可靠投递](agent-communication.md)。
 
 ## 记忆契约
 

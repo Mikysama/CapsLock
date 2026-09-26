@@ -21,7 +21,24 @@ async def upgrade_workspace_schema(
     if source_version is None:
         row = await (await connection.execute("PRAGMA user_version")).fetchone()
         source_version = int(row[0])
-    if source_version not in {6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20}:
+    if source_version not in {
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+    }:
         raise ValueError(f"unsupported workspace upgrade source: {source_version}")
     checkpoint = await connection.execute("PRAGMA wal_checkpoint(FULL)")
     await checkpoint.close()
@@ -191,6 +208,8 @@ async def upgrade_workspace_schema(
             await connection.execute("PRAGMA user_version=21")
             await _validate_integrity(connection, "workspace")
             await connection.commit()
+        if source_version < 22:
+            await _upgrade_workspace_twenty_two(connection)
         await _validate_integrity(connection, "workspace")
     except BaseException as exc:
         await connection.rollback()
@@ -1719,3 +1738,87 @@ CREATE INDEX IF NOT EXISTS idx_memory_accesses_session
 PRAGMA user_version=6;
 COMMIT;
 """
+
+
+async def _upgrade_workspace_twenty_two(connection: aiosqlite.Connection) -> None:
+    """Rebuild only changed tables in one transaction; preserve their identities."""
+    from .schema import WORKSPACE_SCHEMA
+
+    await connection.execute("BEGIN IMMEDIATE")
+    columns = {
+        str(row[1])
+        for row in await (
+            await connection.execute("PRAGMA table_info(agent_mailbox)")
+        ).fetchall()
+    }
+    if "recipient_address" not in columns:
+        start = WORKSPACE_SCHEMA.index("CREATE TABLE agent_mailbox (")
+        end = WORKSPACE_SCHEMA.index("CREATE TABLE mailbox_deliveries (", start)
+        definition = WORKSPACE_SCHEMA[start:end]
+        await connection.execute(
+            "ALTER TABLE agent_mailbox RENAME TO agent_mailbox_v21"
+        )
+        await connection.execute("DROP INDEX IF EXISTS idx_agent_mailbox_delivery")
+        await connection.execute(
+            "DROP INDEX IF EXISTS idx_agent_mailbox_worker_delivery"
+        )
+        for statement in definition.split(";"):
+            if statement.strip():
+                await connection.execute(statement)
+        old_columns = [
+            str(row[1])
+            for row in await (
+                await connection.execute("PRAGMA table_info(agent_mailbox_v21)")
+            ).fetchall()
+        ]
+        names = ",".join(old_columns)
+        await connection.execute(
+            f"INSERT INTO agent_mailbox({names}) SELECT {names} FROM agent_mailbox_v21"
+        )
+        await connection.execute("""UPDATE agent_mailbox SET
+            sender_address=CASE WHEN sender='parent' THEN
+              'session:' || (SELECT owner_session_id FROM agent_tasks WHERE id=agent_mailbox.task_id)
+              WHEN sender='child' THEN CASE WHEN worker_id IS NOT NULL THEN 'worker:'||worker_id ELSE 'task:'||task_id END END,
+            recipient_address=CASE WHEN recipient='parent' THEN
+              'session:' || (SELECT owner_session_id FROM agent_tasks WHERE id=agent_mailbox.task_id)
+              ELSE CASE WHEN worker_id IS NOT NULL THEN 'worker:'||worker_id ELSE 'task:'||task_id END END""")
+        await connection.execute("DROP TABLE agent_mailbox_v21")
+    columns = {
+        str(row[1])
+        for row in await (
+            await connection.execute("PRAGMA table_info(agent_mailbox)")
+        ).fetchall()
+    }
+    if "delivery_suspended" not in columns:
+        await connection.execute(
+            "ALTER TABLE agent_mailbox ADD COLUMN delivery_suspended INTEGER NOT NULL DEFAULT 0 CHECK(delivery_suspended IN (0,1))"
+        )
+    start = WORKSPACE_SCHEMA.index("CREATE TABLE mailbox_deliveries (")
+    end = WORKSPACE_SCHEMA.index("CREATE TABLE agent_outputs (", start)
+    for statement in (
+        WORKSPACE_SCHEMA[start:end]
+        .replace(
+            "CREATE TABLE mailbox_deliveries",
+            "CREATE TABLE IF NOT EXISTS mailbox_deliveries",
+        )
+        .replace("CREATE INDEX idx_mailbox", "CREATE INDEX IF NOT EXISTS idx_mailbox")
+        .split(";")
+    ):
+        if statement.strip():
+            await connection.execute(statement)
+    schema_row = await (
+        await connection.execute("SELECT sql FROM sqlite_master WHERE name='run_steps'")
+    ).fetchone()
+    if "'mailbox'" not in str(schema_row[0]):
+        start = WORKSPACE_SCHEMA.index("CREATE TABLE run_steps (")
+        end = WORKSPACE_SCHEMA.index("CREATE TABLE run_events (", start)
+        definition = WORKSPACE_SCHEMA[start:end].replace(
+            "CREATE TABLE run_steps", "CREATE TABLE run_steps_v22"
+        )
+        await connection.execute(definition)
+        await connection.execute("INSERT INTO run_steps_v22 SELECT * FROM run_steps")
+        await connection.execute("DROP TABLE run_steps")
+        await connection.execute("ALTER TABLE run_steps_v22 RENAME TO run_steps")
+    await connection.execute("PRAGMA user_version=22")
+    await _validate_integrity(connection, "workspace")
+    await connection.commit()

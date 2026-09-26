@@ -173,7 +173,7 @@ _BUDGET = _record(
 _MESSAGE = _record(
     {
         "id": _STRING,
-        "task_id": _STRING,
+        "task_id": _NULL_STRING,
         "parent_run_id": _STRING,
         "team_id": _NULL_STRING,
         "worker_id": _NULL_STRING,
@@ -188,7 +188,17 @@ _MESSAGE = _record(
         "expires_at": _NULL_STRING,
         "delivered_at": _NULL_STRING,
         "acknowledged_at": _NULL_STRING,
-    }
+        "sender_address": _NULL_STRING,
+        "recipient_address": _NULL_STRING,
+        "reply_to_message_id": _NULL_STRING,
+        "receiver_active": _BOOLEAN,
+    },
+    optional=(
+        "sender_address",
+        "recipient_address",
+        "reply_to_message_id",
+        "receiver_active",
+    ),
 )
 _TEAM_MESSAGE = _record(
     {
@@ -252,12 +262,15 @@ _AGENT_OUTPUT_FIELDS = {
 _AGENT_OUTPUT = _record(_AGENT_OUTPUT_FIELDS)
 _AGENT_STATUS = _record(
     {
+        "wake_reason": _STRING,
+        "pending_message_count": _INTEGER,
         "task_id": _STRING,
         "state": _STRING,
         "error": _NULL_STRING,
         "child_run_id": _NULL_STRING,
         "output": _nullable(_AGENT_OUTPUT),
-    }
+    },
+    optional=("wake_reason", "pending_message_count"),
 )
 _PLAN_DECISION = _record(
     {
@@ -317,7 +330,9 @@ _SCHEMAS = {
                 )
             ),
             "background": _BOOLEAN,
-        }
+            "wake_reason": _STRING,
+        },
+        optional=("wake_reason",),
     ),
     "edit_file": _FILE_ACTION,
     "edit_notebook": _FILE_ACTION,
@@ -421,6 +436,9 @@ _SCHEMAS = {
     ),
     "publish_agent_artifact": _record({"published": _BOOLEAN, "path": _STRING}),
     "read_agent_messages": _record({"messages": _array(_MESSAGE)}),
+    "read_parent_messages": _record({"messages": _array(_MESSAGE)}),
+    "send_parent_message": _MESSAGE,
+    "ack_parent_message": _record({"acknowledged": _BOOLEAN}),
     "read_file": _record(
         {
             "path": _STRING,

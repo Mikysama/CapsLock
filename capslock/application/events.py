@@ -1,11 +1,15 @@
 """Canonical public run-event envelope shared by local transports."""
 
 from ..domain import AgentEvent
+from .mailbox import mailbox_metadata
 
 EVENT_SCHEMA_VERSION = 3
 
 
 def event_record(event: AgentEvent) -> dict[str, object]:
+    data = event.data
+    if "mailbox" in data:
+        data = {**data, "mailbox": mailbox_metadata(data["mailbox"])}
     return {
         "schema_version": EVENT_SCHEMA_VERSION,
         "sequence": event.sequence,
@@ -18,5 +22,5 @@ def event_record(event: AgentEvent) -> dict[str, object]:
         "event": event.kind.value,
         "status": str(event.data.get("status", "running")),
         "terminal": event.terminal,
-        "data": event.data,
+        "data": data,
     }

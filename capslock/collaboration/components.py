@@ -26,7 +26,8 @@ class CollaborationMailbox:
         ttl_seconds: int,
         active_states: set[str],
         cancel: Callable[[str], Awaitable[None]],
-        notify: Callable[[str], Awaitable[None]] | None = None,
+        notify: Callable[..., Awaitable[bool]] | None = None,
+        mailbox_lock: Callable[[str], Any] | None = None,
     ) -> None:
         self.repository = repository
         self.enabled = enabled
@@ -34,6 +35,7 @@ class CollaborationMailbox:
         self.active_states = active_states
         self._cancel = cancel
         self._notify = notify
+        self._mailbox_lock = mailbox_lock
 
     async def send_message(
         self,
@@ -43,6 +45,7 @@ class CollaborationMailbox:
         session_id: str | None = None,
         kind: MailboxMessageKind,
         payload: dict[str, Any],
+        reply_to_message_id: str | None = None,
     ) -> dict[str, Any]:
         if not self.enabled:
             raise ValueError("agent mailbox is disabled")
@@ -51,10 +54,6 @@ class CollaborationMailbox:
             task, parent_run_id=parent_run_id, session_id=session_id
         ):
             raise ValueError("child task does not belong to this controller")
-        if str(task["state"]) not in self.active_states:
-            raise ValueError(
-                "mailbox messages can only be sent to an active child task"
-            )
         if kind not in {
             MailboxMessageKind.INSTRUCTION,
             MailboxMessageKind.RESPONSE,
@@ -63,18 +62,43 @@ class CollaborationMailbox:
             raise ValueError("parent cannot send this mailbox message kind")
         if kind is MailboxMessageKind.CANCEL:
             await self._cancel(task_id)
-        message = await self.repository.send_mailbox(
+        address = child_address(task)
+        return await self._send(
+            address,
             task_id=task_id,
             parent_run_id=str(task["parent_run_id"]),
             sender="parent",
             recipient="child",
             kind=kind,
             payload=payload,
-            ttl_seconds=self.ttl_seconds,
+            sender_address=f"session:{task['owner_session_id']}",
+            reply_to_message_id=reply_to_message_id,
         )
-        if self._notify is not None:
-            await self._notify(str(task_id))
-        return message
+
+    async def _send(self, address: str, **kwargs: Any) -> dict[str, Any]:
+        async def send() -> dict[str, Any]:
+            message = await self.repository.send_mailbox(
+                **kwargs,
+                recipient_address=address,
+                ttl_seconds=self.ttl_seconds,
+            )
+            active = False
+            if self._notify is not None:
+                active = await self._notify(
+                    address,
+                    actionable=kwargs["kind"]
+                    in {
+                        MailboxMessageKind.QUESTION,
+                        MailboxMessageKind.RESPONSE,
+                        MailboxMessageKind.INSTRUCTION,
+                    },
+                )
+            return {**message, "receiver_active": active}
+
+        if self._mailbox_lock is None:
+            return await send()
+        async with self._mailbox_lock(address):
+            return await send()
 
     async def read_messages(
         self,
@@ -120,6 +144,7 @@ class CollaborationMailbox:
         parent_run_id: str,
         kind: MailboxMessageKind,
         payload: dict[str, Any],
+        reply_to_message_id: str | None = None,
     ) -> dict[str, Any]:
         if not self.enabled:
             raise ValueError("agent mailbox is disabled")
@@ -135,18 +160,17 @@ class CollaborationMailbox:
             MailboxMessageKind.ARTIFACT_OFFER,
         }:
             raise ValueError("child cannot send this mailbox message kind")
-        message = await self.repository.send_mailbox(
+        return await self._send(
+            f"session:{task['owner_session_id']}",
             task_id=task_id,
             parent_run_id=parent_run_id,
             sender="child",
             recipient="parent",
             kind=kind,
             payload=payload,
-            ttl_seconds=self.ttl_seconds,
+            sender_address=child_address(task),
+            reply_to_message_id=reply_to_message_id,
         )
-        if self._notify is not None:
-            await self._notify(str(task_id))
-        return message
 
     async def read_child_messages(
         self, task_id: str, *, parent_run_id: str
@@ -328,3 +352,8 @@ __all__ = [
     "CollaborationAudit",
     "CollaborationMailbox",
 ]
+
+
+def child_address(task: dict[str, Any]) -> str:
+    worker = task.get("assigned_worker_id")
+    return f"worker:{worker}" if worker else f"task:{task['id']}"
