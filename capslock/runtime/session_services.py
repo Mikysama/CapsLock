@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-import hashlib
+from ..permissions import permission_arguments_digest
+
+from contextlib import aclosing
+
 import json
 from collections.abc import AsyncIterator, Callable
 from dataclasses import replace
@@ -19,6 +22,7 @@ from ..domain import (
 from ..permissions import PermissionMode
 from ..security import redact
 from ..tooling.contracts import ToolOutcome, ToolOutcomeStatus, ToolPause
+from ..tooling.schema import strip_optional_nulls
 from .engine import RunRequest
 
 
@@ -44,6 +48,14 @@ class SessionAdministration:
 
     async def cancel_queued_work_item(self, prefix: str):
         item = await self.queued_work_item(prefix)
+        if item.status in {
+            WorkItemStatus.WAITING_APPROVAL,
+            WorkItemStatus.WAITING_INPUT,
+        }:
+            await self.workflow.cancel_waiting(self.session_id, item.current_run_id)
+            return await self.work_items.require(item.id)
+        if item.status is not WorkItemStatus.QUEUED:
+            return item
         return await self.work_items.update(
             item.id,
             WorkItemStatus.CANCELLED,
@@ -240,8 +252,10 @@ class PermissionRequestService:
             catalog=self.tools,
         )
         arguments = dict(invocation["arguments"])
-        normalized = self.permission_engine.normalize(tool, arguments, context)
-        digest = _permission_arguments_digest(normalized)
+        stripped = strip_optional_nulls(arguments, tool.contract.input_schema)
+        assert isinstance(stripped, dict)
+        normalized = self.permission_engine.normalize(tool, stripped, context)
+        digest = permission_arguments_digest(normalized)
         if digest != request["arguments_sha256"]:
             raise ValueError("tool input changed after approval was requested")
 
@@ -263,7 +277,10 @@ class PermissionRequestService:
             )
             if selected_update is None:
                 raise ValueError(f"no {destination} permission suggestion is available")
-            update = _permission_update(selected_update, expected_tool=tool.name)
+            operation, _ = self.permission_engine.operation_identity(
+                tool.name, normalized
+            )
+            update = _permission_update(selected_update, expected_tool=operation)
             await self.permission_engine.apply_update(self.session_id, update)
             if not await self.permission_engine.verify_explicit_allow(
                 session_id=self.session_id,
@@ -311,8 +328,9 @@ class RunExecutionCoordinator:
         self.runs = runs
 
     async def run_stream(self, request: RunRequest) -> AsyncIterator[AgentEvent]:
-        async for event in self.engine.run_stream(request):
-            yield event
+        async with aclosing(self.engine.run_stream(request)) as stream:
+            async for event in stream:
+                yield event
 
     async def resume_paused_stream(
         self,
@@ -323,15 +341,17 @@ class RunExecutionCoordinator:
         run = await self.runs.require(run_id, session_id=self.session_id)
         if run.status not in {"waiting_approval", "waiting_input"}:
             raise ValueError("run is not waiting for a resumable tool invocation")
-        async for event in self.run_stream(
+        stream = self.run_stream(
             RunRequest(
                 question=run.question,
                 resume_from_run_id=run.id,
                 mode=RunMode.INTERACTIVE,
                 response_format=response_format,
             )
-        ):
-            yield event
+        )
+        async with aclosing(stream):
+            async for event in stream:
+                yield event
 
 
 def _permission_approval_choice(
@@ -398,18 +418,6 @@ def _permission_update_for_management(raw: dict[str, Any]):
         )
     except (KeyError, ValueError) as exc:
         raise ValueError("invalid permission update") from exc
-
-
-def _permission_arguments_digest(arguments: dict[str, Any]) -> str:
-    public = {
-        key: value
-        for key, value in arguments.items()
-        if not key.startswith("_permission_")
-    }
-    encoded = json.dumps(
-        public, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    )
-    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def _permission_preview(arguments: dict[str, Any]) -> str:

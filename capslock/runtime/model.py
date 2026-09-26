@@ -4,12 +4,19 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from typing import Any, Protocol, runtime_checkable
 
 from ..structured_output import strict_provider_schema
 
-from ..domain import ModelRole, RunLimits
+from ..domain import ModelErrorCode, ModelRole, RunLimits
+from .model_events import (
+    protocol_error,
+    validate_completion,
+    _error_message,
+    _optional_string,
+    _incomplete_reason,
+)
 
 
 @dataclass(frozen=True)
@@ -31,14 +38,20 @@ class ModelMessage:
 class ModelUsage:
     input_tokens: int = 0
     output_tokens: int = 0
+    cached_input_tokens: int | None = None
+    reasoning_tokens: int | None = None
+    source: str = field(default="provider", compare=False)
+    request_id: str | None = field(default=None, compare=False)
+    first_token_ms: int | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
 class ModelResponse:
     message: ModelMessage
-    usage: ModelUsage = ModelUsage()
+    usage: ModelUsage = ModelUsage(source="unknown")
     completion_status: str | None = None
     incomplete_reason: str | None = None
+    error_message: str | None = None
 
 
 @dataclass(frozen=True)
@@ -50,6 +63,9 @@ class ModelDelta:
     tool_name: str | None = None
     tool_arguments: str = ""
     usage: ModelUsage | None = None
+    completion_status: str | None = None
+    incomplete_reason: str | None = None
+    error_message: str | None = None
 
 
 @dataclass(frozen=True)
@@ -59,6 +75,8 @@ class ModelRunContext:
     limits: RunLimits | None = None
     budget_base: tuple[int, float] = (0, 0.0)
     hard_budget: bool = False
+    deadline_monotonic: float | None = None
+    profile_id: str | None = None
 
 
 class ChatModel(Protocol):
@@ -148,6 +166,8 @@ class ModelRunSession:
                 self.context.limits,
                 self.context.budget_base,
                 self.context.hard_budget,
+                self.context.deadline_monotonic,
+                self.context.profile_id,
             ),
         )
 
@@ -166,11 +186,9 @@ class AsyncOpenAIResponsesModel:
         self,
         client: Any,
         *,
-        max_output_tokens: dict[str, int] | None = None,
         strict_tools: bool = True,
     ) -> None:
         self.client = client
-        self.max_output_tokens = max_output_tokens or {}
         self.strict_tools = strict_tools
 
     async def complete(
@@ -258,9 +276,22 @@ class AsyncOpenAIResponsesModel:
                     tool_name=call.name,
                     tool_arguments=call.arguments,
                 )
-            yield ModelDelta(usage=response.usage)
+            yield response_terminal(response)
+            validate_completion(
+                response.completion_status,
+                response.incomplete_reason,
+                response.error_message,
+            )
             return
+        terminal_seen = False
+        headers = getattr(getattr(stream, "response", None), "headers", {}) or {}
+        request_id = headers.get("x-request-id") if hasattr(headers, "get") else None
         async for event in stream:
+            if terminal_seen:
+                raise protocol_error(
+                    ModelErrorCode.STREAM_INCOMPLETE,
+                    "model stream contains events after its terminal",
+                )
             kind = str(getattr(event, "type", ""))
             delta = getattr(event, "delta", None)
             if kind == "response.output_text.delta" and delta:
@@ -290,9 +321,42 @@ class AsyncOpenAIResponsesModel:
                     tool_index=int(getattr(event, "output_index", 0) or 0),
                     tool_arguments=str(delta),
                 )
-            elif kind == "response.completed":
+            elif kind in {
+                "response.completed",
+                "response.incomplete",
+                "response.failed",
+            }:
+                terminal_seen = True
                 response = getattr(event, "response", None)
-                yield ModelDelta(usage=_usage(getattr(response, "usage", None)))
+                status = kind.removeprefix("response.")
+                terminal = ModelDelta(
+                    usage=replace(
+                        _usage(getattr(response, "usage", None)),
+                        request_id=_optional_string(
+                            getattr(response, "_request_id", None) or request_id
+                        ),
+                    ),
+                    completion_status=status,
+                    incomplete_reason=_incomplete_reason(response),
+                    error_message=_error_message(getattr(response, "error", None)),
+                )
+                yield terminal
+                validate_completion(
+                    status, terminal.incomplete_reason, terminal.error_message
+                )
+            elif kind == "error":
+                yield ModelDelta(
+                    completion_status="failed", error_message=_error_message(event)
+                )
+                raise protocol_error(
+                    ModelErrorCode.RESPONSE_FAILED,
+                    _error_message(event) or "model response failed",
+                )
+        if not terminal_seen:
+            raise protocol_error(
+                ModelErrorCode.STREAM_INCOMPLETE,
+                "model stream ended without a terminal event",
+            )
 
     def _responses_arguments(
         self,
@@ -309,14 +373,8 @@ class AsyncOpenAIResponsesModel:
         }
         if tools:
             arguments["tools"] = _responses_tools(tools, strict=self.strict_tools)
-        configured = self.max_output_tokens.get(model)
-        effective = (
-            min(configured, max_output_tokens)
-            if configured is not None and max_output_tokens is not None
-            else configured or max_output_tokens
-        )
-        if effective is not None:
-            arguments["max_output_tokens"] = effective
+        if max_output_tokens is not None:
+            arguments["max_output_tokens"] = max_output_tokens
         if response_format is not None:
             arguments["text"] = {"format": _responses_format(response_format)}
         return arguments
@@ -341,8 +399,28 @@ async def stream_model_response(
             arguments["max_output_tokens"] = max_output_tokens
         if response_format is not None:
             arguments["response_format"] = response_format
+        terminal_seen = False
+        terminal = None
         async for delta in chat_model.stream_complete(**arguments):
+            if terminal_seen:
+                raise protocol_error(
+                    ModelErrorCode.STREAM_INCOMPLETE,
+                    "model stream contains events after its terminal",
+                )
+            if delta.completion_status is not None:
+                terminal_seen = True
+                terminal = delta
             yield delta
+        if not terminal_seen:
+            raise protocol_error(
+                ModelErrorCode.STREAM_INCOMPLETE,
+                "model stream ended without a terminal event",
+            )
+        validate_completion(
+            terminal.completion_status,
+            terminal.incomplete_reason,
+            terminal.error_message,
+        )
         return
     arguments = {"model": model, "messages": messages, "tools": tools}
     if max_output_tokens is not None:
@@ -361,7 +439,19 @@ async def stream_model_response(
             tool_name=call.name,
             tool_arguments=call.arguments,
         )
-    yield ModelDelta(usage=response.usage)
+    yield response_terminal(response)
+    validate_completion(
+        response.completion_status, response.incomplete_reason, response.error_message
+    )
+
+
+def response_terminal(response: ModelResponse) -> ModelDelta:
+    return ModelDelta(
+        usage=response.usage,
+        completion_status=response.completion_status or "completed",
+        incomplete_reason=response.incomplete_reason,
+        error_message=response.error_message,
+    )
 
 
 def _usage(raw: Any) -> ModelUsage:
@@ -386,16 +476,33 @@ def _usage(raw: Any) -> ModelUsage:
         return None
 
     if raw is None:
-        return ModelUsage()
+        return ModelUsage(source="unknown")
     input_value = value(raw, "prompt_tokens", "input_tokens")
     output_value = value(raw, "completion_tokens", "output_tokens")
+    reported = input_value is not None or output_value is not None
     if output_value is None:
         details = value(raw, "output_tokens_details", "completion_tokens_details")
         output_value = value(details, "reasoning_tokens", "reasoning") or 0
     if input_value is None:
         details = value(raw, "input_tokens_details", "prompt_tokens_details")
         input_value = value(details, "cached_tokens", "cache_read_input_tokens") or 0
-    return ModelUsage(int(input_value or 0), int(output_value or 0))
+    cached = value(
+        value(raw, "input_tokens_details", "prompt_tokens_details"),
+        "cached_tokens",
+        "cache_read_input_tokens",
+    )
+    reasoning = value(
+        value(raw, "output_tokens_details", "completion_tokens_details"),
+        "reasoning_tokens",
+        "reasoning",
+    )
+    return ModelUsage(
+        int(input_value or 0),
+        int(output_value or 0),
+        int(cached) if cached is not None else None,
+        int(reasoning) if reasoning is not None else None,
+        source="provider" if reported else "unknown",
+    )
 
 
 def _responses_format(response_format: dict[str, object]) -> dict[str, object]:
@@ -566,18 +673,11 @@ def _responses_response(response: Any) -> ModelResponse:
         ModelMessage(
             "".join(content) or None, tuple(calls), "".join(reasoning) or None
         ),
-        _usage(getattr(response, "usage", None)),
+        replace(
+            _usage(getattr(response, "usage", None)),
+            request_id=_optional_string(getattr(response, "_request_id", None)),
+        ),
         _optional_string(getattr(response, "status", None)),
         _incomplete_reason(response),
+        _error_message(getattr(response, "error", None)),
     )
-
-
-def _optional_string(value: object) -> str | None:
-    return str(value) if value is not None and str(value) else None
-
-
-def _incomplete_reason(response: Any) -> str | None:
-    details = getattr(response, "incomplete_details", None)
-    if isinstance(details, dict):
-        return _optional_string(details.get("reason"))
-    return _optional_string(getattr(details, "reason", None))

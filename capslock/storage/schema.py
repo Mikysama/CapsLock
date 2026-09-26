@@ -2,7 +2,7 @@
 
 WORKSPACE_APPLICATION_ID = 0x434C4B32  # CLK2
 MEMORY_APPLICATION_ID = 0x434C4D32  # CLM2
-WORKSPACE_SCHEMA_VERSION = 20
+WORKSPACE_SCHEMA_VERSION = 21
 MEMORY_SCHEMA_VERSION = 6
 
 WORKSPACE_SCHEMA = """
@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS lifecycle_import_items (
 CREATE TABLE sessions (
   id TEXT PRIMARY KEY,
   model TEXT NOT NULL,
+  model_profile TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   summary TEXT NOT NULL DEFAULT '',
@@ -507,7 +508,15 @@ CREATE TABLE model_calls (
   output_tokens INTEGER NOT NULL DEFAULT 0 CHECK(output_tokens>=0),
   cost_usd REAL NOT NULL DEFAULT 0 CHECK(cost_usd>=0),
   error_code TEXT,
-  error_message TEXT
+  error_message TEXT,
+  cached_input_tokens INTEGER,
+  reasoning_tokens INTEGER,
+  usage_source TEXT,
+  request_id TEXT,
+  first_token_ms INTEGER,
+  retry_delay_ms INTEGER,
+  output_started INTEGER,
+  price_snapshot_json TEXT CHECK(price_snapshot_json IS NULL OR json_valid(price_snapshot_json))
 ) STRICT;
 CREATE INDEX idx_model_calls_run ON model_calls(run_id,started_at);
 CREATE INDEX idx_model_calls_model ON model_calls(provider,model,started_at);

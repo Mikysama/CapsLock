@@ -62,6 +62,11 @@ async def list_tasks(
 ) -> ToolOutcome:
     if context.tasks is None:
         raise ValueError("task storage is unavailable")
+    if arguments.get("task_id") is not None:
+        result = await get_task(context, arguments)
+        if not result.ok:
+            return result
+        return ToolOutcome.success({"tasks": [result.data]})
     items = await context.tasks.list(context.session_id, status=arguments.get("status"))
     return ToolOutcome.success({"tasks": [_task_data(item) for item in items]})
 
@@ -118,9 +123,10 @@ def task_tools():
         ),
         define_tool(
             "list_tasks",
-            "List persistent tasks in this session.",
+            "List persistent tasks in this session, or read exactly one using task_id (status only filters listings).",
             _schema(
                 {
+                    "task_id": _str(),
                     "status": {
                         "type": "string",
                         "enum": [
@@ -143,6 +149,7 @@ def task_tools():
             _schema({"task_id": _str()}, ["task_id"]),
             get_task,
             policy=safe_read,
+            model_visible=False,
         ),
         define_tool(
             "update_task",

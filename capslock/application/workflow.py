@@ -144,6 +144,9 @@ class WorkflowService:
             stop_reason=stop_reason,
         )
 
+    async def cancel_waiting(self, session_id: str, run_id: str) -> AgentEvent:
+        return await self.unit_of_work.cancel_waiting(session_id, run_id)
+
     async def settle_approval(self, session_id: str, run_id: str) -> AgentEvent | None:
         return await self.unit_of_work.settle_approval(session_id, run_id)
 

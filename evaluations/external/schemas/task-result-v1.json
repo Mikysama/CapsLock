@@ -36,6 +36,7 @@
     "peak_context_tokens": {"type": "integer", "minimum": 0},
     "context_updates": {"type": "integer", "minimum": 0},
     "context_compactions": {"type": "integer", "minimum": 0},
+    "human_interventions": {"type": ["integer", "null"], "minimum": 0},
     "trajectory_path": {"type": "string"},
     "grader_log_path": {"type": "string"},
     "stderr_path": {"type": "string"},

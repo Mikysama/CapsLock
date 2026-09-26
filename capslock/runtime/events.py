@@ -40,12 +40,11 @@ class RunEventBus:
         self._work_item_id = ""
         self._trace_id = ""
         self._failure: BaseException | None = None
-        self._diagnostic_queue: asyncio.Queue[AgentEvent] = asyncio.Queue(
-            maxsize=diagnostic_queue_size
+        self._diagnostic_queue: asyncio.Queue[tuple[str, dict[str, object]]] = (
+            asyncio.Queue(maxsize=diagnostic_queue_size)
         )
         self._diagnostic_task: asyncio.Task[None] | None = None
-        self._coalesced_text = ""
-        self._coalesced_event: AgentEvent | None = None
+        self._stream_summary: dict[str, object] | None = None
 
     async def emit(self, kind: AgentEventKind, data: dict[str, object]) -> AgentEvent:
         async with self._lock:
@@ -106,6 +105,7 @@ class RunEventBus:
 
     async def close(self) -> None:
         await self.flush()
+        self._flush_stream_summary()
         task = self._diagnostic_task
         if task is None:
             return
@@ -142,51 +142,74 @@ class RunEventBus:
             raise RuntimeError("durable run event sink failed") from self._failure
 
     def _diagnostic(self, event: AgentEvent) -> None:
+        if event.kind is AgentEventKind.TEXT_DELTA or (
+            event.kind is AgentEventKind.THINKING and "text" in event.data
+        ):
+            if self._stream_summary is None:
+                self._stream_summary = {
+                    "run_id": event.run_id,
+                    "work_item_id": event.work_item_id,
+                    "trace_id": event.trace_id,
+                    "first_sequence": event.sequence,
+                    "first_timestamp": event.timestamp,
+                    "streams": {},
+                }
+            summary = self._stream_summary
+            summary["last_sequence"] = event.sequence
+            summary["last_timestamp"] = event.timestamp
+            streams = summary["streams"]
+            assert isinstance(streams, dict)
+            counts = streams.setdefault(
+                event.kind.value, {"chunks": 0, "characters": 0, "bytes": 0}
+            )
+            text = str(event.data.get("text", ""))
+            counts["chunks"] += 1
+            counts["characters"] += len(text)
+            counts["bytes"] += len(text.encode("utf-8"))
+            return
+        self._flush_stream_summary()
+        self._enqueue_diagnostic(
+            "workflow_event",
+            {
+                "run_id": event.run_id,
+                "work_item_id": event.work_item_id,
+                "event": event.kind.value,
+                "event_id": event.event_id,
+                "trace_id": event.trace_id,
+                "data": event.data,
+            },
+        )
+
+    def _flush_stream_summary(self) -> None:
+        if self._stream_summary is not None:
+            summary, self._stream_summary = self._stream_summary, None
+            self._enqueue_diagnostic("workflow_stream_summary", summary)
+
+    def _enqueue_diagnostic(self, kind: str, data: dict[str, object]) -> None:
         if self._diagnostic_task is None:
             self._diagnostic_task = asyncio.create_task(
                 self._drain_diagnostics(), name="capslock-diagnostic-events"
             )
+        if self._diagnostic_queue.full():
+            # Drain the oldest compact record before enqueueing. Critical events
+            # must not disappear when a burst fills the bounded diagnostic queue.
+            self._write_diagnostic(self._diagnostic_queue.get_nowait())
+            self._diagnostic_queue.task_done()
+        self._diagnostic_queue.put_nowait((kind, data))
+
+    def _write_diagnostic(self, record: tuple[str, dict[str, object]]) -> None:
         try:
-            self._diagnostic_queue.put_nowait(event)
-        except asyncio.QueueFull:
-            if event.kind is AgentEventKind.TEXT_DELTA:
-                self._coalesced_text += str(event.data.get("text", ""))
-                self._coalesced_event = event
+            self.diagnostic(record[0], **record[1])
+        except Exception:
+            pass
 
     async def _drain_diagnostics(self) -> None:
         while True:
-            event = await self._diagnostic_queue.get()
+            record = await self._diagnostic_queue.get()
             try:
-                try:
-                    self.diagnostic(
-                        "workflow_event",
-                        run_id=event.run_id,
-                        work_item_id=event.work_item_id,
-                        event=event.kind.value,
-                        event_id=event.event_id,
-                        trace_id=event.trace_id,
-                        data=event.data,
-                    )
-                except Exception:
-                    pass
+                self._write_diagnostic(record)
             finally:
                 self._diagnostic_queue.task_done()
-            if self._coalesced_event is not None and not self._diagnostic_queue.full():
-                latest = self._coalesced_event
-                combined = AgentEvent(
-                    latest.sequence,
-                    latest.timestamp,
-                    latest.session_id,
-                    latest.run_id,
-                    latest.work_item_id,
-                    latest.kind,
-                    {"text": self._coalesced_text},
-                    latest.event_id,
-                    latest.trace_id,
-                )
-                self._coalesced_text = ""
-                self._coalesced_event = None
-                self._diagnostic_queue.put_nowait(combined)
 
 
 def _context_payload(data: dict[str, object]) -> dict[str, object]:

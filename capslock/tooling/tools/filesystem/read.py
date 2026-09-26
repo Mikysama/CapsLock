@@ -2,52 +2,82 @@
 
 from __future__ import annotations
 
-import asyncio  # noqa: F401
-import base64  # noqa: F401
-import fnmatch  # noqa: F401
-import hashlib  # noqa: F401
-import itertools  # noqa: F401
-import json  # noqa: F401
-import shutil  # noqa: F401
-import uuid  # noqa: F401
-from pathlib import Path  # noqa: F401
-from typing import Any  # noqa: F401
+import asyncio
+import base64
+import hashlib
+import os
+from pathlib import Path
+from typing import Any
 
-from ....domain import ActionRecord, ActionStatus, ActionType  # noqa: F401
-from ....evidence import Evidence  # noqa: F401
-from ....security import TEXT_SUFFIXES  # noqa: F401
-from ...contracts import (  # noqa: F401
+from ....evidence import Evidence
+from ....security import TEXT_SUFFIXES
+from ...contracts import (
     ExecutionContext,
     ToolContent,
-    ToolExecution,
     ToolOutcome,
-    ToolOutcomeStatus,
-    ToolPause,
 )
-from ..actions import execute_action_tool  # noqa: F401
-from ..support import _outcome, _path  # noqa: F401
+from ..support import _outcome, _path
 
 
 async def list_files(
     context: ExecutionContext, arguments: dict[str, Any]
 ) -> ToolOutcome:
-    def read() -> list[str]:
-        directory = context.policy.readable_directory(_path(arguments))
-        pattern = arguments.get("pattern", "*")
-        if not isinstance(pattern, str):
-            raise ValueError("pattern must be a string")
-        return [
-            str(item.relative_to(context.policy.root))
-            for item in sorted(directory.rglob("*"))
-            if item.is_file()
-            and context.policy.is_agent_readable(item)
-            and fnmatch.fnmatch(item.name, pattern)
-        ][: context.policy.max_files]
+    offset, limit = arguments.get("offset", 0), arguments.get("limit", 100)
+    if (
+        type(offset) is not int
+        or offset < 0
+        or type(limit) is not int
+        or not 1 <= limit <= 1000
+    ):
+        raise ValueError(
+            "offset must be nonnegative and limit must be between 1 and 1000"
+        )
+    if "pattern" in arguments:
+        raise ValueError("use glob_files for filename patterns")
 
-    files = await asyncio.to_thread(read)
-    return _outcome(
-        True, {"path": _path(arguments), "files": files, "count": len(files)}
-    )
+    def read() -> dict[str, object]:
+        directory = context.policy.readable_directory(_path(arguments))
+        entries = []
+        scan_truncated = False
+        with os.scandir(directory) as children:
+            for scanned, child in enumerate(children):
+                if scanned >= context.policy.max_files:
+                    scan_truncated = True
+                    break
+                path = Path(child.path)
+                try:
+                    if child.is_symlink() or not context.policy.is_agent_readable(path):
+                        continue
+                    kind = (
+                        "directory" if child.is_dir(follow_symlinks=False) else "file"
+                    )
+                    if kind == "file" and not child.is_file(follow_symlinks=False):
+                        continue
+                    entries.append(
+                        {
+                            "path": str(path.relative_to(context.policy.root)),
+                            "type": kind,
+                        }
+                    )
+                except FileNotFoundError:
+                    continue
+        entries.sort(key=lambda item: item["path"])
+        page = entries[offset : offset + limit]
+        next_offset = offset + len(page) if offset + len(page) < len(entries) else None
+        return {
+            "path": _path(arguments),
+            "entries": page,
+            "files": [item["path"] for item in page if item["type"] == "file"],
+            "count": len(page),
+            "offset": offset,
+            "next_offset": next_offset,
+            "truncated": scan_truncated or next_offset is not None,
+            "stop_reason": "scan_limit"
+            if scan_truncated
+            else ("page_limit" if next_offset is not None else None),
+        }
+
+    return _outcome(True, await asyncio.to_thread(read))
 
 
 async def read_file(

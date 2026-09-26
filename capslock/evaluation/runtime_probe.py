@@ -181,13 +181,6 @@ def _settings_for_candidate(
 ) -> tuple[Settings, RecallPolicy]:
     values = candidate.values
     providers = dict(settings.providers or {})
-    if providers:
-        provider_name = next(iter(providers))
-        provider_settings = providers[provider_name]
-        providers[provider_name] = replace(
-            provider_settings,
-            timeout_seconds=float(values["providers.timeout_seconds"]),
-        )
     profiles = {
         name: replace(profile, model=model)
         for name, profile in (settings.models or {}).items()
@@ -198,6 +191,11 @@ def _settings_for_candidate(
     profiles = {
         name: replace(profile, model=model) for name, profile in profiles.items()
     }
+    for provider_name in {profile.provider for profile in profiles.values()}:
+        providers[provider_name] = replace(
+            providers[provider_name],
+            timeout_seconds=float(values["providers.timeout_seconds"]),
+        )
     runtime = replace(
         settings.runtime,
         max_tool_rounds=int(values["runtime.max_tool_rounds"]),
@@ -230,14 +228,8 @@ def _settings_for_candidate(
         cycle_repetitions=int(values["loop_detection.cycle_repetitions"]),
         max_cycle_length=int(values["loop_detection.max_cycle_length"]),
     )
-    primary = settings.model_config
     updated = replace(
         settings,
-        model_config=replace(
-            primary,
-            model=model,
-            timeout_seconds=float(values["providers.timeout_seconds"]),
-        ),
         runtime=runtime,
         tools=tools,
         context=context,

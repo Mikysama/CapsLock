@@ -13,6 +13,7 @@ from .filesystem.registry import filesystem_tools
 from .git import git_tools
 from .interaction import interaction_tools
 from .memory import memory_tools
+from .output_schemas import builtin_output_schema
 from .plans import plan_tools
 from .shell import shell_tools
 from .skills import skill_tools
@@ -29,8 +30,8 @@ _ALIASES = {
     "read_file": ("open file", "inspect file"),
     "create_file": ("new file",),
     "edit_file": ("replace text", "focused edit"),
-    "write_file": ("replace whole file", "full rewrite"),
-    "list_tasks": ("task overview",),
+    "write_file": ("new file", "replace whole file", "full rewrite"),
+    "list_tasks": ("task overview", "task details"),
     "get_task": ("task details",),
     "search_memories": ("find memory",),
     "get_memory": ("memory details",),
@@ -85,15 +86,12 @@ def workspace_tools(
         tools.extend(worktree_tools())
     if include_collaboration:
         tools[0:0] = [delegation_tool(), *agent_control_tools()]
-    generic_output_schema: dict[str, object] = {
-        "type": ["object", "array"],
-    }
     tools = [
         replace(
             tool,
             contract=replace(
                 tool.contract,
-                output_schema=tool.contract.output_schema or generic_output_schema,
+                output_schema=builtin_output_schema(tool.name),
                 aliases=_ALIASES.get(tool.name, ()),
                 intent_tags=tuple(tool.name.split("_")),
                 tool_group=_group(tool.name),

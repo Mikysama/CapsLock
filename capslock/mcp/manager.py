@@ -5,12 +5,12 @@ from __future__ import annotations
 import asyncio
 import os
 from contextlib import AsyncExitStack
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from ..policy import WorkspacePolicy
-from ..ports.mcp import ManagedMcpResource, ManagedMcpTool, McpServer
-from .registry import McpRegistry
+from ..ports.mcp import ManagedMcpResource, ManagedMcpTool, McpServer, McpServerStatus
+from .registry import McpRegistry, error_summary
 
 
 @dataclass
@@ -38,18 +38,58 @@ class McpManager:
         self.remote_enabled = remote_enabled
         self._sessions: dict[str, _Connection] = {}
         self.errors: dict[str, str] = {}
+        self._configured_statuses: dict[str, McpServerStatus] = {}
 
     async def initialize(self) -> tuple[ManagedMcpTool, ...]:
-        configured = await asyncio.to_thread(self.registry.servers)
+        configured = await asyncio.to_thread(self.registry.servers, strict=False)
+        self.errors = dict(self.registry.errors)
+        self._configured_statuses = dict(self.registry.configured_statuses)
         for name in tuple(self._sessions):
-            if name not in configured:
+            if (
+                name not in configured
+                or self._sessions[name].server != configured[name]
+            ):
                 await self._disconnect(name)
         for name in sorted(configured):
             try:
-                await self._connect(name)
+                async with asyncio.timeout(self.timeout_seconds):
+                    await self._connect(name)
             except Exception as exc:
-                self.errors[name] = str(exc) or type(exc).__name__
+                self.errors[name] = error_summary(exc)
         return self.tools()
+
+    def statuses(self) -> tuple[McpServerStatus, ...]:
+        """Return the last initialized configuration and live connection state."""
+        names = (
+            self._configured_statuses.keys()
+            | self.errors.keys()
+            | self._sessions.keys()
+        )
+        result = []
+        for name in sorted(names):
+            configured = self._configured_statuses.get(
+                name, McpServerStatus(name, False, False)
+            )
+            connection = self._sessions.get(name)
+            if connection is not None:
+                configured = McpServerStatus(
+                    name=name,
+                    enabled=connection.server.enabled,
+                    connected=True,
+                    scope=connection.server.scope,
+                    allowed_tools=connection.server.allowed_tools,
+                )
+            result.append(
+                replace(
+                    configured,
+                    connected=connection is not None,
+                    available_tools=tuple(tool.name for tool in connection.tools)
+                    if connection
+                    else (),
+                    error=self.errors.get(name),
+                )
+            )
+        return tuple(result)
 
     def server(self, name: str) -> McpServer:
         return self.registry.get(name)
@@ -94,7 +134,11 @@ class McpManager:
 
     async def refresh(self, server_name: str) -> tuple[ManagedMcpTool, ...]:
         await self._disconnect(server_name)
-        connection = await self._connect(server_name)
+        try:
+            connection = await self._connect(server_name)
+        except Exception as exc:
+            self.errors[server_name] = error_summary(exc)
+            raise
         return connection.tools
 
     async def switch_policy(self, policy: WorkspacePolicy) -> None:
@@ -149,7 +193,13 @@ class McpManager:
             from mcp.client.sse import sse_client
         except ImportError as exc:
             raise RuntimeError("MCP support requires the mcp package") from exc
-        server = await asyncio.to_thread(self.registry.get, name)
+        try:
+            server = await asyncio.to_thread(self.registry.get, name)
+        finally:
+            if name in self.registry.configured_statuses:
+                self._configured_statuses[name] = self.registry.configured_statuses[
+                    name
+                ]
         if server.transport != "stdio" and not self.remote_enabled:
             raise PermissionError("remote MCP transport is disabled")
         stack = AsyncExitStack()

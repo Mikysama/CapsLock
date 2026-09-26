@@ -34,6 +34,7 @@ from ..tooling.contracts import (
     ToolPause,
 )
 from ..tooling.executor import ToolRuntime
+from ..tooling.selection import SelectionState, prompt_metadata
 from ..tooling.presentation import tool_presentation
 from ..tooling.schema import SchemaValidationError
 from .governance import RunGovernor
@@ -185,14 +186,28 @@ class ModelStepExecutor:
                         call["arguments"] += delta.tool_arguments
                     if delta.usage is not None:
                         usage = delta.usage
-        except TimeoutError:
-            if governor is not None:
-                await governor.stop(StopReason.MAX_DURATION)
-            raise
-        except Exception as exc:
+        except (Exception, asyncio.CancelledError) as exc:
+            partial = getattr(exc, "partial_message", None)
+            if not content and partial is not None and partial.content:
+                content.append(partial.content)
+                await emit(AgentEventKind.TEXT_DELTA, {"text": partial.content})
+            if not reasoning and partial is not None and partial.reasoning:
+                reasoning.append(partial.reasoning)
+                await emit(AgentEventKind.THINKING, {"text": partial.reasoning})
+            partial_messages = list(messages)
+            if content or reasoning:
+                partial_message = {"role": "assistant", "content": "".join(content)}
+                if reasoning:
+                    partial_message["reasoning_content"] = "".join(reasoning)
+                partial_messages.append(partial_message)
             await self.journal.finish_step(
-                step.id, status=RunStepStatus.FAILED, error=str(exc)
+                step.id,
+                status=RunStepStatus.FAILED,
+                error=str(exc),
+                checkpoint={"messages": partial_messages},
             )
+            if isinstance(exc, TimeoutError) and governor is not None:
+                await governor.stop(StopReason.MAX_DURATION)
             if (
                 isinstance(exc, ModelRoutingError)
                 and exc.code is ModelErrorCode.CONTEXT_OVERFLOW
@@ -468,6 +483,9 @@ class ToolLoop:
         ]
         | None = None,
         response_format: dict[str, object] | None = None,
+        user_goal: str | None = None,
+        external_input_provider: Callable[[], Awaitable[list[dict[str, object]]]]
+        | None = None,
     ) -> ToolLoopResult:
         active_model = chat_model or self.chat_model
         evidence, source_ids, memories = {}, set(), {}
@@ -475,7 +493,16 @@ class ToolLoop:
         turn = 0
         pending_repair: ToolRepairDirective | None = None
         repair_attempt = 0
+        selection_state = SelectionState(user_goal or "")
+        previous_prefix = None
         while True:
+            if external_input_provider is not None:
+                incoming = await external_input_provider()
+                if incoming:
+                    messages.extend(incoming)
+                    self.context_factory(run_id).event(
+                        "external_input_injected", count=len(incoming)
+                    )
             await self.tools.refresh_dynamic()
             for diagnostic in self.tools.pop_refresh_diagnostics():
                 self.context_factory(run_id).event(
@@ -484,7 +511,7 @@ class ToolLoop:
             if compact_context is not None:
                 messages[:] = await compact_context(messages)
             planning_active = await self._refresh_plan_attachment(messages, run_id)
-            selection_query = self._selection_query(messages)
+            selection_query = selection_state.query(planning=planning_active)
             selected_schemas, selected_names = self.tools.model_schemas(
                 selection_query, planning=planning_active
             )
@@ -497,13 +524,26 @@ class ToolLoop:
                 selected_schemas = self.tools.catalog.schemas_for(
                     active_repair.candidates, planning=planning_active
                 )
+            prefix = prompt_metadata(messages, selected_schemas)
+            full_prefix = prompt_metadata(
+                messages,
+                self.tools.plan_schemas if planning_active else self.tools.schemas,
+            )
             self.context_factory(run_id).event(
                 "tool_selection_shadow",
                 mode=self.tools.selection_mode.value,
                 candidates=list(selected_names),
                 advertised_count=len(selected_schemas),
                 repair=active_repair is not None,
+                full_schema_tokens=full_prefix["estimated_schema_tokens"],
+                prefix_changed=(
+                    previous_prefix is not None
+                    and previous_prefix
+                    != (prefix["core_prefix_sha256"], prefix["schema_sha256"])
+                ),
+                **prefix,
             )
+            previous_prefix = (prefix["core_prefix_sha256"], prefix["schema_sha256"])
             if governor is not None:
                 try:
                     await governor.before_model()
@@ -629,6 +669,12 @@ class ToolLoop:
                 candidates=list(selected_names),
                 actual=actual_tools,
                 recalled=all(name in selected_names for name in actual_tools),
+                cached_input_tokens=usage.cached_input_tokens,
+                cache_hit=(
+                    usage.cached_input_tokens > 0
+                    if usage.cached_input_tokens is not None
+                    else None
+                ),
             )
             if not message.tool_calls:
                 text = (message.content or "").strip()
@@ -643,6 +689,25 @@ class ToolLoop:
                         input_tokens=input_tokens,
                         output_tokens=output_tokens,
                     )
+                if (
+                    response_format is not None
+                    and response_format.get("type") == "json_schema"
+                ):
+                    from ..output_schema import validate_output
+
+                    try:
+                        validate_output(text, response_format)
+                    except ValueError:
+                        messages.append(
+                            {"role": "assistant", "content": message.content}
+                        )
+                        await self.journal.finish_step(
+                            model_step.id,
+                            status=RunStepStatus.FAILED,
+                            error="structured output validation failed",
+                            checkpoint={"messages": messages},
+                        )
+                        raise
                 messages.append({"role": "assistant", "content": message.content})
                 await self.journal.finish_step(
                     model_step.id,
@@ -756,19 +821,16 @@ class ToolLoop:
             if self.max_argument_repair_attempts:
                 pending_repair = self._repair_directive(round_outcomes)
                 repair_attempt = active_repair_attempt if pending_repair else 0
+            selection_state.observe(
+                ((item.call.name, item.outcome.ok) for item in round_outcomes),
+                allowed_names=self.tools.names,
+            )
             turn += 1
         raise ToolLoopError(
             "agent exceeded the maximum number of tool-call rounds",
             input_tokens=input_tokens,
             output_tokens=output_tokens,
         )
-
-    @staticmethod
-    def _selection_query(messages: list[dict[str, object]]) -> str:
-        for item in reversed(messages):
-            if item.get("role") == "user":
-                return str(item.get("content", ""))[-8_192:]
-        return ""
 
     def _repair_directive(
         self, outcomes: list[ToolCallOutcome]

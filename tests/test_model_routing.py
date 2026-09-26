@@ -239,7 +239,10 @@ def test_streaming_router_uses_prompt_schema_fallback(tmp_path: Path) -> None:
         try:
             _, prepared = await workspace_run(repositories)
             client = StreamingClient(
-                [ModelDelta(content='{"ok":true}'), ModelDelta(usage=ModelUsage(1, 1))]
+                [
+                    ModelDelta(content='{"ok":true}'),
+                    ModelDelta(usage=ModelUsage(1, 1), completion_status="completed"),
+                ]
             )
             router = ModelRouter(
                 providers={"fallback": provider("fallback", strict_tool_calls=True)},
@@ -476,10 +479,10 @@ def test_usage_accepts_responses_nested_details() -> None:
             "output_tokens_details": {"reasoning_tokens": 9},
         }
     )
-    assert usage == ModelUsage(12, 34)
+    assert usage == ModelUsage(12, 34, cached_input_tokens=5, reasoning_tokens=9)
 
 
-def test_router_applies_allowlisted_interactive_model_override(tmp_path: Path) -> None:
+def test_router_never_overrides_profile_with_bare_model_name(tmp_path: Path) -> None:
     async def scenario() -> None:
         repositories = await WorkspaceRepositories.open(
             tmp_path / "model-switch.sqlite3", workspace=tmp_path
@@ -499,9 +502,9 @@ def test_router_applies_allowlisted_interactive_model_override(tmp_path: Path) -
             )
             model_session = router.open_session(ModelRunContext(prepared.run.id))
             await model_session.complete(model="deepseek-v4-pro", messages=[], tools=[])
-            assert client.requests[0]["model"] == "deepseek-v4-pro"
+            assert client.requests[0]["model"] == "reasoning"
             summary = await repositories.models.summary(prepared.run.id)
-            assert summary[0]["model"] == "deepseek-v4-pro"
+            assert summary[0]["model"] == "reasoning"
             await model_session.for_role(ModelRole.FAST).complete(
                 model="deepseek-v4-pro", messages=[], tools=[]
             )
@@ -509,7 +512,10 @@ def test_router_applies_allowlisted_interactive_model_override(tmp_path: Path) -
 
             _, streamed_run = await workspace_run(repositories, "stream override")
             streaming = StreamingClient(
-                [ModelDelta(content="ok"), ModelDelta(usage=ModelUsage(1, 1))]
+                [
+                    ModelDelta(content="ok"),
+                    ModelDelta(usage=ModelUsage(1, 1), completion_status="completed"),
+                ]
             )
             streaming_router = ModelRouter(
                 providers={"provider": provider("provider")},
@@ -528,7 +534,7 @@ def test_router_applies_allowlisted_interactive_model_override(tmp_path: Path) -
                 )
                 if delta.content
             ] == ["ok"]
-            assert streaming.requests[0]["model"] == "deepseek-v4-pro"
+            assert streaming.requests[0]["model"] == "reasoning"
         finally:
             await repositories.close()
 
@@ -605,10 +611,10 @@ def test_router_refuses_cross_policy_fallback_and_stops_before_budgeted_call(
     asyncio.run(scenario())
 
 
-def test_retry_after_is_bounded() -> None:
+def test_retry_after_respects_server_wait() -> None:
     error = TransportError("limited")
     error.response = SimpleNamespace(headers={"retry-after": "99"})
-    assert _retry_delay(error, 1) == 2.0
+    assert _retry_delay(error, 1) == 99.0
 
 
 def test_stream_retry_only_happens_before_first_visible_delta(tmp_path: Path) -> None:
@@ -620,7 +626,10 @@ def test_stream_retry_only_happens_before_first_visible_delta(tmp_path: Path) ->
             _, prepared = await workspace_run(repositories)
             retrying = StreamingClient(
                 [TransportError("before output")],
-                [ModelDelta(content="ok"), ModelDelta(usage=ModelUsage(2, 1))],
+                [
+                    ModelDelta(content="ok"),
+                    ModelDelta(usage=ModelUsage(2, 1), completion_status="completed"),
+                ],
             )
             router = ModelRouter(
                 providers={"one": provider("one")},

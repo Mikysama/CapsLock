@@ -7,8 +7,6 @@ import json
 import shlex
 
 from ..domain import ActionRecord, ActionResultKind, ActionStatus, RunKind
-from ..layout import ProjectLayout
-from ..mcp import McpRegistry
 from ..permissions import PermissionMode
 from .context import CliContext
 from .views.actions import render_approvals as render_approval_view
@@ -279,6 +277,14 @@ async def set_permission_mode(context: CliContext, value: str) -> None:
 
 async def permissions(context: CliContext, text: str) -> None:
     parts = shlex.split(text)
+    if parts[1:] in (
+        ["preset", "workspace-edit"],
+        ["preset", "workspace-edit", "remove"],
+    ):
+        from .permission_presets import workspace_edit_preset
+
+        await workspace_edit_preset(context, enabled=len(parts) == 3)
+        return
     if len(parts) == 1:
         try:
             selected = await asyncio.to_thread(
@@ -384,7 +390,10 @@ async def permissions(context: CliContext, text: str) -> None:
 
 async def set_model(context: CliContext, value: str) -> None:
     try:
-        model = await context.session.set_model(value)
+        if value in getattr(context.session, "model_profiles", {}):
+            model = await context.session.set_model_profile(value)
+        else:
+            model = await context.session.set_model(value)
         context.console.print(f"[success]Model:[/] {model}")
     except ValueError as exc:
         context.console.print(f"[error]Error:[/] {exc}")
@@ -394,41 +403,55 @@ async def model_command(context: CliContext, text: str) -> None:
     parts = shlex.split(text)
     if len(parts) == 1:
         try:
-            selected = await asyncio.to_thread(select_model, context.session.model)
+            selected = await asyncio.to_thread(
+                select_model,
+                context.session.model_profile_id or context.session.model,
+                context.session.available_model_profiles(),
+            )
         except (EOFError, KeyboardInterrupt):
             context.console.print("[waiting]Model unchanged.[/]")
             return
         await set_model(context, selected)
         return
     if len(parts) != 2:
-        context.console.print(
-            "[error]Usage:[/] /model [deepseek-v4-flash|deepseek-v4-pro]"
-        )
+        context.console.print("[error]Usage:[/] /model [profile-id|unique-model-name]")
         return
     await set_model(context, parts[1])
 
 
 async def mcp_command(context: CliContext, text: str) -> None:
     parts = shlex.split(text)
-    registry = McpRegistry(
-        context.session.policy, layout=ProjectLayout.discover(context.session.workspace)
-    )
-    try:
-        if len(parts) == 1 or parts[1] == "list":
-            servers = await asyncio.to_thread(registry.servers)
-            for server in servers.values():
-                context.console.print(
-                    f"{server.name} scope={server.scope} enabled={server.enabled} tools={','.join(server.allowed_tools)}"
-                )
-        elif len(parts) == 3 and parts[1] in {"status", "tools"}:
-            server = await asyncio.to_thread(registry.get, parts[2])
+    operation = parts[1] if len(parts) > 1 else "list"
+    if not (
+        (operation == "list" and len(parts) <= 2)
+        or (operation in {"status", "tools"} and len(parts) == 3)
+    ):
+        raise ValueError("usage: /mcp [list|status <server>|tools <server>]")
+    if context.application is None:
+        context.console.print("MCP runtime status is unavailable.")
+        return
+    states = context.application.mcp_statuses()
+    if operation != "list":
+        states = tuple(state for state in states if state.name == parts[2])
+        if not states:
             context.console.print(
-                f"{server.name} cwd={server.cwd} enabled={server.enabled} tools={','.join(server.allowed_tools)}"
+                f"MCP server is not configured: {parts[2]}", markup=False
             )
-        else:
-            raise ValueError("usage: /mcp [list|status <server>|tools <server>]")
-    except ValueError as exc:
-        context.console.print(f"[error]Error:[/] {exc}")
+            return
+    for state in states:
+        context.console.print(
+            f"{state.name} scope={state.scope or 'unknown'} enabled={state.enabled} "
+            f"connected={state.connected} allowed_tools={','.join(state.allowed_tools)} "
+            f"available_tools={','.join(state.available_tools)}",
+            markup=False,
+            highlight=False,
+        )
+        if state.error:
+            context.console.print(
+                f"MCP {state.name}: unavailable — {state.error}",
+                markup=False,
+                highlight=False,
+            )
 
 
 async def show_git_diff(context: CliContext) -> None:

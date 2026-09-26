@@ -33,7 +33,7 @@ async def build_tool_runtime(
     planning: object | None = None,
 ) -> ToolRuntime:
     runtime = workspace_tools(
-        include_collaboration=not child_mode,
+        include_collaboration=settings.agents.enabled and not child_mode,
         include_shell=settings.shell.enabled,
         include_worktree=settings.worktree.enabled and not child_mode,
         schema_budget_tokens=settings.tools.schema_budget_tokens,
@@ -48,7 +48,7 @@ async def build_tool_runtime(
         # a child capability allow-list: child runtimes constructed without one
         # must not advertise or accept the control protocol either.
         runtime = runtime.filtered(
-            runtime.names
+            set(runtime.catalog._tools)
             - {"enter_plan_mode", "get_plan", "update_plan", "submit_plan"}
         )
         runtime = runtime.combined(extra_tools)

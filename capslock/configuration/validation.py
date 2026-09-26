@@ -24,7 +24,7 @@ from .rules import (
 )
 from .types import ConfigIssue
 
-CONFIG_VERSION = 13
+CONFIG_VERSION = 14
 _GROUP_FIELDS = {
     "runtime": {"max_tool_rounds", "permission_mode"},
     "tools": {
@@ -129,6 +129,8 @@ _PROVIDER_FIELDS = {
     "json_schema_outputs",
 }
 _MODEL_FIELDS = {
+    "cached_input_cost_per_million",
+    "tokenizer",
     "provider",
     "model",
     "context_window",

@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from ...permissions import permission_arguments_digest
+
 import hashlib
 import json
 import tomllib
 import uuid
 from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 from typing import Any, Iterable
 
 import tomlkit
@@ -81,6 +84,40 @@ class PermissionEngine:
     ) -> dict[str, Any]:
         return self.spec_for(tool).normalize(tool, arguments, context)
 
+    @staticmethod
+    def operation_identity(
+        name: str, arguments: dict[str, Any]
+    ) -> tuple[str, dict[str, Any]]:
+        # Keep grants scoped to the operation they authorized before consolidation.
+        from ..tools.collaboration import resolve_agent_operation
+
+        return resolve_agent_operation(name, arguments)
+
+    def _matching_rules(self, rules, tool, arguments):
+        operation, routed = self.operation_identity(tool.name, arguments)
+        original = SimpleNamespace(name=operation)
+        spec = self.spec_for(original)
+        matching = [rule for rule in rules if spec.matches(rule, original, routed)]
+        related = []
+        if operation != tool.name:
+            related.append(tool.name)
+        if tool.name == "write_file" and arguments.get("expected_sha256") is None:
+            related.append("create_file")
+        if tool.name == "list_tasks" and arguments.get("task_id") is not None:
+            related.append("get_task")
+        # Restrictions on either spelling remain effective. An old allow on the
+        # broader public name cannot authorize a newly added Agent operation.
+        for name in related:
+            proxy = SimpleNamespace(name=name)
+            matching.extend(
+                rule
+                for rule in rules
+                if rule.behavior is not PermissionBehavior.ALLOW
+                and self.spec_for(proxy).matches(rule, proxy, arguments)
+                and rule not in matching
+            )
+        return matching
+
     async def decide(
         self,
         tool: ToolDefinition,
@@ -90,7 +127,7 @@ class PermissionEngine:
     ) -> PermissionDecision:
         spec = self.spec_for(tool)
         normalized = spec.normalize(tool, arguments, context)
-        digest = _arguments_digest(normalized)
+        digest = permission_arguments_digest(normalized)
         hard = spec.hard_check(tool, normalized, policy, context)
         if hard:
             behavior, code, reason = hard
@@ -106,7 +143,7 @@ class PermissionEngine:
             )
 
         rules = list(await self.rules(context.session_id))
-        matching = [rule for rule in rules if spec.matches(rule, tool, normalized)]
+        matching = self._matching_rules(rules, tool, normalized)
         if (
             not any(rule.behavior is PermissionBehavior.DENY for rule in matching)
             and context.invocation_id
@@ -172,6 +209,8 @@ class PermissionEngine:
             deterministic_shell_allow=deterministic_shell_allow,
             shell_tool=tool.name == "shell",
         )
+        operation, routed = self.operation_identity(tool.name, normalized)
+        operation_tool = SimpleNamespace(name=operation)
         return PermissionDecision(
             default,
             "permission_mode",
@@ -179,7 +218,10 @@ class PermissionEngine:
             "mode_default",
             context.permission_mode,
             normalized_arguments_sha256=digest,
-            suggestions=spec.suggest_updates(tool, normalized)
+            suggestions=self.spec_for(operation_tool).suggest_updates(
+                operation_tool,
+                routed,
+            )
             if default is PermissionBehavior.ASK
             else (),
             decided_by="mode",
@@ -299,12 +341,7 @@ class PermissionEngine:
         arguments: dict[str, Any],
     ) -> bool:
         proxy = type("PermissionToolProxy", (), {"name": tool})()
-        spec = self.spec_for(proxy)
-        matching = [
-            rule
-            for rule in await self.rules(session_id)
-            if spec.matches(rule, proxy, arguments)
-        ]
+        matching = self._matching_rules(await self.rules(session_id), proxy, arguments)
         if any(rule.behavior is PermissionBehavior.DENY for rule in matching):
             return False
         if any(rule.behavior is PermissionBehavior.ASK for rule in matching):
@@ -505,18 +542,6 @@ def _rules_overlap(blocker: PermissionRule, allowed: PermissionRule) -> bool:
     if not blocker.constraints:
         return True
     return blocker.constraints == allowed.constraints
-
-
-def _arguments_digest(arguments: dict[str, Any]) -> str:
-    public = {
-        key: value
-        for key, value in arguments.items()
-        if not key.startswith("_permission_")
-    }
-    encoded = json.dumps(
-        public, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    )
-    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def _rule_digest(

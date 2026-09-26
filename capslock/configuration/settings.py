@@ -36,7 +36,6 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class Settings:
-    model_config: ModelSettings
     runtime: RuntimeSettings
     tools: ToolSettings
     shell: ShellSettings
@@ -58,6 +57,22 @@ class Settings:
     loop_detection: LoopDetectionSettings = LoopDetectionSettings()
     bridge: BridgeSettings = BridgeSettings()
     observability: ObservabilitySettings = ObservabilitySettings()
+
+    @property
+    def model_config(self) -> ModelSettings:
+        """Read-only compatibility view of the primary profile and its provider."""
+        if not self.routing or not self.routing.reasoning:
+            raise ValueError("routing.reasoning requires at least one model profile")
+        profile = (self.models or {})[self.routing.reasoning[0]]
+        provider = (self.providers or {})[profile.provider]
+        return ModelSettings(
+            provider.api_key,
+            provider.base_url,
+            profile.model,
+            provider.timeout_seconds,
+            profile.input_cost_per_million,
+            profile.output_cost_per_million,
+        )
 
     @classmethod
     def load(

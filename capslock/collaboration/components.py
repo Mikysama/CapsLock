@@ -26,12 +26,14 @@ class CollaborationMailbox:
         ttl_seconds: int,
         active_states: set[str],
         cancel: Callable[[str], Awaitable[None]],
+        notify: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
         self.repository = repository
         self.enabled = enabled
         self.ttl_seconds = ttl_seconds
         self.active_states = active_states
         self._cancel = cancel
+        self._notify = notify
 
     async def send_message(
         self,
@@ -61,7 +63,7 @@ class CollaborationMailbox:
             raise ValueError("parent cannot send this mailbox message kind")
         if kind is MailboxMessageKind.CANCEL:
             await self._cancel(task_id)
-        return await self.repository.send_mailbox(
+        message = await self.repository.send_mailbox(
             task_id=task_id,
             parent_run_id=str(task["parent_run_id"]),
             sender="parent",
@@ -70,6 +72,9 @@ class CollaborationMailbox:
             payload=payload,
             ttl_seconds=self.ttl_seconds,
         )
+        if self._notify is not None:
+            await self._notify(str(task_id))
+        return message
 
     async def read_messages(
         self,
@@ -130,7 +135,7 @@ class CollaborationMailbox:
             MailboxMessageKind.ARTIFACT_OFFER,
         }:
             raise ValueError("child cannot send this mailbox message kind")
-        return await self.repository.send_mailbox(
+        message = await self.repository.send_mailbox(
             task_id=task_id,
             parent_run_id=parent_run_id,
             sender="child",
@@ -139,6 +144,9 @@ class CollaborationMailbox:
             payload=payload,
             ttl_seconds=self.ttl_seconds,
         )
+        if self._notify is not None:
+            await self._notify(str(task_id))
+        return message
 
     async def read_child_messages(
         self, task_id: str, *, parent_run_id: str

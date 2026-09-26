@@ -360,6 +360,23 @@ def test_agent_model_switch_is_session_scoped_and_blocked_during_run(
                 session.id,
                 FakeChatModel(answer("unused")),
             )
+            from capslock.configuration import ModelProfileSettings, ProviderSettings
+
+            agent.model_profiles = {
+                name: ModelProfileSettings(name, "p", name, 128000, 8192, 0, 0)
+                for name in ("deepseek-v4-flash", "deepseek-v4-pro")
+            }
+            agent.model_providers = {
+                "p": ProviderSettings(
+                    "p",
+                    "openai_responses",
+                    "https://example.test",
+                    "fake",
+                    60,
+                    "local",
+                    strict_tool_calls=True,
+                )
+            }
             selected = await agent.set_model("deepseek-v4-pro")
             assert selected == "deepseek-v4-pro"
             assert agent.model == "deepseek-v4-pro"
@@ -371,7 +388,7 @@ def test_agent_model_switch_is_session_scoped_and_blocked_during_run(
             with pytest.raises(ValueError, match="run is active"):
                 await agent.set_model("deepseek-v4-flash")
             assert agent.model == "deepseek-v4-pro"
-            with pytest.raises(ValueError, match="deepseek-v4-flash"):
+            with pytest.raises(ValueError, match="unconfigured or ambiguous"):
                 await agent.set_model("unsupported")
         finally:
             await repositories.close()

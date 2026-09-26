@@ -46,6 +46,7 @@ class SessionInfo:
     title_updated_at: str | None = None
     archived_at: str | None = None
     deletion_state: str | None = None
+    model_profile: str | None = None
 
 
 @dataclass(frozen=True)

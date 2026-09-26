@@ -33,12 +33,21 @@ jobs:
           .venv-ci/bin/python -m pip install --upgrade pip setuptools wheel
           .venv-ci/bin/python -m pip install -e '.[dev,local-embeddings]'
           .venv-ci/bin/python -c 'import fastembed'
+      - name: Install required search backend
+        shell: bash
+        run: |
+          if ! command -v rg >/dev/null 2>&1; then
+            if [[ "$RUNNER_OS" == "macOS" ]]; then brew install ripgrep; else sudo apt-get update && sudo apt-get install -y ripgrep; fi
+          fi
+          rg --version
       - name: Lint
         run: |
           python -m ruff format --check .
           python -m ruff check .
       - name: Test
         run: python -m pytest -q
+      - name: Offline kernel regression gate
+        run: python scripts/evaluate_offline.py --output "$RUNNER_TEMP/capslock-offline.json"
       - name: Core agent evaluation
         run: python scripts/evaluate_agent.py --mode deterministic --output "$RUNNER_TEMP/capslock-eval.json"
       - name: Behaviour policy evaluation

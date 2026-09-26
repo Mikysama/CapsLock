@@ -31,6 +31,11 @@ def build_parser() -> argparse.ArgumentParser:
     execute = subparsers.add_parser("exec", help="Run one non-interactive request")
     execute.add_argument("question", nargs="?")
     execute.add_argument("--json", action="store_true")
+    execute.add_argument("--output-schema", type=Path)
+    server = subparsers.add_parser(
+        "app-server", help="Serve the local JSON-RPC client protocol"
+    )
+    server.add_argument("--stdio", action="store_true", required=True)
     execute.add_argument("--no-spinner", action="store_true", default=argparse.SUPPRESS)
     execute.add_argument("--quiet", action="store_true", default=argparse.SUPPRESS)
     execute.add_argument("--max-tool-rounds", type=_positive_int)
@@ -196,14 +201,18 @@ async def async_main(
     output = console or make_console()
     errors = (
         make_console(file=sys.stderr)
-        if console is None and args.command == "exec"
+        if console is None and args.command in {"exec", "app-server"}
         else output
     )
     workspace = args.workspace.resolve()
     if not workspace.is_dir():
-        output.print(f"[error]Error:[/] workspace is not a directory: {workspace}")
+        errors.print(f"[error]Error:[/] workspace is not a directory: {workspace}")
         return 2
     try:
+        if args.command == "exec" and args.output_schema is not None:
+            from ..output_schema import load_output_schema
+
+            load_output_schema(args.output_schema)
         layout = ProjectLayout.discover(workspace)
         load_project_environment(workspace)
         if args.command == "init":
@@ -283,6 +292,10 @@ async def async_main(
         from ..configuration import Settings
 
         settings = Settings.load(workspace, layout=layout)
+        if args.command == "app-server":
+            from ..app_server import serve_stdio
+
+            return await serve_stdio(workspace, settings, layout)
         if args.command == "input":
             from .input_requests import input_command
 
@@ -363,6 +376,7 @@ async def async_main(
                         quiet=args.quiet,
                         limits=_exec_limits(application.session.default_limits, args),
                         no_memory=args.no_memory,
+                        output_schema=args.output_schema,
                     )
                 from .status import dynamic_status_supported
 
@@ -415,6 +429,7 @@ async def async_main(
             "LifecycleError",
             "PluginValidationError",
             "SandboxUnavailableError",
+            "WorkspaceBusyError",
         }:
             errors.print(f"[error]Error:[/] {exc}")
             return 2

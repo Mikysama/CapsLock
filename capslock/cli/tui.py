@@ -82,7 +82,7 @@ async def run_tui(
         "stopping": False,
         "details_expanded": False,
         "queued_items": {},
-        "usage": (0, 0, 0.0),
+        "usage": (None, None, None),
         "context": (None, agent.context_budget.input_budget),
         "plan_status": initial_plan[0].status.value if initial_plan else None,
         "recalled_item": None,
@@ -599,13 +599,21 @@ class _RunRenderer:
                 )
             detail = (
                 f"run {event.run_id[:8]} · {event.data.get('duration_ms', 0)}ms · "
-                f"{usage.get('input_tokens', 0)}/{usage.get('output_tokens', 0)} tokens · "
-                f"${float(usage.get('cost_usd', 0)):.6f}{selected_model}"
+                + (
+                    "usage unknown"
+                    if usage.get("source") in {"unknown", "partial"}
+                    else f"{usage.get('input_tokens', 0)}/{usage.get('output_tokens', 0)} tokens · ${float(usage.get('cost_usd', 0)):.6f}"
+                )
+                + selected_model
             )
             self.state["usage"] = (
-                int(usage.get("input_tokens", 0)),
-                int(usage.get("output_tokens", 0)),
-                float(usage.get("cost_usd", 0)),
+                (None, None, None)
+                if usage.get("source") in {"unknown", "partial"}
+                else (
+                    int(usage.get("input_tokens", 0)),
+                    int(usage.get("output_tokens", 0)),
+                    float(usage.get("cost_usd", 0)),
+                )
             )
             await self.writer.print(
                 result_status("Completed", "success", detail=detail)

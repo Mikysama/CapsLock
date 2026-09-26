@@ -52,9 +52,19 @@ class WorkspaceRepositories:
 
     @classmethod
     async def open(
-        cls, path: str | Path, *, workspace: Path
+        cls, path: str | Path, *, workspace: Path, shared_owner: bool = False
     ) -> "WorkspaceRepositories":
-        database = await WorkspaceDatabase.open(path)
+        database = await WorkspaceDatabase.open(path, shared_owner=shared_owner)
+        try:
+            return await cls._compose(database, workspace=workspace)
+        except BaseException:
+            await database.close()
+            raise
+
+    @classmethod
+    async def _compose(
+        cls, database: WorkspaceDatabase, *, workspace: Path
+    ) -> "WorkspaceRepositories":
         await database.execute(
             "INSERT OR IGNORE INTO database_metadata(key,value) VALUES('workspace',?)",
             (str(workspace.resolve()),),
@@ -68,10 +78,12 @@ class WorkspaceRepositories:
         )
         assert project_row is not None
         collaboration = CollaborationRepository(database)
-        await collaboration.interrupt_active()
+        if database.recovery_owner:
+            await collaboration.interrupt_active()
         episodic = EpisodicRepository(database)
         journal = RunJournalRepository(database, episodic=episodic)
-        await journal.interrupt_active()
+        if database.recovery_owner:
+            await journal.interrupt_active()
         runs = RunRepository(database, journal)
         return cls(
             database,

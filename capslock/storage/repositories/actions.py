@@ -111,6 +111,13 @@ class ActionRepository(Repository):
             raise ValueError(f"action does not exist: {action_id}")
         return await self.require(action_id)
 
+    async def mark_manual_approval(self, action_id: str) -> ActionRecord:
+        await self.execute(
+            "UPDATE actions SET request_json=json_set(request_json,'$._manual_approval',json('true')) WHERE id=? AND status='pending'",
+            (action_id,),
+        )
+        return await self.require(action_id)
+
     async def transition(
         self,
         action_id: str,

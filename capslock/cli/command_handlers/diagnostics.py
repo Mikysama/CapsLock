@@ -69,13 +69,25 @@ async def stats(context, parts: list[str], raw: str) -> CommandOutcome:
         ),
         values,
     )
+    unknown_row = await repositories.database.fetch_one(
+        "SELECT count(*) FROM model_calls mc JOIN runs r ON r.id=mc.run_id WHERE (mc.usage_source IS NULL OR mc.usage_source='unknown')"
+        + (" AND r.session_id=?" if session_id else ""),
+        values,
+    )
+    unknown_usage = bool(unknown_row[0])
     main = next((row for row in usage if row["kind"] == "agent"), {})
     maintenance = [
         row for row in usage if row["kind"] in {"local_command", "side_question"}
     ]
+
+    def usage_label(row):
+        if unknown_usage:
+            return "usage unknown (reported totals are incomplete)"
+        return f"tokens {row.get('input_tokens', 0) + row.get('output_tokens', 0)}; cost ${float(row.get('cost_usd', 0)):.6f}"
+
     lines = [
         f"Sessions: {sessions}",
-        f"Agent runs: {main.get('run_count', 0)}; tokens {main.get('input_tokens', 0) + main.get('output_tokens', 0)}; cost ${float(main.get('cost_usd', 0)):.6f}; duration {main.get('duration_ms', 0)} ms",
+        f"Agent runs: {main.get('run_count', 0)}; {usage_label(main)}; duration {main.get('duration_ms', 0)} ms",
         f"Run status: {', '.join(f'{r["status"]}={r["count"]}' for r in statuses) or 'none'}",
         f"Tool calls: {int(tools[0])}; Actions: {int(actions[0])}; compactions: {int(compactions[0])}; child Agents: {int(child_rows[0])}",
         f"Models: {', '.join(f'{r["model"]} ({r["calls"]})' for r in model_rows) or 'none'}",
@@ -83,7 +95,7 @@ async def stats(context, parts: list[str], raw: str) -> CommandOutcome:
     ]
     for row in maintenance:
         lines.append(
-            f"Maintenance {row['kind']}: {row['run_count']} runs; {row['input_tokens'] + row['output_tokens']} tokens; ${float(row['cost_usd']):.6f}"
+            f"Maintenance {row['kind']}: {row['run_count']} runs; {usage_label(row)}"
         )
     await get_ui(context).show(f"Stats · {scope}", "\n".join(lines))
     return CommandOutcome()

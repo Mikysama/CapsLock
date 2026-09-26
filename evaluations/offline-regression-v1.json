@@ -1,0 +1,1163 @@
+{
+  "schema_version": 1,
+  "kind": "offline_kernel_regression",
+  "description": "Sixty distinct executable kernel regression scenarios. Reuses version-controlled test fixtures and assertions; not a real-model task-solving benchmark.",
+  "scenarios": [
+    {
+      "id": "partial_response_terminal_preserves_usage_and_fails",
+      "group": "model_protocol_budget_routing",
+      "nodeid": "tests/test_model_protocol_upgrade.py::test_partial_response_terminal_preserves_usage_and_fails",
+      "fixtures": [
+        "status",
+        "code"
+      ],
+      "input": {
+        "scenario": "partial response terminal preserves usage and fails",
+        "definition": "tests/test_model_protocol_upgrade.py::test_partial_response_terminal_preserves_usage_and_fails",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "stream_without_terminal_is_failure",
+      "group": "model_protocol_budget_routing",
+      "nodeid": "tests/test_model_protocol_upgrade.py::test_stream_without_terminal_is_failure",
+      "fixtures": [
+        "events"
+      ],
+      "input": {
+        "scenario": "stream without terminal is failure",
+        "definition": "tests/test_model_protocol_upgrade.py::test_stream_without_terminal_is_failure",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "duplicate_terminal_rejected",
+      "group": "model_protocol_budget_routing",
+      "nodeid": "tests/test_model_protocol_upgrade.py::test_duplicate_terminal_rejected",
+      "fixtures": [
+        "in_memory_scripted_runtime"
+      ],
+      "input": {
+        "scenario": "duplicate terminal rejected",
+        "definition": "tests/test_model_protocol_upgrade.py::test_duplicate_terminal_rejected",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "stream_error_event_is_not_success",
+      "group": "model_protocol_budget_routing",
+      "nodeid": "tests/test_model_protocol_upgrade.py::test_stream_error_event_is_not_success",
+      "fixtures": [
+        "in_memory_scripted_runtime"
+      ],
+      "input": {
+        "scenario": "stream error event is not success",
+        "definition": "tests/test_model_protocol_upgrade.py::test_stream_error_event_is_not_success",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "complete_only_synthesizes_success_terminal",
+      "group": "model_protocol_budget_routing",
+      "nodeid": "tests/test_model_protocol_upgrade.py::test_complete_only_synthesizes_success_terminal",
+      "fixtures": [
+        "in_memory_scripted_runtime"
+      ],
+      "input": {
+        "scenario": "complete only synthesizes success terminal",
+        "definition": "tests/test_model_protocol_upgrade.py::test_complete_only_synthesizes_success_terminal",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "usage_details_do_not_double_count",
+      "group": "model_protocol_budget_routing",
+      "nodeid": "tests/test_model_protocol_upgrade.py::test_usage_details_do_not_double_count",
+      "fixtures": [
+        "in_memory_scripted_runtime"
+      ],
+      "input": {
+        "scenario": "usage details do not double count",
+        "definition": "tests/test_model_protocol_upgrade.py::test_usage_details_do_not_double_count",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "retry_after_seconds_not_capped",
+      "group": "model_protocol_budget_routing",
+      "nodeid": "tests/test_model_protocol_upgrade.py::test_retry_after_seconds_not_capped",
+      "fixtures": [
+        "in_memory_scripted_runtime"
+      ],
+      "input": {
+        "scenario": "retry after seconds not capped",
+        "definition": "tests/test_model_protocol_upgrade.py::test_retry_after_seconds_not_capped",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "retry_after_http_date",
+      "group": "model_protocol_budget_routing",
+      "nodeid": "tests/test_model_protocol_upgrade.py::test_retry_after_http_date",
+      "fixtures": [
+        "monkeypatch"
+      ],
+      "input": {
+        "scenario": "retry after http date",
+        "definition": "tests/test_model_protocol_upgrade.py::test_retry_after_http_date",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "session_profile_switch_updates_all_limits",
+      "group": "model_protocol_budget_routing",
+      "nodeid": "tests/test_profile_upgrade.py::test_session_profile_switch_updates_all_limits",
+      "fixtures": [
+        "tmp_path"
+      ],
+      "input": {
+        "scenario": "session profile switch updates all limits",
+        "definition": "tests/test_profile_upgrade.py::test_session_profile_switch_updates_all_limits",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "router_dynamically_reserves_only_remaining_token_budget",
+      "group": "model_protocol_budget_routing",
+      "nodeid": "tests/test_model_routing.py::test_router_dynamically_reserves_only_remaining_token_budget",
+      "fixtures": [
+        "tmp_path"
+      ],
+      "input": {
+        "scenario": "router dynamically reserves only remaining token budget",
+        "definition": "tests/test_model_routing.py::test_router_dynamically_reserves_only_remaining_token_budget",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "router_refuses_cross_policy_fallback_and_stops_before_budgeted_call",
+      "group": "model_protocol_budget_routing",
+      "nodeid": "tests/test_model_routing.py::test_router_refuses_cross_policy_fallback_and_stops_before_budgeted_call",
+      "fixtures": [
+        "tmp_path"
+      ],
+      "input": {
+        "scenario": "router refuses cross policy fallback and stops before budgeted call",
+        "definition": "tests/test_model_routing.py::test_router_refuses_cross_policy_fallback_and_stops_before_budgeted_call",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "stream_retry_only_happens_before_first_visible_delta",
+      "group": "model_protocol_budget_routing",
+      "nodeid": "tests/test_model_routing.py::test_stream_retry_only_happens_before_first_visible_delta",
+      "fixtures": [
+        "tmp_path"
+      ],
+      "input": {
+        "scenario": "stream retry only happens before first visible delta",
+        "definition": "tests/test_model_routing.py::test_stream_retry_only_happens_before_first_visible_delta",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "search_missing_backend_is_failure",
+      "group": "search_edits_cross_file",
+      "nodeid": "tests/test_search_polling_upgrade.py::test_search_missing_backend_is_failure",
+      "fixtures": [
+        "tmp_path",
+        "monkeypatch"
+      ],
+      "input": {
+        "scenario": "search missing backend is failure",
+        "definition": "tests/test_search_polling_upgrade.py::test_search_missing_backend_is_failure",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "search_invalid_regex_is_failure",
+      "group": "search_edits_cross_file",
+      "nodeid": "tests/test_search_polling_upgrade.py::test_search_invalid_regex_is_failure",
+      "fixtures": [
+        "tmp_path"
+      ],
+      "input": {
+        "scenario": "search invalid regex is failure",
+        "definition": "tests/test_search_polling_upgrade.py::test_search_invalid_regex_is_failure",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "search_explicit_semantics",
+      "group": "search_edits_cross_file",
+      "nodeid": "tests/test_search_polling_upgrade.py::test_search_explicit_semantics",
+      "fixtures": [
+        "tmp_path",
+        "options",
+        "expected"
+      ],
+      "input": {
+        "scenario": "search explicit semantics",
+        "definition": "tests/test_search_polling_upgrade.py::test_search_explicit_semantics",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "search_ignores_user_config_and_reports_truncation",
+      "group": "search_edits_cross_file",
+      "nodeid": "tests/test_search_polling_upgrade.py::test_search_ignores_user_config_and_reports_truncation",
+      "fixtures": [
+        "tmp_path",
+        "monkeypatch"
+      ],
+      "input": {
+        "scenario": "search ignores user config and reports truncation",
+        "definition": "tests/test_search_polling_upgrade.py::test_search_ignores_user_config_and_reports_truncation",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "search_hidden_and_privacy",
+      "group": "search_edits_cross_file",
+      "nodeid": "tests/test_search_polling_upgrade.py::test_search_hidden_and_privacy",
+      "fixtures": [
+        "tmp_path"
+      ],
+      "input": {
+        "scenario": "search hidden and privacy",
+        "definition": "tests/test_search_polling_upgrade.py::test_search_hidden_and_privacy",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "write_file_hash_contract_and_notebook_revalidation",
+      "group": "search_edits_cross_file",
+      "nodeid": "tests/test_priority_tools.py::test_write_file_hash_contract_and_notebook_revalidation",
+      "fixtures": [
+        "tmp_path"
+      ],
+      "input": {
+        "scenario": "write file hash contract and notebook revalidation",
+        "definition": "tests/test_priority_tools.py::test_write_file_hash_contract_and_notebook_revalidation",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "verified_artifact_is_published_without_overwriting_parent_change",
+      "group": "search_edits_cross_file",
+      "nodeid": "tests/test_collaboration.py::test_verified_artifact_is_published_without_overwriting_parent_change",
+      "fixtures": [
+        "tmp_path"
+      ],
+      "input": {
+        "scenario": "verified artifact is published without overwriting parent change",
+        "definition": "tests/test_collaboration.py::test_verified_artifact_is_published_without_overwriting_parent_change",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "artifact_publish_revalidates_after_staging",
+      "group": "search_edits_cross_file",
+      "nodeid": "tests/test_collaboration.py::test_artifact_publish_revalidates_after_staging",
+      "fixtures": [
+        "tmp_path",
+        "monkeypatch"
+      ],
+      "input": {
+        "scenario": "artifact publish revalidates after staging",
+        "definition": "tests/test_collaboration.py::test_artifact_publish_revalidates_after_staging",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "artifact_publish_rolls_back_partial_replacement",
+      "group": "search_edits_cross_file",
+      "nodeid": "tests/test_collaboration.py::test_artifact_publish_rolls_back_partial_replacement",
+      "fixtures": [
+        "tmp_path",
+        "monkeypatch"
+      ],
+      "input": {
+        "scenario": "artifact publish rolls back partial replacement",
+        "definition": "tests/test_collaboration.py::test_artifact_publish_rolls_back_partial_replacement",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "artifact_publish_supports_mixed_create_and_update",
+      "group": "search_edits_cross_file",
+      "nodeid": "tests/test_collaboration.py::test_artifact_publish_supports_mixed_create_and_update",
+      "fixtures": [
+        "tmp_path"
+      ],
+      "input": {
+        "scenario": "artifact publish supports mixed create and update",
+        "definition": "tests/test_collaboration.py::test_artifact_publish_supports_mixed_create_and_update",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "filesystem_path_mistakes_are_repairable_tool_outcomes",
+      "group": "search_edits_cross_file",
+      "nodeid": "tests/test_tool_runtime_contracts.py::test_filesystem_path_mistakes_are_repairable_tool_outcomes",
+      "fixtures": [
+        "tmp_path"
+      ],
+      "input": {
+        "scenario": "filesystem path mistakes are repairable tool outcomes",
+        "definition": "tests/test_tool_runtime_contracts.py::test_filesystem_path_mistakes_are_repairable_tool_outcomes",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "file_globs_are_anchored_and_double_star_crosses_directories",
+      "group": "search_edits_cross_file",
+      "nodeid": "tests/test_tool_runtime_contracts.py::test_file_globs_are_anchored_and_double_star_crosses_directories",
+      "fixtures": [
+        "tmp_path"
+      ],
+      "input": {
+        "scenario": "file globs are anchored and double star crosses directories",
+        "definition": "tests/test_tool_runtime_contracts.py::test_file_globs_are_anchored_and_double_star_crosses_directories",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "process_offsets_and_capture_progress_after_truncation",
+      "group": "process_loop_cancellation",
+      "nodeid": "tests/test_search_polling_upgrade.py::test_process_offsets_and_capture_progress_after_truncation",
+      "fixtures": [
+        "tmp_path"
+      ],
+      "input": {
+        "scenario": "process offsets and capture progress after truncation",
+        "definition": "tests/test_search_polling_upgrade.py::test_process_offsets_and_capture_progress_after_truncation",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "process_poll_wait_is_limited_by_run_deadline",
+      "group": "process_loop_cancellation",
+      "nodeid": "tests/test_search_polling_upgrade.py::test_process_poll_wait_is_limited_by_run_deadline",
+      "fixtures": [
+        "tmp_path"
+      ],
+      "input": {
+        "scenario": "process poll wait is limited by run deadline",
+        "definition": "tests/test_search_polling_upgrade.py::test_process_poll_wait_is_limited_by_run_deadline",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "governor_running_poll_bypasses_repeats_but_stops_stalled_job",
+      "group": "process_loop_cancellation",
+      "nodeid": "tests/test_search_polling_upgrade.py::test_governor_running_poll_bypasses_repeats_but_stops_stalled_job",
+      "fixtures": [
+        "in_memory_scripted_runtime"
+      ],
+      "input": {
+        "scenario": "governor running poll bypasses repeats but stops stalled job",
+        "definition": "tests/test_search_polling_upgrade.py::test_governor_running_poll_bypasses_repeats_but_stops_stalled_job",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "shell_launch_failure_cleans_temporary_directory",
+      "group": "process_loop_cancellation",
+      "nodeid": "tests/test_actions.py::test_shell_launch_failure_cleans_temporary_directory",
+      "fixtures": [
+        "tmp_path",
+        "monkeypatch"
+      ],
+      "input": {
+        "scenario": "shell launch failure cleans temporary directory",
+        "definition": "tests/test_actions.py::test_shell_launch_failure_cleans_temporary_directory",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "shell_timeout_and_cancellation_clean_temporary_directory",
+      "group": "process_loop_cancellation",
+      "nodeid": "tests/test_actions.py::test_shell_timeout_and_cancellation_clean_temporary_directory",
+      "fixtures": [
+        "tmp_path",
+        "monkeypatch",
+        "cancel"
+      ],
+      "input": {
+        "scenario": "shell timeout and cancellation clean temporary directory",
+        "definition": "tests/test_actions.py::test_shell_timeout_and_cancellation_clean_temporary_directory",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "background_shell_completion_cleans_temporary_directory",
+      "group": "process_loop_cancellation",
+      "nodeid": "tests/test_actions.py::test_background_shell_completion_cleans_temporary_directory",
+      "fixtures": [
+        "tmp_path",
+        "monkeypatch"
+      ],
+      "input": {
+        "scenario": "background shell completion cleans temporary directory",
+        "definition": "tests/test_actions.py::test_background_shell_completion_cleans_temporary_directory",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "command_cancellation_terminates_process_and_marks_action",
+      "group": "process_loop_cancellation",
+      "nodeid": "tests/test_actions.py::test_command_cancellation_terminates_process_and_marks_action",
+      "fixtures": [
+        "tmp_path",
+        "monkeypatch"
+      ],
+      "input": {
+        "scenario": "command cancellation terminates process and marks action",
+        "definition": "tests/test_actions.py::test_command_cancellation_terminates_process_and_marks_action",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "cancellation_during_running_transition_is_persisted",
+      "group": "process_loop_cancellation",
+      "nodeid": "tests/test_actions.py::test_cancellation_during_running_transition_is_persisted",
+      "fixtures": [
+        "tmp_path",
+        "monkeypatch"
+      ],
+      "input": {
+        "scenario": "cancellation during running transition is persisted",
+        "definition": "tests/test_actions.py::test_cancellation_during_running_transition_is_persisted",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "exec_stops_before_repeated_tool_side_effect",
+      "group": "process_loop_cancellation",
+      "nodeid": "tests/test_governance.py::test_exec_stops_before_repeated_tool_side_effect",
+      "fixtures": [
+        "tmp_path"
+      ],
+      "input": {
+        "scenario": "exec stops before repeated tool side effect",
+        "definition": "tests/test_governance.py::test_exec_stops_before_repeated_tool_side_effect",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "cancelling_stream_closes_run_action_and_running_step",
+      "group": "process_loop_cancellation",
+      "nodeid": "tests/test_runtime.py::test_cancelling_stream_closes_run_action_and_running_step",
+      "fixtures": [
+        "tmp_path"
+      ],
+      "input": {
+        "scenario": "cancelling stream closes run action and running step",
+        "definition": "tests/test_runtime.py::test_cancelling_stream_closes_run_action_and_running_step",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "parallel_fail_fast_cancels_siblings_and_commits_results",
+      "group": "process_loop_cancellation",
+      "nodeid": "tests/test_kernel.py::test_parallel_fail_fast_cancels_siblings_and_commits_results",
+      "fixtures": [
+        "tmp_path"
+      ],
+      "input": {
+        "scenario": "parallel fail fast cancels siblings and commits results",
+        "definition": "tests/test_kernel.py::test_parallel_fail_fast_cancels_siblings_and_commits_results",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "cancel_queued_child_does_not_cancel_siblings",
+      "group": "process_loop_cancellation",
+      "nodeid": "tests/test_collaboration.py::test_cancel_queued_child_does_not_cancel_siblings",
+      "fixtures": [
+        "tmp_path"
+      ],
+      "input": {
+        "scenario": "cancel queued child does not cancel siblings",
+        "definition": "tests/test_collaboration.py::test_cancel_queued_child_does_not_cancel_siblings",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "micro_compaction_never_replaces_content_without_durable_artifact",
+      "group": "compaction_facts_recovery",
+      "nodeid": "tests/test_context_retrieval.py::test_micro_compaction_never_replaces_content_without_durable_artifact",
+      "fixtures": [
+        "in_memory_scripted_runtime"
+      ],
+      "input": {
+        "scenario": "micro compaction never replaces content without durable artifact",
+        "definition": "tests/test_context_retrieval.py::test_micro_compaction_never_replaces_content_without_durable_artifact",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "forced_single_turn_compaction_keeps_durable_micro_progress",
+      "group": "compaction_facts_recovery",
+      "nodeid": "tests/test_context_retrieval.py::test_forced_single_turn_compaction_keeps_durable_micro_progress",
+      "fixtures": [
+        "tmp_path",
+        "context_window"
+      ],
+      "input": {
+        "scenario": "forced single turn compaction keeps durable micro progress",
+        "definition": "tests/test_context_retrieval.py::test_forced_single_turn_compaction_keeps_durable_micro_progress",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "hierarchical_summary_submits_front_middle_and_tail_without_slicing",
+      "group": "compaction_facts_recovery",
+      "nodeid": "tests/test_context_retrieval.py::test_hierarchical_summary_submits_front_middle_and_tail_without_slicing",
+      "fixtures": [
+        "in_memory_scripted_runtime"
+      ],
+      "input": {
+        "scenario": "hierarchical summary submits front middle and tail without slicing",
+        "definition": "tests/test_context_retrieval.py::test_hierarchical_summary_submits_front_middle_and_tail_without_slicing",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "hierarchical_summary_reuses_unchanged_segment_digests",
+      "group": "compaction_facts_recovery",
+      "nodeid": "tests/test_context_retrieval.py::test_hierarchical_summary_reuses_unchanged_segment_digests",
+      "fixtures": [
+        "in_memory_scripted_runtime"
+      ],
+      "input": {
+        "scenario": "hierarchical summary reuses unchanged segment digests",
+        "definition": "tests/test_context_retrieval.py::test_hierarchical_summary_reuses_unchanged_segment_digests",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "summary_chunks_are_token_budgeted_for_cjk_code_and_json",
+      "group": "compaction_facts_recovery",
+      "nodeid": "tests/test_context_retrieval.py::test_summary_chunks_are_token_budgeted_for_cjk_code_and_json",
+      "fixtures": [
+        "in_memory_scripted_runtime"
+      ],
+      "input": {
+        "scenario": "summary chunks are token budgeted for cjk code and json",
+        "definition": "tests/test_context_retrieval.py::test_summary_chunks_are_token_budgeted_for_cjk_code_and_json",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "provider_overflow_bisects_only_failed_summary_segment",
+      "group": "compaction_facts_recovery",
+      "nodeid": "tests/test_context_retrieval.py::test_provider_overflow_bisects_only_failed_summary_segment",
+      "fixtures": [
+        "in_memory_scripted_runtime"
+      ],
+      "input": {
+        "scenario": "provider overflow bisects only failed summary segment",
+        "definition": "tests/test_context_retrieval.py::test_provider_overflow_bisects_only_failed_summary_segment",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "failed_summary_persists_usage_from_every_rejected_response",
+      "group": "compaction_facts_recovery",
+      "nodeid": "tests/test_context_retrieval.py::test_failed_summary_persists_usage_from_every_rejected_response",
+      "fixtures": [
+        "tmp_path"
+      ],
+      "input": {
+        "scenario": "failed summary persists usage from every rejected response",
+        "definition": "tests/test_context_retrieval.py::test_failed_summary_persists_usage_from_every_rejected_response",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "truncated_valid_json_summary_uses_degraded_fallback",
+      "group": "compaction_facts_recovery",
+      "nodeid": "tests/test_context_retrieval.py::test_truncated_valid_json_summary_uses_degraded_fallback",
+      "fixtures": [
+        "tmp_path"
+      ],
+      "input": {
+        "scenario": "truncated valid json summary uses degraded fallback",
+        "definition": "tests/test_context_retrieval.py::test_truncated_valid_json_summary_uses_degraded_fallback",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "fallback_scans_entire_segment_for_corrections_and_identifiers",
+      "group": "compaction_facts_recovery",
+      "nodeid": "tests/test_context_retrieval.py::test_fallback_scans_entire_segment_for_corrections_and_identifiers",
+      "fixtures": [
+        "in_memory_scripted_runtime"
+      ],
+      "input": {
+        "scenario": "fallback scans entire segment for corrections and identifiers",
+        "definition": "tests/test_context_retrieval.py::test_fallback_scans_entire_segment_for_corrections_and_identifiers",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "runtime_restores_critical_fact_omitted_by_valid_model_summary",
+      "group": "compaction_facts_recovery",
+      "nodeid": "tests/test_context_retrieval.py::test_runtime_restores_critical_fact_omitted_by_valid_model_summary",
+      "fixtures": [
+        "in_memory_scripted_runtime"
+      ],
+      "input": {
+        "scenario": "runtime restores critical fact omitted by valid model summary",
+        "definition": "tests/test_context_retrieval.py::test_runtime_restores_critical_fact_omitted_by_valid_model_summary",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "checkpoint_compaction_preserves_latest_api_safe_tool_round",
+      "group": "compaction_facts_recovery",
+      "nodeid": "tests/test_context_retrieval.py::test_checkpoint_compaction_preserves_latest_api_safe_tool_round",
+      "fixtures": [
+        "tmp_path"
+      ],
+      "input": {
+        "scenario": "checkpoint compaction preserves latest api safe tool round",
+        "definition": "tests/test_context_retrieval.py::test_checkpoint_compaction_preserves_latest_api_safe_tool_round",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "finalize_transaction_failure_preserves_active_boundary",
+      "group": "compaction_facts_recovery",
+      "nodeid": "tests/test_context_retrieval.py::test_finalize_transaction_failure_preserves_active_boundary",
+      "fixtures": [
+        "tmp_path"
+      ],
+      "input": {
+        "scenario": "finalize transaction failure preserves active boundary",
+        "definition": "tests/test_context_retrieval.py::test_finalize_transaction_failure_preserves_active_boundary",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "interactive_approval_executes_action_inside_same_run",
+      "group": "approval_side_effect_agent_conflict",
+      "nodeid": "tests/test_runtime.py::test_interactive_approval_executes_action_inside_same_run",
+      "fixtures": [
+        "tmp_path"
+      ],
+      "input": {
+        "scenario": "interactive approval executes action inside same run",
+        "definition": "tests/test_runtime.py::test_interactive_approval_executes_action_inside_same_run",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "non_action_session_approval_persists_before_execution",
+      "group": "approval_side_effect_agent_conflict",
+      "nodeid": "tests/test_runtime.py::test_non_action_session_approval_persists_before_execution",
+      "fixtures": [
+        "tmp_path"
+      ],
+      "input": {
+        "scenario": "non action session approval persists before execution",
+        "definition": "tests/test_runtime.py::test_non_action_session_approval_persists_before_execution",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "overflow_recovery_does_not_replay_completed_tool_call",
+      "group": "approval_side_effect_agent_conflict",
+      "nodeid": "tests/test_runtime.py::test_overflow_recovery_does_not_replay_completed_tool_call",
+      "fixtures": [
+        "tmp_path"
+      ],
+      "input": {
+        "scenario": "overflow recovery does not replay completed tool call",
+        "definition": "tests/test_runtime.py::test_overflow_recovery_does_not_replay_completed_tool_call",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "interrupted_question_is_available_after_resume",
+      "group": "approval_side_effect_agent_conflict",
+      "nodeid": "tests/test_runtime.py::test_interrupted_question_is_available_after_resume",
+      "fixtures": [
+        "tmp_path"
+      ],
+      "input": {
+        "scenario": "interrupted question is available after resume",
+        "definition": "tests/test_runtime.py::test_interrupted_question_is_available_after_resume",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "cancelling_inline_approval_rejects_instead_of_leaving_pending",
+      "group": "approval_side_effect_agent_conflict",
+      "nodeid": "tests/test_actions.py::test_cancelling_inline_approval_rejects_instead_of_leaving_pending",
+      "fixtures": [
+        "tmp_path"
+      ],
+      "input": {
+        "scenario": "cancelling inline approval rejects instead of leaving pending",
+        "definition": "tests/test_actions.py::test_cancelling_inline_approval_rejects_instead_of_leaving_pending",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "file_action_rechecks_hash_after_approval",
+      "group": "approval_side_effect_agent_conflict",
+      "nodeid": "tests/test_actions.py::test_file_action_rechecks_hash_after_approval",
+      "fixtures": [
+        "tmp_path"
+      ],
+      "input": {
+        "scenario": "file action rechecks hash after approval",
+        "definition": "tests/test_actions.py::test_file_action_rechecks_hash_after_approval",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "explicit_allow_cannot_bypass_mandatory_action_confirmation",
+      "group": "approval_side_effect_agent_conflict",
+      "nodeid": "tests/test_actions.py::test_explicit_allow_cannot_bypass_mandatory_action_confirmation",
+      "fixtures": [
+        "tmp_path",
+        "action_type"
+      ],
+      "input": {
+        "scenario": "explicit allow cannot bypass mandatory action confirmation",
+        "definition": "tests/test_actions.py::test_explicit_allow_cannot_bypass_mandatory_action_confirmation",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "artifact_publish_serializes_coordinated_workspace_writes",
+      "group": "approval_side_effect_agent_conflict",
+      "nodeid": "tests/test_collaboration.py::test_artifact_publish_serializes_coordinated_workspace_writes",
+      "fixtures": [
+        "tmp_path",
+        "monkeypatch"
+      ],
+      "input": {
+        "scenario": "artifact publish serializes coordinated workspace writes",
+        "definition": "tests/test_collaboration.py::test_artifact_publish_serializes_coordinated_workspace_writes",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "child_tool_catalog_cannot_delegate_again",
+      "group": "approval_side_effect_agent_conflict",
+      "nodeid": "tests/test_collaboration.py::test_child_tool_catalog_cannot_delegate_again",
+      "fixtures": [
+        "in_memory_scripted_runtime"
+      ],
+      "input": {
+        "scenario": "child tool catalog cannot delegate again",
+        "definition": "tests/test_collaboration.py::test_child_tool_catalog_cannot_delegate_again",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "named_agent_profile_cannot_be_expanded_by_task",
+      "group": "approval_side_effect_agent_conflict",
+      "nodeid": "tests/test_collaboration.py::test_named_agent_profile_cannot_be_expanded_by_task",
+      "fixtures": [
+        "tmp_path"
+      ],
+      "input": {
+        "scenario": "named agent profile cannot be expanded by task",
+        "definition": "tests/test_collaboration.py::test_named_agent_profile_cannot_be_expanded_by_task",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "interrupted_agent_resumes_same_attempt_and_child_session",
+      "group": "approval_side_effect_agent_conflict",
+      "nodeid": "tests/test_collaboration.py::test_interrupted_agent_resumes_same_attempt_and_child_session",
+      "fixtures": [
+        "tmp_path"
+      ],
+      "input": {
+        "scenario": "interrupted agent resumes same attempt and child session",
+        "definition": "tests/test_collaboration.py::test_interrupted_agent_resumes_same_attempt_and_child_session",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    },
+    {
+      "id": "plan_boundary_revalidates_a_resumed_hidden_invocation",
+      "group": "approval_side_effect_agent_conflict",
+      "nodeid": "tests/test_planning.py::test_plan_boundary_revalidates_a_resumed_hidden_invocation",
+      "fixtures": [
+        "tmp_path"
+      ],
+      "input": {
+        "scenario": "plan boundary revalidates a resumed hidden invocation",
+        "definition": "tests/test_planning.py::test_plan_boundary_revalidates_a_resumed_hidden_invocation",
+        "provider": "scripted_or_none",
+        "network": "external_network_blocked"
+      },
+      "expected": {
+        "assertions": "All executable pytest assertions in the named scenario hold; no skips or setup errors.",
+        "terminal": "passed"
+      },
+      "grader": "pytest_assertions"
+    }
+  ]
+}

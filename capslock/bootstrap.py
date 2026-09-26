@@ -89,6 +89,10 @@ class WorkspaceApplication:
         )
         self.close_client = close_client
 
+    def mcp_statuses(self):
+        """Expose safe MCP runtime status to every presentation layer."""
+        return self._mcp_manager.statuses() if self._mcp_manager is not None else ()
+
     @property
     def repositories(self) -> WorkspaceRepositories:
         """Command-service persistence surface owned by this application."""
@@ -126,11 +130,11 @@ class WorkspaceApplication:
             resources.push_async_callback(_close_clients, client)
         try:
             memory_path = settings.memory.database or layout.user.canonical_memory
-            repositories, memory_repositories = await asyncio.gather(
-                WorkspaceRepositories.open(layout.database, workspace=root),
-                MemoryRepositories.open(memory_path),
+            repositories = await WorkspaceRepositories.open(
+                layout.database, workspace=root, shared_owner=child_mode
             )
             resources.push_async_callback(repositories.close)
+            memory_repositories = await MemoryRepositories.open(memory_path)
             resources.push_async_callback(memory_repositories.close)
             await run_retention_maintenance(
                 repositories.database,
@@ -146,8 +150,9 @@ class WorkspaceApplication:
                 layout.artifacts, repositories.database, repositories.episodic
             )
             if session_id is None:
+                initial_profile = (settings.models or {})[settings.routing.reasoning[0]]
                 session = await repositories.sessions.create(
-                    settings.model_config.model
+                    initial_profile.model, model_profile=initial_profile.name
                 )
             else:
                 session = await repositories.sessions.get(session_id)
@@ -237,11 +242,6 @@ class WorkspaceApplication:
             adapters = {
                 name: AsyncOpenAIResponsesModel(
                     item,
-                    max_output_tokens={
-                        profile.model: profile.max_output_tokens
-                        for profile in (settings.models or {}).values()
-                        if profile.provider == name
-                    },
                     strict_tools=True,
                 )
                 for name, item in raw_clients.items()
@@ -254,7 +254,26 @@ class WorkspaceApplication:
                 audit=repositories.models,
                 budget=settings.budget,
             )
+            from .runtime.profiles import resolve_profile
+
             primary_profile = (settings.models or {})[settings.routing.reasoning[0]]
+            try:
+                selected_profile = resolve_profile(
+                    settings.models or {},
+                    profile_id=session.model_profile,
+                    model=None if session.model_profile else session.model,
+                )
+            except ValueError:
+                selected_profile = None
+            if selected_profile is not None:
+                primary_profile = selected_profile
+                if (
+                    session.model_profile is None
+                    or session.model != selected_profile.model
+                ):
+                    session = await repositories.sessions.set_model_profile(
+                        session.id, selected_profile.name, selected_profile.model
+                    )
             external_embedding_profiles = {}
             for profile_name in settings.routing.embedding if settings.routing else ():
                 profile = (settings.models or {})[profile_name]
@@ -381,8 +400,8 @@ class WorkspaceApplication:
                     repositories.performance if settings.observability.enabled else None
                 ),
                 ide_bridge=ide_bridge,
-                input_cost_per_million=settings.model_config.input_cost_per_million,
-                output_cost_per_million=settings.model_config.output_cost_per_million,
+                input_cost_per_million=primary_profile.input_cost_per_million,
+                output_cost_per_million=primary_profile.output_cost_per_million,
                 max_run_tokens=settings.budget.max_run_tokens,
                 max_run_usd=settings.budget.max_run_usd,
                 loop_detection=settings.loop_detection,
@@ -390,6 +409,10 @@ class WorkspaceApplication:
                 collaboration=collaboration,
                 context_evaluation_policy=context_evaluation_policy,
             )
+
+            agent_session.model_profile_id = session.model_profile
+            if selected_profile is not None:
+                agent_session._apply_model_profile(selected_profile)
 
             async def switch_active_workspace(
                 active_root: Path, active_policy: WorkspacePolicy

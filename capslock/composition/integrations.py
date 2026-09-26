@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from typing import Any
+import logging
 
 from ..configuration import Settings
 from ..layout import ProjectLayout
@@ -56,9 +57,16 @@ async def build_integrations(
         timeout_seconds=settings.mcp.mcp_timeout_seconds,
         remote_enabled=settings.mcp.remote_enabled,
     )
+    resources.push_async_callback(mcp.close)
     if not child_mode:
         await mcp.initialize()
-    resources.push_async_callback(mcp.close)
+        for name, detail in mcp.errors.items():
+            logging.getLogger(__name__).warning(
+                "MCP %s unavailable; CapsLock will continue without it: %s. "
+                "Check /mcp list or capslock doctor.",
+                name,
+                detail,
+            )
     lsp = LspManager(policy, settings.lsp)
     resources.push_async_callback(lsp.close)
     processes = SessionProcessManager(settings.shell.output_bytes)

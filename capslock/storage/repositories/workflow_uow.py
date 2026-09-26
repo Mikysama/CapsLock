@@ -565,6 +565,66 @@ class WorkflowUnitOfWork(Repository):
                 raise ValueError("work item is not waiting for approval")
             return await self._append_event(connection, run_id, kind, payload)
 
+    async def cancel_waiting(self, session_id: str, run_id: str) -> AgentEvent:
+        """Cancel a paused continuation without resuming tools or resetting usage."""
+        async with self.database.transaction() as connection:
+            row = await (
+                await connection.execute(
+                    "SELECT work_item_id FROM runs WHERE id=? AND session_id=? "
+                    "AND status IN ('waiting_approval','waiting_input')",
+                    (run_id, session_id),
+                )
+            ).fetchone()
+            if row is None:
+                raise ValueError("run is not waiting for resumable input")
+            timestamp, message = now(), "cancelled before resume"
+            await connection.execute(
+                "UPDATE runs SET status='cancelled',finished_at=?,error_code='cancelled',error_message=? WHERE id=?",
+                (timestamp, message, run_id),
+            )
+            await connection.execute(
+                "UPDATE work_items SET status='cancelled',updated_at=?,error=? WHERE id=?",
+                (timestamp, message, row["work_item_id"]),
+            )
+            await connection.execute(
+                "UPDATE run_steps SET status='cancelled',finished_at=?,error=? "
+                "WHERE run_id=? AND status IN ('running','waiting_approval','waiting_input')",
+                (timestamp, message, run_id),
+            )
+            await connection.execute(
+                "UPDATE tool_invocations SET status='cancelled',execution_status='cancelled',finished_at=? "
+                "WHERE run_id=? AND status IN ('waiting_approval','waiting_input')",
+                (timestamp, run_id),
+            )
+            await connection.execute(
+                "UPDATE tool_input_requests SET status='cancelled' WHERE run_id=? AND status='pending'",
+                (run_id,),
+            )
+            await connection.execute(
+                "UPDATE session_plans SET status='draft',updated_at=? WHERE status='awaiting_approval' "
+                "AND id IN (SELECT plan_id FROM plan_requests WHERE run_id=? AND kind='submit' AND status='pending')",
+                (timestamp, run_id),
+            )
+            for table in ("permission_requests", "plan_requests"):
+                await connection.execute(
+                    f"UPDATE {table} SET status='cancelled',decided_at=? WHERE run_id=? AND status='pending'",
+                    (timestamp, run_id),
+                )
+            await connection.execute(
+                "UPDATE actions SET status='cancelled',result_kind='user_cancelled',finished_at=?,"
+                "error_code='cancelled',error_message=? WHERE run_id=? AND status IN ('pending','approved','running')",
+                (timestamp, message, run_id),
+            )
+            return await self._append_event(
+                connection,
+                run_id,
+                AgentEventKind.CANCELLED,
+                {
+                    "status": "cancelled",
+                    "error": {"code": "cancelled", "message": message},
+                },
+            )
+
     async def cancel_waiting_action(
         self,
         session_id: str,

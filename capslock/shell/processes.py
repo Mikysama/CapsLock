@@ -6,6 +6,7 @@ import asyncio
 import os
 import shutil
 import signal
+import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -24,6 +25,14 @@ class ProcessJob:
     stdout: bytearray = field(default_factory=bytearray)
     stderr: bytearray = field(default_factory=bytearray)
     tasks: tuple[asyncio.Task[Any], ...] = ()
+    stdout_bytes: int = 0
+    stderr_bytes: int = 0
+    last_progress_at: float = field(default_factory=time.monotonic)
+    changed: asyncio.Event = field(default_factory=asyncio.Event)
+
+    @property
+    def progress_bytes(self) -> int:
+        return self.stdout_bytes + self.stderr_bytes
 
     @property
     def status(self) -> str:
@@ -50,16 +59,22 @@ class SessionProcessManager:
         )
         assert process.stdout is not None and process.stderr is not None
         captures = (
-            asyncio.create_task(self._capture(process.stdout, job.stdout)),
-            asyncio.create_task(self._capture(process.stderr, job.stderr)),
+            asyncio.create_task(self._capture(process.stdout, job, "stdout")),
+            asyncio.create_task(self._capture(process.stderr, job, "stderr")),
         )
         cleanup = asyncio.create_task(self._cleanup(job, captures))
         job.tasks = (*captures, cleanup)
         self._jobs[identifier] = job
         return job
 
-    async def _capture(self, stream: asyncio.StreamReader, target: bytearray) -> None:
+    async def _capture(
+        self, stream: asyncio.StreamReader, job: ProcessJob, name: str
+    ) -> None:
+        target = getattr(job, name)
         while data := await stream.read(8192):
+            setattr(job, f"{name}_bytes", getattr(job, f"{name}_bytes") + len(data))
+            job.last_progress_at = time.monotonic()
+            job.changed.set()
             remaining = self.output_limit - len(target)
             if remaining > 0:
                 target.extend(data[:remaining])
@@ -71,7 +86,30 @@ class SessionProcessManager:
             await job.process.wait()
             await asyncio.gather(*captures, return_exceptions=True)
         finally:
+            job.last_progress_at = time.monotonic()
+            job.changed.set()
             shutil.rmtree(job.temporary, ignore_errors=True)
+
+    async def wait_for_output(
+        self, session_id: str, identifier: str, seconds: float
+    ) -> ProcessJob:
+        job = self.get(session_id, identifier)
+        if job.status == "running" and seconds > 0:
+            job.changed.clear()
+            try:
+                async with asyncio.timeout(seconds):
+                    await job.changed.wait()
+            except TimeoutError:
+                pass
+        return job
+
+    def poll_progress(self, session_id: str, identifier: str) -> dict[str, Any]:
+        job = self.get(session_id, identifier)
+        return {
+            "status": job.status,
+            "last_progress_at": job.last_progress_at,
+            "progress_bytes": job.progress_bytes,
+        }
 
     def get(self, session_id: str, identifier: str) -> ProcessJob:
         job = self._jobs.get(identifier)

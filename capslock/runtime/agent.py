@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from contextlib import aclosing
+
 import asyncio
 import hashlib
 import json
@@ -39,7 +41,8 @@ from ..domain import (
 from ..external import assess_prompt_injection
 from ..instructions import InstructionLoader
 from ..interaction import RunInteraction
-from ..models import selectable_model
+from .tokens import AdaptiveTokenEstimator
+from .profiles import resolve_profile, profile_choices
 from ..observability import EventSink
 from ..permissions import PermissionMode
 from ..policy import WorkspacePolicy
@@ -92,8 +95,8 @@ class AgentRuntimeError(RuntimeError):
 
 
 INSTRUCTIONS = """You are CapsLock, a trustworthy workspace assistant.
-Use workspace tools for claims about local files or Git. Use glob_files/search_files to discover files, read_file before write_file so writes carry a current SHA-256 precondition, and edit_file/create_file for focused changes. Use shell for builds, tests, and Git commands.
-Use ask_user only when a concrete user choice is required. Use create_task/list_tasks/get_task/update_task for persistent task state. Search deferred semantic, document, MCP-resource, and Agent-control tools with search_tools before using them.
+Use workspace tools for claims about local files or Git. Use list_files for directory browsing and glob_files/search_files to discover files. Use read_file before replacing a file with write_file so writes carry a current SHA-256 precondition; use expected_sha256=null to create a new file, and edit_file for focused changes. Use shell for builds, tests, and Git commands.
+Use ask_user only when a concrete user choice is required. Use create_task/list_tasks/update_task for persistent task state; list_tasks(task_id=...) reads one task. Search deferred semantic, document, MCP-resource, and Agent-control tools with search_tools before using them.
 When the user explicitly asks to plan without implementation, or a complex task should be designed before changes are made, call enter_plan_mode before invoking any modifying tool. Entering Plan Mode requires user confirmation. Never treat a plan or plan approval as permission to execute its steps.
 The runtime transparently persists Actions, pauses for required approval, revalidates changes, and returns the final execution status.
 Call search_tools when a deferred plugin or MCP capability may help; discovered schemas become available on the next turn.
@@ -183,6 +186,9 @@ class AgentSession:
         self.workspace = workspace.resolve()
         self.model = model_name
         self.chat_model = chat_model
+        self.model_profiles = dict(getattr(chat_model, "profiles", {}))
+        self.model_providers = dict(getattr(chat_model, "providers", {}))
+        self.model_profile_id: str | None = None
         self.sessions = sessions
         self.work_items = work_items
         self.runs = runs
@@ -234,6 +240,9 @@ class AgentSession:
         self.tools = tools or workspace_tools()
         self._active_tools = self.tools
         self._active_init_run_id: str | None = None
+        self._external_input_provider: (
+            Callable[[], Awaitable[list[dict[str, object]]]] | None
+        ) = None
         self._init_states: dict[str, dict[str, object]] = {}
         self.context_budget = ContextBudgetManager(
             sessions=sessions,
@@ -253,6 +262,7 @@ class AgentSession:
             settings_store=settings_store,
             evaluation_policy=context_evaluation_policy,
         )
+        self.context_budget.performance = self.performance
         self._active_runs = 0
         self.citations = CitationResolver(sources)
         self.tool_loop = ToolLoop(
@@ -315,6 +325,13 @@ class AgentSession:
     ) -> None:
         self.interaction.action_authorizer = authorizer
 
+    def set_external_input_provider(
+        self,
+        provider: Callable[[], Awaitable[list[dict[str, object]]]] | None,
+    ) -> None:
+        """Install a provider drained only at model/tool loop boundaries."""
+        self._external_input_provider = provider
+
     @property
     def permission_mode(self) -> PermissionMode:
         return self.interaction.permission_mode
@@ -329,18 +346,57 @@ class AgentSession:
     ) -> Callable[[ActionRecord], Awaitable[ApprovalDecision]] | None:
         return self.interaction.action_authorizer
 
-    async def set_model(self, value: str) -> str:
-        """Switch future calls in this session to an allowlisted model."""
+    def available_model_profiles(self) -> list[dict[str, object]]:
+        return profile_choices(self.model_profiles, self.model_providers)
 
-        model = selectable_model(value)
+    async def set_model(self, value: str) -> str:
+        profile = resolve_profile(self.model_profiles, model=value)
+        return await self.set_model_profile(profile.name)
+
+    async def set_model_profile(self, profile_id: str) -> str:
         if self.engine.active or self._active_runs:
             raise ValueError("cannot switch model while a run is active")
-        await self.sessions.set_model(self.session_id, model)
-        self.model = model
-        self.context_budget.model_name = model
-        self.tool_loop.model = model
-        self.tool_loop.model_steps.model = model
-        return model
+        profile = resolve_profile(self.model_profiles, profile_id=profile_id)
+        provider = self.model_providers.get(profile.provider)
+        if (
+            provider is None
+            or not provider.api_key
+            or provider.api_key.startswith("your_")
+            or not provider.strict_tool_calls
+        ):
+            raise ValueError(
+                "model profile requires a credential and strict tool support"
+            )
+        await self.sessions.set_model_profile(
+            self.session_id, profile.name, profile.model
+        )
+        self._apply_model_profile(profile)
+        return profile.model
+
+    def _apply_model_profile(self, profile) -> None:
+        self.model_profile_id = profile.name
+        self.model = profile.model
+        self.input_cost = profile.input_cost_per_million
+        self.output_cost = profile.output_cost_per_million
+        budget = self.context_budget
+        budget.model_name = profile.model
+        budget.model_profile = profile.name
+        tokenizer = profile.tokenizer or budget.settings.tokenizer
+        budget.cache_identity = (
+            f"{profile.provider}:{profile.name}:{profile.model}:{tokenizer}"
+        )
+        budget.context_window = profile.context_window
+        budget.max_output_tokens = profile.max_output_tokens
+        budget.estimator = AdaptiveTokenEstimator(
+            f"{profile.provider}:{profile.name}:{profile.model}:{tokenizer}",
+            settings_store=self.settings_store,
+            strategy=tokenizer,
+        )
+        self.tool_loop.model = profile.model
+        self.tool_loop.model_steps.model = profile.model
+        self.run_orchestrator.profile_id = profile.name
+        self.run_finalizer.input_cost = self.input_cost
+        self.run_finalizer.output_cost = self.output_cost
 
     async def rename(self, title: str):
         return await self._administration.rename(title)
@@ -379,12 +435,18 @@ class AgentSession:
         )
 
     async def run_stream(self, request: RunRequest) -> AsyncIterator[AgentEvent]:
-        async for event in self._run_execution_coordinator.run_stream(request):
-            yield event
+        async with aclosing(
+            self._run_execution_coordinator.run_stream(request)
+        ) as stream:
+            async for event in stream:
+                yield event
 
     async def resume_paused_stream(self, run_id: str) -> AsyncIterator[AgentEvent]:
-        async for event in self._run_execution_coordinator.resume_paused_stream(run_id):
-            yield event
+        async with aclosing(
+            self._run_execution_coordinator.resume_paused_stream(run_id)
+        ) as stream:
+            async for event in stream:
+                yield event
 
     async def permission_requests(
         self, *, status: str | None = "pending"
@@ -461,6 +523,22 @@ class AgentSession:
         normalized = question.strip()
         if not normalized:
             raise AgentRuntimeError("question must not be empty")
+        if response_format is not None and response_format.get("type") == "json_schema":
+            from ..output_schema import validate_output_schema
+            from ..structured_output import response_schema
+
+            validate_output_schema(response_schema(response_format))
+        if self.model_profiles:
+            profile = resolve_profile(
+                self.model_profiles,
+                profile_id=self.model_profile_id,
+                model=None if self.model_profile_id else self.model,
+            )
+            if self.model_profile_id != profile.name:
+                await self.sessions.set_model_profile(
+                    self.session_id, profile.name, profile.model
+                )
+                self._apply_model_profile(profile)
         explicit = self._explicit_skill(normalized)
         active = await self.run_orchestrator.start(
             self.session_id,
@@ -557,13 +635,16 @@ class AgentSession:
                     and memory_mode is MemoryRunMode.DEFAULT
                     and not is_init
                 ):
-                    try:
-                        (
-                            memory_context,
-                            checkpoint_recalls,
-                        ) = await self.memory.recall_context(prompt, run_id=run_id)
-                    except Exception:
-                        memory_context, checkpoint_recalls = "", []
+                    (
+                        memory_context,
+                        checkpoint_recalls,
+                    ) = await self.context_budget._retrieval(
+                        "memory_recall",
+                        self.memory.recall_context(prompt, run_id=run_id),
+                        ("", []),
+                        run_id=run_id,
+                        session_id=self.session_id,
+                    )
                     if memory_context:
                         prompt_bundle = prompt_bundle.add(
                             PromptSection(
@@ -712,6 +793,8 @@ class AgentSession:
                     compact_context=compact_context,
                     usage_observer=observe_context_usage,
                     response_format=response_format,
+                    user_goal=prepared.work_item.question,
+                    external_input_provider=self._external_input_provider,
                 )
             except asyncio.CancelledError:
                 loop_status = "cancelled"
@@ -742,6 +825,12 @@ class AgentSession:
                 memories=result.memories,
                 session_id=self.session_id,
             )
+            if (
+                response_format is not None
+                and response_format.get("type") == "json_schema"
+            ):
+                text = result.text
+                citations = []
             assistant_message_id = await self.sessions.append_message(
                 self.session_id, run_id, "assistant", text
             )
@@ -823,6 +912,16 @@ class AgentSession:
                 if result.stop_reason is not None
                 else None,
             )
+            if (
+                response_format is not None
+                and response_format.get("type") == "json_schema"
+                and outcome.kind is AgentEventKind.COMPLETED
+            ):
+                from ..output_schema import validate_output
+
+                outcome.payload["structured_output"] = validate_output(
+                    result.text, response_format
+                )
             await publisher.flush()
             terminal = await self.workflow.finish(
                 run_id,
@@ -933,7 +1032,14 @@ class AgentSession:
                     },
                 )
             duration = round((time.monotonic() - started) * 1000)
-            input_tokens, output_tokens, cost = await self.model_audit.usage(run_id)
+            usage = await self.run_finalizer.usage(
+                run_id, model_session, input_tokens, output_tokens
+            )
+            input_tokens, output_tokens, cost = (
+                usage.input_tokens,
+                usage.output_tokens,
+                usage.cost_usd,
+            )
             snapshot = await governor.current()
             await publisher.flush()
             terminal = await self.workflow.finish(
@@ -952,6 +1058,7 @@ class AgentSession:
                         "input_tokens": input_tokens,
                         "output_tokens": output_tokens,
                         "cost_usd": cost,
+                        "source": usage.source,
                     },
                     "duration_ms": duration,
                 },
@@ -989,7 +1096,7 @@ class AgentSession:
                 started=started,
                 status=WorkItemStatus.FAILED,
                 kind=AgentEventKind.FAILED,
-                error_code=type(exc).__name__,
+                error_code=_error_code(exc),
                 message=str(exc) or type(exc).__name__,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
@@ -1258,4 +1365,4 @@ class AgentSession:
 
 def _error_code(exc: Exception) -> str:
     code = getattr(exc, "code", None)
-    return code.value if hasattr(code, "value") else type(exc).__name__
+    return code.value if hasattr(code, "value") else str(code or type(exc).__name__)

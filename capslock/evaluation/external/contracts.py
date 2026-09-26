@@ -314,6 +314,7 @@ class TaskResult:
     peak_context_tokens: int = 0
     context_updates: int = 0
     context_compactions: int = 0
+    human_interventions: int | None = None
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> "TaskResult":
@@ -373,6 +374,8 @@ class TaskResult:
             raise ValueError("usage values cannot be negative")
         if self.cost_usd < 0 or self.duration_seconds < 0:
             raise ValueError("cost and duration cannot be negative")
+        if self.human_interventions is not None and self.human_interventions < 0:
+            raise ValueError("human interventions cannot be negative")
         if self.resolved and self.grader_status != GraderStatus.PASSED:
             raise ValueError("resolved results require a passed grader")
         if self.resolved and (

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import uuid
 
 from ...domain import (
@@ -23,29 +25,77 @@ class WorkItemRepository(Repository):
         parent_work_item_id: str | None = None,
         kind: RunKind = RunKind.AGENT,
     ) -> WorkItemInfo:
-        identifier, timestamp = uuid.uuid4().hex, now()
+        identifier = uuid.uuid4().hex
+        async with self.database.transaction() as connection:
+            await self._insert_queued(
+                connection, identifier, session_id, question, kind, parent_work_item_id
+            )
+        return await self.require(identifier)
+
+    async def reserve_request(
+        self, session_id: str, request_id: str, question: str
+    ) -> tuple[WorkItemInfo, bool]:
+        """Atomically deduplicate local client requests using the existing durable keys."""
+        key = (
+            "app_server.request."
+            + hashlib.sha256(f"{session_id}:{request_id}".encode()).hexdigest()
+        )
+        digest = hashlib.sha256(question.encode()).hexdigest()
         async with self.database.transaction() as connection:
             row = await (
                 await connection.execute(
-                    "SELECT coalesce(max(position),-1)+1 FROM work_items WHERE session_id=? AND status='queued'",
-                    (session_id,),
+                    "SELECT value FROM workspace_settings WHERE key=?", (key,)
                 )
             ).fetchone()
+            created = row is None
+            if row is not None:
+                previous = json.loads(row[0])
+                if previous["question_sha256"] != digest:
+                    raise ValueError(
+                        "request_id already belongs to a different question"
+                    )
+                identifier = previous["work_item_id"]
+            else:
+                identifier = uuid.uuid4().hex
+                await self._insert_queued(
+                    connection, identifier, session_id, question, RunKind.AGENT, None
+                )
+                await connection.execute(
+                    "INSERT INTO workspace_settings(key,value) VALUES(?,?)",
+                    (
+                        key,
+                        json.dumps(
+                            {"work_item_id": identifier, "question_sha256": digest}
+                        ),
+                    ),
+                )
+        return await self.require(identifier), created
+
+    @staticmethod
+    async def _insert_queued(
+        connection, identifier, session_id, question, kind, parent
+    ):
+        timestamp = now()
+        row = await (
             await connection.execute(
-                """INSERT INTO work_items(id,session_id,question,kind,status,position,parent_work_item_id,created_at,updated_at)
-                   VALUES(?,?,?,?,'queued',?,?,?,?)""",
-                (
-                    identifier,
-                    session_id,
-                    question,
-                    kind.value,
-                    int(row[0]),
-                    parent_work_item_id,
-                    timestamp,
-                    timestamp,
-                ),
+                "SELECT coalesce(max(position),-1)+1 FROM work_items WHERE session_id=? AND status='queued'",
+                (session_id,),
             )
-        return await self.require(identifier)
+        ).fetchone()
+        await connection.execute(
+            """INSERT INTO work_items(id,session_id,question,kind,status,position,parent_work_item_id,created_at,updated_at)
+               VALUES(?,?,?,?,'queued',?,?,?,?)""",
+            (
+                identifier,
+                session_id,
+                question,
+                kind.value,
+                int(row[0]),
+                parent,
+                timestamp,
+                timestamp,
+            ),
+        )
 
     async def get(self, item_id: str) -> WorkItemInfo | None:
         row = await self.one(

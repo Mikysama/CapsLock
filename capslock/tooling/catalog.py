@@ -112,7 +112,10 @@ class ToolCatalog:
         compatible: list[ToolDefinition] = []
         for tool in tools:
             try:
-                strict_provider_schema(tool.contract.input_schema)
+                if tool.contract.model_visible:
+                    strict_provider_schema(
+                        tool.contract.model_input_schema or tool.contract.input_schema
+                    )
             except StrictSchemaError as exc:
                 if not quarantine:
                     raise
@@ -151,7 +154,9 @@ class ToolCatalog:
 
     @property
     def names(self) -> set[str]:
-        return set(self._tools)
+        return {
+            name for name, tool in self._tools.items() if tool.contract.model_visible
+        }
 
     def get(self, name: str) -> ToolDefinition | None:
         return self._tools.get(name)
@@ -161,7 +166,7 @@ class ToolCatalog:
         return None if tool is None else tool.contract
 
     def discover(self, names: Iterable[str]) -> tuple[str, ...]:
-        selected = tuple(sorted(name for name in names if name in self._tools))
+        selected = tuple(sorted(set(names) & self.names))
         self._discovered.update(selected)
         return selected
 
@@ -175,7 +180,7 @@ class ToolCatalog:
         terms = tuple(item.casefold() for item in query.split() if item.strip())
         scored: list[tuple[int, str]] = []
         for name, tool in self._tools.items():
-            if not tool.contract.deferred:
+            if not tool.contract.model_visible or not tool.contract.deferred:
                 continue
             if (
                 plan_visible_only
@@ -213,6 +218,8 @@ class ToolCatalog:
         terms = tuple(item for item in normalized.replace("__", " ").split() if item)
         scored: list[tuple[float, str]] = []
         for name, tool in self._tools.items():
+            if not tool.contract.model_visible:
+                continue
             if deferred_only and not tool.contract.deferred:
                 continue
             if (
@@ -263,21 +270,37 @@ class ToolCatalog:
         limit: int = 12,
         planning: bool = False,
     ) -> tuple[str, ...]:
-        always = {"search_tools", "ask_user"}
+        always = {"search_tools", "ask_user"} | self._discovered
         if planning:
             always.update({"get_plan", "update_plan", "submit_plan"})
+        else:
+            always.add("enter_plan_mode")
+        visible = {
+            schema["function"]["name"]: schema
+            for schema in (self.plan_schemas if planning else self.schemas)
+        }
         ranked = self.candidates(
             query,
             max(limit, 1),
             plan_visible_only=planning,
         )
-        selected = [name for name in sorted(always) if name in self._tools]
+        selected = [name for name in sorted(always) if name in visible]
+        used = sum(self._schema_tokens(visible[name]) for name in selected)
         for name in ranked:
-            if name not in selected:
-                selected.append(name)
             if len(selected) >= limit:
                 break
+            if name in selected or name not in visible:
+                continue
+            tokens = self._schema_tokens(visible[name])
+            if used + tokens > self.schema_budget_tokens:
+                continue
+            selected.append(name)
+            used += tokens
         return tuple(selected)
+
+    @staticmethod
+    def _schema_tokens(schema: dict[str, object]) -> int:
+        return max(1, len(json.dumps(schema, sort_keys=True)) // 4)
 
     def schemas_for(
         self, names: Iterable[str], *, planning: bool = False
@@ -288,19 +311,12 @@ class ToolCatalog:
 
     def snapshot(self) -> ToolCatalogSnapshot:
         selected: list[ToolDefinition] = []
-        used_tokens = 0
         for tool in self._tools.values():
+            if not tool.contract.model_visible:
+                continue
             if tool.contract.deferred and tool.name not in self._discovered:
                 continue
-            schema = tool.schema()
-            estimated = max(1, len(json.dumps(schema, sort_keys=True)) // 4)
-            if (
-                tool.contract.deferred
-                and used_tokens + estimated > self.schema_budget_tokens
-            ):
-                continue
             selected.append(tool)
-            used_tokens += estimated
         schemas = tuple(tool.schema() for tool in selected)
         encoded = json.dumps(schemas, sort_keys=True, separators=(",", ":"))
         return ToolCatalogSnapshot(

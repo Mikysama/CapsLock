@@ -196,6 +196,8 @@ class ToolContract:
     aliases: tuple[str, ...] = ()
     intent_tags: tuple[str, ...] = ()
     tool_group: str | None = None
+    model_visible: bool = True
+    model_input_schema: dict[str, object] | None = None
 
     def __post_init__(self) -> None:
         if not self.name or not self.version or not self.description.strip():
@@ -205,6 +207,8 @@ class ToolContract:
         if self.max_capture_bytes < self.inline_result_bytes:
             raise ValueError("tool capture limit must cover the inline limit")
         compile_json_schema(self.input_schema)
+        if self.model_input_schema is not None:
+            compile_json_schema(self.model_input_schema)
         if self.output_schema is not None:
             compile_json_schema(self.output_schema)
 
@@ -214,7 +218,7 @@ class ToolContract:
             "function": {
                 "name": self.name,
                 "description": self.description,
-                "parameters": self.input_schema,
+                "parameters": self.model_input_schema or self.input_schema,
             },
         }
 
@@ -233,6 +237,8 @@ class ToolContract:
             "aliases": list(self.aliases),
             "intent_tags": list(self.intent_tags),
             "tool_group": self.tool_group,
+            "model_visible": self.model_visible,
+            "model_input_schema": self.model_input_schema,
         }
 
 
@@ -513,6 +519,8 @@ def define_tool(
     aliases: tuple[str, ...] = (),
     intent_tags: tuple[str, ...] = (),
     tool_group: str | None = None,
+    model_visible: bool = True,
+    model_input_schema: dict[str, object] | None = None,
 ) -> ToolDefinition:
     if isinstance(policy, ResolvedToolPolicy):
         resolved = policy
@@ -540,6 +548,8 @@ def define_tool(
             aliases,
             intent_tags,
             tool_group,
+            model_visible,
+            model_input_schema,
         ),
         adapt_executor(executor),
         validate,

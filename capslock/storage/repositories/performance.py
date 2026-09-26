@@ -68,10 +68,23 @@ class PerformanceRepository(Repository):
         return [_decode(dict(row)) for row in rows]
 
     async def summary(self) -> list[dict[str, Any]]:
+        await self.database.flush_commit_timings()
         rows = await self.all(
-            """SELECT category,name,count(*) samples,avg(duration_ms) average_ms,
-               max(duration_ms) maximum_ms FROM performance_spans
-               GROUP BY category,name ORDER BY average_ms DESC"""
+            """WITH measurements(category,name,duration_ms,samples,maximum_ms) AS (
+                SELECT category,name,duration_ms,
+                    CASE WHEN category='database' AND name='commit' THEN coalesce(json_extract(attributes_json,'$.samples'),1) ELSE 1 END,
+                    CASE WHEN category='database' AND name='commit' THEN coalesce(json_extract(attributes_json,'$.maximum_ms'),duration_ms) ELSE duration_ms END
+                FROM performance_spans
+                UNION ALL SELECT 'model','request',duration_ms,1,duration_ms FROM model_calls WHERE duration_ms IS NOT NULL
+                UNION ALL SELECT 'tool','execution',duration_ms,1,duration_ms FROM tool_calls
+                UNION ALL SELECT 'approval','wait',max(0,(julianday(decided_at)-julianday(created_at))*86400000),1,
+                    max(0,(julianday(decided_at)-julianday(created_at))*86400000) FROM permission_requests WHERE decided_at IS NOT NULL
+                UNION ALL SELECT 'approval','action_wait',max(0,(julianday(decided_at)-julianday(created_at))*86400000),1,
+                    max(0,(julianday(decided_at)-julianday(created_at))*86400000) FROM actions
+                    WHERE decided_at IS NOT NULL AND historical_only=0 AND json_extract(request_json,'$._manual_approval')=1
+            ) SELECT category,name,sum(samples) samples,sum(duration_ms) total_ms,
+                sum(duration_ms)/sum(samples) average_ms,max(maximum_ms) maximum_ms
+                FROM measurements GROUP BY category,name ORDER BY total_ms DESC"""
         )
         return [dict(row) for row in rows]
 

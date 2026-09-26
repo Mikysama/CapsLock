@@ -18,6 +18,13 @@ def build_report(
         raise ValueError("results contain tasks absent from the catalog")
     resolved = sum(item.resolved for item in results)
     total = len(results)
+    valid = [
+        item
+        for item in results
+        if not item.infrastructure_error
+        and item.grader_status not in {"infrastructure_error", "not_run"}
+    ]
+    valid_resolved = sum(item.resolved for item in valid)
     by_instance: dict[str, list[bool]] = defaultdict(list)
     for item in results:
         by_instance[item.instance_id].append(item.resolved)
@@ -33,6 +40,20 @@ def build_report(
         "suite": results[0].suite if results else "unknown",
         "model_track": results[0].model_track if results else "unknown",
         "sample_count": total,
+        "valid_attempt_count": len(valid),
+        "infrastructure_failure_count": total - len(valid),
+        "valid_resolve_rate": valid_resolved / len(valid) if valid else None,
+        "human_interventions": sum(item.human_interventions or 0 for item in valid)
+        if valid and all(item.human_interventions is not None for item in valid)
+        else None,
+        "intervention_measurement_count": sum(
+            item.human_interventions is not None for item in valid
+        ),
+        "cost_per_successful_task_usd": (
+            sum(item.cost_usd for item in valid) / valid_resolved
+            if valid_resolved
+            else None
+        ),
         "task_count": len(by_instance),
         "resolved": resolved,
         "resolve_rate": resolved / total if total else 0.0,

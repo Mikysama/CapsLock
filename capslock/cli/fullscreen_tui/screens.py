@@ -15,7 +15,6 @@ from textual.widgets import Button, Input, OptionList, SelectionList, Static
 from textual.widgets.option_list import Option
 
 from ...domain import ActionRecord, ApprovalChoice, ApprovalDecision, SessionInfo
-from ...models import SELECTABLE_MODELS
 from ...permissions import PermissionMode
 from ...theme import terminal_style
 from ..choices import ChoiceViewModel, questions_view_model
@@ -819,24 +818,28 @@ class PermissionScreen(ModalScreen[PermissionMode | None]):
 class ModelScreen(ModalScreen[str | None]):
     BINDINGS = [Binding("escape", "cancel", "Cancel")]
 
-    def __init__(self, current: str) -> None:
+    def __init__(
+        self, current: str, profiles: list[dict[str, object]] | None = None
+    ) -> None:
         super().__init__()
         self.current = current
+        self.profiles = profiles or []
 
     def compose(self) -> ComposeResult:
-        descriptions = {
-            "deepseek-v4-flash": "Fast model for everyday tasks",
-            "deepseek-v4-pro": "More capable model for complex tasks",
-        }
         options = [
             Option(
                 Text.assemble(
-                    (model, "bold"),
-                    (f"\n{descriptions[model]}", "dim"),
+                    (str(item["id"]), "bold"),
+                    (
+                        f"\n{item['provider']} / {item['model']}"
+                        + (" · unavailable" if not item["available"] else ""),
+                        "dim",
+                    ),
                 ),
-                id=model,
+                id=str(item["id"]),
+                disabled=not bool(item["available"]),
             )
-            for model in SELECTABLE_MODELS
+            for item in self.profiles
         ]
         with Vertical(id="dialog", classes="select-dialog"):
             yield Static("Select model", classes="dialog-title")

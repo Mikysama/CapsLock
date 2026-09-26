@@ -4,7 +4,7 @@
 
 ## 稳定契约
 
-CapsLock 2.7.6.3 支持 Linux/macOS 与 Python 3.12。当前协议为 `permissions_version = 2`、`config_version = 13`、workspace schema 20、memory schema 6、portable archive 7、session export 7、JSONL schema 3、IDE Bridge protocol 1 和插件 manifest/protocol/grant 4。config v3-v12、workspace schema v6-v19 与 memory schema v3-v5 使用 backup-first 自动迁移。模型 Provider 只使用 OpenAI Responses API，不兼容 Chat Completions。
+CapsLock 2.7.6.4 支持 Linux/macOS 与 Python 3.12。当前协议为 `permissions_version = 2`、`config_version = 14`、workspace schema 21、memory schema 6、portable archive 8、session export 8、JSONL schema 3、IDE Bridge protocol 1 和插件 manifest/protocol/grant 4。config v3-v13、workspace schema v6-v20 与 memory schema v3-v5 使用 backup-first 自动迁移。模型 Provider 只使用 OpenAI Responses API，不兼容 Chat Completions。
 
 公开运行入口为 `AgentSession.run_stream(RunRequest)`。CLI 通过应用查询面读取状态，不应依赖 repository 聚合对象。
 
@@ -42,16 +42,16 @@ Markdown 镜像位于 `.capslock/state/plans/<session-id>/<plan-id>.md`。数据
 
 | 工具 | 功能 | 边界 |
 | --- | --- | --- |
-| `list_files` / `glob_files` | 列出或按 glob 查找工作区文件。 | 只读；遵循路径边界和 `.gitignore`。 |
+| `list_files` / `glob_files` | 浏览目录直接子项（文件和目录），或通过 ripgrep 按 glob 查找文件。 | `list_files` 使用 `offset`/`limit` 分页，默认 100、最大 1000；扫描受 `max_files` 限制。`glob_files` 默认 `*` 遵循 ignore；显式 glob 使用 rg 的覆盖规则，隐藏文件仍需显式启用。 |
 | `read_file` / `read_image` | 读取文本或富图片内容。 | 只读；文件大小、类型、符号链接和路径受限。 |
-| `search_files` | 使用 ripgrep 搜索文本并返回 Evidence。 | 只读；有稳定排序和结果上限。 |
-| `edit_file` / `create_file` / `write_file` | 通过 Action 修改文件。 | 审批、hash revalidate、diff 和 undo。 |
+| `search_files` | 使用 ripgrep 搜索文本并返回 Evidence。 | 只读；有结果上限、截断标记和明确的后端错误。 |
+| `edit_file` / `write_file` | 精确片段编辑，或创建/完整替换文件。 | `write_file.expected_sha256=null` 断言文件不存在；替换必须携带读取所得 hash。保留 FILE_CREATE/FILE_EDIT 审批、diff 和 undo。 |
 | `git_status` / `git_diff` | 查询 Git 状态或差异。 | 只读；不接受任意 Git 参数。 |
 | `shell` | 在 OS 沙箱运行命令。 | Tree-sitter Bash AST、默认断网；自动批准只覆盖 Git 查询、`pwd` 与标准输入过滤器并只读挂载工作区，其他命令询问；动态语法/重定向 fail closed，危险命令 hard deny。 |
 | `process_output` / `process_stop` | 管理 session 隔离的后台进程。 | 有界输出和 TERM→KILL 取消。 |
 | `ask_user` | 创建可持久化结构化问题。 | 暂停同一 invocation，可跨进程回答。 |
 | `enter_plan_mode` / `get_plan` / `update_plan` / `submit_plan` | 进入、读取、更新和提交当前 session 的计划。 | 主 Agent 专用；状态、归属、大小与 revision SHA-256 强校验。 |
-| `create_task` / `list_tasks` / `get_task` / `update_task` | 管理任务与依赖关系。 | session 隔离并拒绝依赖环。 |
+| `create_task` / `list_tasks` / `update_task` | 管理任务与依赖关系；`list_tasks(task_id=...)` 精确读取单个任务。 | 始终返回 `tasks` 数组；精确查询不存在返回 `task_not_found`，`status` 仅用于列表筛选。session 隔离并拒绝依赖环。 |
 | `read_pdf` / `read_notebook` / `edit_notebook` | 读取 PDF/Notebook 或编辑 cell。 | 有界读取；Notebook 编辑使用独立 Action。 |
 | LSP 语义工具 | 定义、引用、符号、实现和调用层级查询。 | 仅已安装/配置 server；只读、禁网沙箱。 |
 | `list_mcp_resources` / `read_mcp_resource` | 发现和读取 MCP Resources。 | server/URI 权限；二进制写 artifact。 |
@@ -60,8 +60,14 @@ Markdown 镜像位于 `.capslock/state/plans/<session-id>/<plan-id>.md`。数据
 | `web_search` / `web_fetch` | 搜索或抓取公开 Web 内容。 | SSRF、重定向、类型、大小和来源审计。 |
 | Memory / Skill 工具 | 查询记忆或加载 Skill 快照。 | 作用域隔离，只读，不可信上下文。 |
 | Worktree / Agent 工具 | 切换 session worktree，或创建 team/worker/DAG task、分配与恢复子 Agent。 | context mutation 独占执行，session ownership、contract digest、claim 和 checkpoint 强校验。 |
-| `send_agent_message` / `read_agent_messages` / `ack_agent_message` / `send_team_message` | 与后台子 Agent 双向通信，或在 team 内点对点/广播。 | session/team/task 归属、32 KiB、TTL、digest、交付状态与不可信标记强校验。 |
+| `send_agent_message` / `read_agent_messages` / `ack_agent_message` | 与后台子 Agent 双向通信，或在 team 内点对点/广播。 | 发送显式指定 `target_type=task/agent/team` 和 `target_id`；task 要求 `kind`，team 要求 `broadcast=true`。保留归属、32 KiB、TTL、digest 和交付校验。 |
 | `publish_agent_artifact` | 发布子 Agent 提议的单个产物。 | allowlist、大小、SHA-256 与父 snapshot baseline 再校验。 |
+
+内置父 Agent 工具目录在 Shell、Worktree、Agent 功能均开启时有 **49 个公开工具**（不含动态 MCP、插件、LSP）。`agents.enabled=false` 时不注册 Agent 控制与委派工具。`stop_agent` 使用 `target_type=task/agent` 和 `target_id`，分别停止任务或 worker。
+
+`create_file`、`get_task`、`stop_agent_task`、父 Agent 的 `send_team_message` 四个历史执行定义保留，用于旧会话/检查点恢复；它们不进入模型 schema、工具发现或候选列表。旧 `stop_agent(agent_id)` 和 `send_agent_message(task_id, kind, payload)` 参数仍可恢复。子 Agent 的受限 `send_team_message` 邮箱协议保持原状。权限仍按原 Agent 操作匹配；旧允许规则不会扩展到新增目标，相关旧名称上的 deny/ask 仍生效。文件创建与精确任务查询也保留旧入口的限制。
+
+`list_files` 返回 `entries=[{path,type}]`、`count`、`offset`、`next_offset`、`truncated`、`stop_reason`，保留 `files` 字段（当前页的文件路径）。每页按路径排序；扫描最多 `max_files` 个目录项，达到扫描上限时返回 `stop_reason=scan_limit`，只对该有界快照分页。目录发生变化时应从 offset 0 重新读取；递归/模式查询使用 `glob_files`。
 
 模型直接调用业务能力工具；需要副作用的工具由运行时创建 Action，统一 `ActionCoordinator` 决定是否等待批准或自动执行。TUI 为 Coordinator 安装阻塞式审批器：越过权限边界时显示动作类型、风险、目标，以及最多 40 行、4 KiB 的本机脱敏命令或 diff 预览，用户只能拒绝或执行且默认选择拒绝；原始参数、完整输出、文件正文和凭据不会进入展示事件。最终动作状态返回同一个模型工具调用，run 随后继续。非交互 `exec` 不安装审批器，仍保留 pending action、`waiting_approval` 终止事件和退出码 `3`。动作记录只使用 `request_json` 与 `result_json`，新增动作类型不需要 subtype 表。
 
@@ -69,15 +75,19 @@ Markdown 镜像位于 `.capslock/state/plans/<session-id>/<plan-id>.md`。数据
 
 `ToolContract`、`ToolDefinition` 和 `ResolvedToolPolicy` 声明输入/输出 JSON Schema、参数级只读/并发/破坏性属性、取消行为、capability、alias、intent tag、工具组与结果限制。`ToolCatalog` 保留动态发现的 last-known-good snapshot，单个无效 schema 只隔离对应工具；`ToolExecutor` 固定执行 normalize、validate、authorize、execute、输出校验和 middleware。连续的只读且并发安全调用使用有界并发执行，额度 reservation 与计数原子完成，checkpoint 仍按模型 tool-call 顺序写入。
 
+内置工具的成功结果使用逐工具输出契约，覆盖必需字段、字段类型、数组元素及嵌套记录；不再使用通用 `object | array` 兜底。Action 的持久化结果封装有必需字段，具体 handler 的扩展结果、用户答案和自定义 metadata 保持可扩展；历史允许的空结果仍可读取。新增内置工具必须提供输出契约，缺失时注册报错。契约验证结构，不代表任务目标已达成。
+
+`ToolExecutor.invoke()` 与 `resume()` 共用归一化、输入与业务校验、Plan Mode 边界、当前权限、超时/取消、输出校验和后处理管线；恢复只调用工具的 resume handler，不重新调用 execute。成功输出在后处理前后均校验，失败使用 `invalid_tool_output`，保留原始 data 和实际执行状态。后处理失败不会抹除已确认副作用，也不会触发参数修复重放。审批后 Action 结算仍沿用持久化恢复协议，不重复执行已完成动作。
+
 `ToolOutcome.execution_state` 为 `not_started | committed | unknown`，旧 `executed` 保持兼容。只有确定未执行的名称或参数错误可进行一次模型修复；运行时不改写路径、命令、URL或业务值，第二次失败返回 `argument_repair_exhausted`。默认 `selection_mode=shadow` 仍发送完整工具集合并记录候选召回；`full` 可回滚，`filtered` 需通过评测门槛后启用。携带工具的请求要求 provider 显式设置 `strict_tool_calls=true`；摘要、Memory、Shell 分类和子 Agent 结果优先选择 `json_schema_outputs=true` 的 provider。若没有兼容候选，结构化正文会降级为由同一权威 Schema 生成的 Prompt 约束；返回后仍执行本地 Schema 与业务语义校验。严格工具调用能力缺失时仍返回 `provider_capability_unavailable`。
 
 超过 16 KiB 的结果写入 `.capslock/state/artifacts/sha256/`，单项最多 5 MiB。模型只收到脱敏预览和 artifact ID；`read_tool_artifact` 只能分块读取当前 session 的 artifact，session 删除会级联清理记录与文件。消息、Tool Result 与文本 Artifact 同时写入 session-scoped episodic FTS；每轮自动回填最多 5 条/4 KiB，`search_session_history` 可显式检索最多 20 条。隔离的可疑 Artifact 不索引正文。
 
 ## 上下文预算
 
-输入预算由模型 `context_window - max_output_tokens` 计算，并计入 system prompt、memory、episodic recall、显式 attachment、Skill catalog、工具 schema 与 checkpoint。默认在 80% 触发并压到 60% 目标；自动、active-run checkpoint 与 `/compact` 共用同一管线。最近历史按完整 user turn/API-safe tool round 从尾部选择，始终保留最新完整 turn，并受 `preserve_recent_turns=6` 与 `preserve_recent_tokens=32768` 双重约束。预算不足时先移除 episodic recall，再减少非最新 recent turn；核心/运行时策略、仓库指令、当前输入、显式附件及最新 turn 不会为达成 target 而删除。
+输入预算由模型 `context_window - max_output_tokens` 计算，并计入 system prompt、memory、episodic recall、显式 attachment、Skill catalog、工具 schema 与 checkpoint。缺少有效 provider usage 或轮次增长样本时，以 80% 比例作为软触发兜底（同时预留安全余量）。观测充分后，软门槛改为 `输入预算 - max(2048, context_window × 2%) - 最近 8 个非负轮次增长样本的最大值`，不再受 80% 限制；工具 schema 只计入输入一次。输出始终预留配置的 `max_output_tokens`，硬上限仍为输入预算。压缩目标不高于 60%，动态门槛降低时按原目标/触发比例同步降低以保持滞回。profile 切换清空增长观测；压缩后从压缩结果重新计算下一轮增长基线。`context/compaction_decision` 诊断记录策略、预计增长、输入估算及软硬门槛；自动、active-run checkpoint 与 `/compact` 共用同一管线。最近历史按完整 user turn/API-safe tool round 从尾部选择，始终保留最新完整 turn，并受 `preserve_recent_turns=6` 与 `preserve_recent_tokens=32768` 双重约束。预算不足时先移除 episodic recall，再减少非最新 recent turn；核心/运行时策略、仓库指令、当前输入、显式附件及最新 turn 不会为达成 target 而删除。
 
-Provider 以结构化错误码或 HTTP 413 报告 context overflow 时，Runtime 仅在尚未输出 delta 的模型调用上强制执行一次 compaction，并用相同逻辑请求重试一次。强制模式跳过 80% 本地触发阈值，但仍遵守 `auto_compact`、硬输入预算和三次失败熔断；第二次 overflow、无可压缩历史、固定上下文本身过大或自动压缩关闭时保留原错误。已经完成的 Tool 调用不会重放。诊断事件包括 `context_overflow_detected`、`context_overflow_recovery_started`、`context_overflow_recovery_succeeded` 和 `context_overflow_recovery_failed`。
+Provider 以结构化错误码或 HTTP 413 报告 context overflow 时，Runtime 仅在尚未输出 delta 的模型调用上强制执行一次 compaction，并用相同逻辑请求重试一次。强制模式跳过本地软触发阈值，但仍遵守 `auto_compact`、硬输入预算和三次失败熔断；第二次 overflow、无可压缩历史、固定上下文本身过大或自动压缩关闭时保留原错误。已经完成的 Tool 调用不会重放。诊断事件包括 `context_overflow_detected`、`context_overflow_recovery_started`、`context_overflow_recovery_succeeded` 和 `context_overflow_recovery_failed`。
 
 旧 Tool Result 超过 `inline_tool_result_bytes=16384` 且 Artifact 持久化成功后才从模型上下文替换；失败保留原文并返回明确错误。摘要 v3 使用 `summary_max_tokens=2048` 作为 provider 输出与最终结果的硬上限，保存用户纠正、当前工作、代码符号、验证状态、逐项 `source_map` 和引用式 `working_set`。文件引用包含路径、SHA、行区间及 invocation ID，已加载 Skill 只记录名称和 digest，不跨 run 恢复正文。v1/v2 读取时仅在内存补齐 v3 默认字段，不重写旧记录。模型输出会校验并纠错一次；仍失败时生成 `degraded=true` 的确定性摘要及 `search_session_history`/`read_tool_artifact` 提示。超过 target 但低于 trigger 标记 `target_unreachable` 并继续，不在相同上下文中循环重压缩；只有超过硬输入预算或命中三次失败熔断才返回 `context_budget_exceeded`。
 
@@ -133,7 +143,7 @@ pending -> approved -> running -> completed
 | `/rewind [run-id-prefix]` | 从早期 run 创建派生 session，并在安全校验与确认后恢复文件。 |
 | `/stats [workspace\|session]` | 汇总主运行指标，并单列 maintenance 用量。 |
 | `/doctor [--network]` | 在 TUI 中运行只读诊断；默认不联网。 |
-| `/model [deepseek-v4-flash\|deepseek-v4-pro]` | 查看或切换当前 session 的模型；无参数时打开选择器。 |
+| `/model [profile-id]` | 查看或切换当前 session 的模型；无参数时打开选择器。 |
 | `/permissions [full|approve|ask]` | 无参数时打开权限选择框；带参数时直接切换。`rules|recent|doctor|trust-project|add|remove` 管理与诊断规则。 |
 | `/approvals` | 处理非交互运行留下的 Plan、Action 或普通工具权限请求。 |
 | `/queue` | 查看队列；`start <id>` 显式启动导入队列，另有 `move`、`cancel` 和 `retry`。 |
@@ -151,10 +161,7 @@ pending -> approved -> running -> completed
 
 命令目录不提供额外 alias；`/continue`、`/clear`、`/fork`、`/cost`、`/tasks`、`/changes`、`/commands` 或 `/web` 不解析。
 
-`/model` 只接受 `deepseek-v4-flash` 和 `deepseek-v4-pro`。选择写入当前
-session，恢复后继续生效；新 session 使用配置默认模型。运行中的模型会话保持
-不可变，因此活跃 run 期间的切换请求会被拒绝，避免一个 run 在工具轮次之间
-更换模型。
+`/model` 显示实际配置的 profile、Provider、模型与可用状态。选择会同时切换窗口、输出上限、计价及缓存身份，并持久化到 session。旧模型名称仅在唯一匹配配置时接受；缺失或重名的历史 profile 必须明确重选后才能运行。活跃 run 期间禁止切换。
 
 ## TUI 输出
 
@@ -278,7 +285,7 @@ worker workspace 支持 `snapshot`、`worktree`、`shared_read`。前两者记�
 
 team task 只有在全部依赖成功后才从 blocked 转为 ready，同一 worker 同时只运行一个任务；claim token 与 attempt ordinal 防止重复领取。每次 attempt 记录预算 reserve/settle/release ledger、child approval link 和 checkpoint。恢复必须复用原 attempt 与 child session/workspace，并重新验证 contract digest；只有显式 resumable checkpoint 可以恢复，未知副作用不得自动重放。子快照排除 `.git`、`.capslock`、环境文件和符号链接，并使用自己的 workspace/memory 数据库。后台任务通过 `agent_mailbox` 交换 instruction/question/response/progress/artifact offer/cancel，team message 可点对点或广播；消息先脱敏并限制为 32 KiB，读取时复验 SHA-256，状态为 queued/delivered/acknowledged/expired，正文始终视为不可信数据。`AgentOutputVerifier` 校验输出对象、allowlist 路径、必需检查、文件大小和 SHA-256；未通过的输出只返回失败诊断。
 
-workspace schema 20 使用 Agent team/worker/task/dependency/attempt/checkpoint/budget/approval/workspace/mailbox、performance span、Tool invocation、input request、session lineage、active compaction、episodic document、session worktree 与 Plan Mode 表保存可恢复状态、审计与验证结果。Agent capability 以校验过 digest 的 task contract 为权威来源，citation 以终态 run event 为权威来源。portable archive 默认不包含 artifact 正文，也不包含可重建的 episodic 与摘要分段索引。
+workspace schema 21 使用 Agent team/worker/task/dependency/attempt/checkpoint/budget/approval/workspace/mailbox、performance span、Tool invocation、input request、session lineage、active compaction、episodic document、session worktree 与 Plan Mode 表保存可恢复状态、审计与验证结果。Agent capability 以校验过 digest 的 task contract 为权威来源，citation 以终态 run event 为权威来源。portable archive 默认不包含 artifact 正文，也不包含可重建的 episodic 与摘要分段索引。
 
 ## 记忆契约
 
@@ -302,9 +309,9 @@ workspace schema 20 使用 Agent team/worker/task/dependency/attempt/checkpoint/
 
 ## 数据库与布局
 
-工作区数据库使用 application ID `0x434C4B32`、schema 20，记忆数据库使用 `0x434C4D32`、schema 6。两者开启 foreign keys、WAL 和 5 秒 busy timeout；记忆库额外开启 secure delete 并设置文件权限 `0600`。迁移均先 checkpoint 和备份，失败恢复原数据库；`VACUUM` 只由显式 `database compact` 命令执行。
+工作区数据库使用 application ID `0x434C4B32`、schema 21，记忆数据库使用 `0x434C4D32`、schema 6。两者开启 foreign keys、WAL 和 5 秒 busy timeout；记忆库额外开启 secure delete 并设置文件权限 `0600`。迁移均先 checkpoint 和备份，失败恢复原数据库；`VACUUM` 只由显式 `database compact` 命令执行。
 
-应用先读取 application ID 和 schema version，确认是当前格式或可迁移格式后才切换 WAL。workspace schema 为 20，memory schema 为 6；其他 application ID 或 schema 只报错，不修改原数据库。episodic 索引属于派生数据，导入、branch 和 rewind 后可幂等重建。
+应用先读取 application ID 和 schema version，确认是当前格式或可迁移格式后才切换 WAL。workspace schema 为 21，memory schema 为 6；其他 application ID 或 schema 只报错，不修改原数据库。episodic 索引属于派生数据，导入、branch 和 rewind 后可幂等重建。
 
 portable import 使用 archive ID 幂等记录。相同 ID 与内容跳过，同 ID 不同内容确定性重映射并重写引用。running run 转为 interrupted，approved/running action 转为 pending；导入的历史副作用不能在目标工作区执行 undo。
 
@@ -316,3 +323,5 @@ portable import 使用 archive ID 幂等记录。相同 ID 与内容跳过，同
 - `/memory embeddings enable external <model-profile>` 会先展示 `memory.content`、未来 `recall.query`、当前记录数和 UTF-8 字节数；确认记录失效或撤销后不会联网。
 
 canonical 路径见项目 README。
+
+新增自动化与授权接口见 [优化交付说明](reliability-optimization.md) 和 [stdio 协议](app-server.md)。

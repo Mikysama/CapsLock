@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import sqlite3
 from dataclasses import asdict
 from pathlib import Path
@@ -16,6 +17,7 @@ from ..credentials import credential_status
 from ..layout import ProjectLayout
 from ..lifecycle import LifecycleService
 from ..mcp import McpRegistry
+from ..credentials import CredentialError
 from ..policy import WorkspacePolicy
 from ..storage.schema import (
     MEMORY_APPLICATION_ID,
@@ -163,6 +165,17 @@ async def doctor(
         Diagnostic("ok", "workspace", "Workspace", str(workspace)),
         Diagnostic("ok", "layout", "Layout", "canonical"),
     ]
+    ripgrep = shutil.which("rg")
+    diagnostics.append(
+        Diagnostic(
+            "ok" if ripgrep else "error",
+            "search_backend" if ripgrep else "search_backend_unavailable",
+            "Workspace search",
+            f"ripgrep: {ripgrep}"
+            if ripgrep
+            else "ripgrep is required; install with `brew install ripgrep` (macOS) or your Linux package manager, then rerun capslock doctor",
+        )
+    )
     config_valid = False
     if not layout.config.exists():
         diagnostics.append(
@@ -261,7 +274,7 @@ async def doctor(
         try:
             McpRegistry(WorkspacePolicy(workspace), layout=layout).servers()
             diagnostics.append(Diagnostic("ok", "mcp", "MCP", "configuration valid"))
-        except (ValueError, OSError) as exc:
+        except (ValueError, OSError, CredentialError) as exc:
             diagnostics.append(Diagnostic("error", "mcp", "MCP", str(exc)))
     skill_entries = SkillRegistry(workspace, layout=layout).entries()
     invalid_skills = [item for item in skill_entries if item.error]

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from collections import deque
 import hashlib
 import json
 import re
 import asyncio
+import time
+from functools import wraps
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 from ..configuration import ContextSettings
 from ..domain import ModelErrorCode, ModelRoutingError, ProviderCapabilityUnavailable
@@ -22,6 +25,30 @@ from ..structured_output import (
     validate_schema_value,
 )
 from .tokens import AdaptiveTokenEstimator, TokenBreakdown, heuristic_tokens
+
+
+def _timed_context(name: str):
+    """Collect operational duration without retaining prompt or result content."""
+
+    def decorate(method):
+        @wraps(method)
+        async def timed(self, *args, **kwargs):
+            started = time.perf_counter()
+            status = "ok"
+            try:
+                return await method(self, *args, **kwargs)
+            except BaseException:
+                status = "failed"
+                raise
+            finally:
+                session_id = kwargs.get("session_id") or (args[0] if args else None)
+                await self._diagnostic_span(
+                    name, started, kwargs.get("run_id"), session_id, status=status
+                )
+
+        return timed
+
+    return decorate
 
 
 BASE_SUMMARY_KEYS = (
@@ -65,6 +92,27 @@ class ContextBudgetExceeded(RuntimeError):
     code = "context_budget_exceeded"
 
 
+@runtime_checkable
+class SummarySegmentCache(Protocol):
+    """Optional compaction cache keyed by source, profile, and summary policy."""
+
+    async def summary_segment(
+        self, source_digest: str, model_profile: str, summary_policy_digest: str
+    ) -> dict[str, object] | None: ...
+
+    async def store_summary_segment(
+        self,
+        *,
+        source_digest: str,
+        model_profile: str,
+        summary_policy_digest: str,
+        summary: dict[str, object],
+        source_refs: list[str],
+        input_tokens: int,
+        output_tokens: int,
+    ) -> None: ...
+
+
 @dataclass(frozen=True)
 class ContextBuildResult:
     messages: list[dict[str, object]]
@@ -78,6 +126,17 @@ class ContextBuildResult:
     compaction_quality: str = "none"
     working_set_count: int = 0
     no_progress_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class CompactionDecision:
+    """Decision made before constructing a model request."""
+
+    action: str
+    estimated_tokens: int
+    soft_trigger_tokens: int
+    hard_limit_tokens: int
+    reason: str
 
 
 @dataclass(frozen=True)
@@ -128,6 +187,7 @@ class ContextBudgetManager:
         journal: Any = None,
         working_set_provider: Any = None,
         evaluation_policy: ContextEvaluationPolicy | None = None,
+        performance: Any = None,
     ) -> None:
         self.sessions = sessions
         self.compactions = compactions
@@ -135,6 +195,7 @@ class ContextBudgetManager:
         self.context_window = context_window
         self.max_output_tokens = max_output_tokens
         self.model_profile = model_profile
+        self.cache_identity = model_profile
         self.model_name = model_name
         self.tool_schemas = tool_schemas
         self.memory = memory
@@ -152,24 +213,163 @@ class ContextBudgetManager:
         self.last_no_progress_reason: str | None = None
         self.last_micro_compaction_saved_tokens = 0
         self.evaluation_policy = evaluation_policy
+        self.performance = performance
+        self.last_retrieval_diagnostics: dict[str, dict[str, Any]] = {}
+        self._growth_identity = self.cache_identity
+        self._growth_samples: deque[int] = deque(maxlen=8)
+        self._previous_context_tokens: int | None = None
+        self._has_usage_observation = False
+
+    async def _diagnostic_span(
+        self, name, started, run_id, session_id, *, status="ok", attributes=None
+    ):
+        if self.performance is None or run_id is None:
+            return
+        try:
+            await self.performance.record(
+                trace_id=run_id,
+                run_id=run_id,
+                session_id=session_id,
+                category="context",
+                name=name,
+                status=status,
+                duration_ms=(time.perf_counter() - started) * 1000,
+                attributes=attributes,
+            )
+        except Exception:
+            pass
+
+    async def _retrieval(self, name, operation, default, *, run_id, session_id):
+        started = time.perf_counter()
+        diagnostic = {"status": "disabled"}
+        try:
+            if operation is None:
+                return default
+            result = await operation
+            nonempty = (
+                bool(result[0] or result[1])
+                if isinstance(result, tuple)
+                else bool(result)
+            )
+            diagnostic["status"] = "ok" if nonempty else "empty"
+            return result
+        except Exception as exc:
+            diagnostic = {"status": "failed", "error_type": type(exc).__name__}
+            return default
+        finally:
+            self.last_retrieval_diagnostics[name] = diagnostic
+            await self._diagnostic_span(
+                name,
+                started,
+                run_id,
+                session_id,
+                status=diagnostic["status"],
+                attributes=diagnostic,
+            )
 
     @property
     def input_budget(self) -> int:
         return max(1, self.context_window - self.max_output_tokens)
 
     @property
+    def hard_limit_tokens(self) -> int:
+        """The safe input ceiling after reserving the configured output budget."""
+        return self.input_budget
+
+    @property
+    def safety_margin_tokens(self) -> int:
+        # Keep a small absolute floor while scaling with unusually large models.
+        return max(2_048, int(self.context_window * 0.02))
+
+    def _reset_growth_if_needed(self) -> None:
+        if self._growth_identity != self.cache_identity:
+            self._growth_identity = self.cache_identity
+            self._growth_samples.clear()
+            self._previous_context_tokens = None
+            self._has_usage_observation = False
+
+    def observe_context_size(self, tokens: int) -> None:
+        """Measure growth between safe boundaries, excluding compaction shrinkage."""
+        self._reset_growth_if_needed()
+        previous = self._previous_context_tokens
+        if previous is not None and tokens >= previous:
+            self._growth_samples.append(tokens - previous)
+        self._previous_context_tokens = tokens
+
+    @property
+    def expected_growth_tokens(self) -> int | None:
+        self._reset_growth_if_needed()
+        if not self._has_usage_observation or not self._growth_samples:
+            return None
+        return max(self._growth_samples)
+
+    @property
+    def soft_trigger_tokens(self) -> int:
+        """Schemas are already included in estimate(); never subtract them twice."""
+        growth = self.expected_growth_tokens
+        available = self.hard_limit_tokens - self.safety_margin_tokens
+        if growth is None:
+            return max(
+                1, min(int(self.input_budget * self.settings.trigger_ratio), available)
+            )
+        return max(1, available - growth)
+
+    @property
     def target_tokens(self) -> int:
-        return max(1, int(self.input_budget * self.settings.target_ratio))
+        # Maintain hysteresis even when a large observed tool result lowers the trigger.
+        ratio = self.settings.target_ratio / self.settings.trigger_ratio
+        return max(
+            1,
+            min(
+                int(self.input_budget * self.settings.target_ratio),
+                int(self.trigger_tokens * ratio),
+            ),
+        )
 
     @property
     def trigger_tokens(self) -> int:
-        ratio_trigger = max(1, int(self.input_budget * self.settings.trigger_ratio))
+        ratio_trigger = self.soft_trigger_tokens
         if self.evaluation_policy is None:
             return ratio_trigger
         headroom_trigger = self.input_budget - max(
             0, self.evaluation_policy.minimum_headroom_tokens
         )
         return max(1, min(ratio_trigger, headroom_trigger))
+
+    def compaction_decision(
+        self, estimated_tokens: int, *, force: bool = False
+    ) -> CompactionDecision:
+        if force:
+            return CompactionDecision(
+                "forced",
+                estimated_tokens,
+                self.trigger_tokens,
+                self.hard_limit_tokens,
+                "forced_recovery",
+            )
+        if estimated_tokens > self.hard_limit_tokens:
+            return CompactionDecision(
+                "forced",
+                estimated_tokens,
+                self.trigger_tokens,
+                self.hard_limit_tokens,
+                "hard_limit_exceeded",
+            )
+        if estimated_tokens > self.trigger_tokens:
+            return CompactionDecision(
+                "compact",
+                estimated_tokens,
+                self.trigger_tokens,
+                self.hard_limit_tokens,
+                "soft_trigger_exceeded",
+            )
+        return CompactionDecision(
+            "none",
+            estimated_tokens,
+            self.trigger_tokens,
+            self.hard_limit_tokens,
+            "within_budget",
+        )
 
     def observe_compaction_progress(self, before: int, after: int) -> None:
         if after < before:
@@ -266,6 +466,7 @@ class ContextBudgetManager:
             older.extend(units.pop(0))
         return older, [item for unit in units for item in unit]
 
+    @_timed_context("compression")
     async def get_or_create_compaction(
         self,
         *,
@@ -292,7 +493,11 @@ class ContextBudgetManager:
             memory_revision_digest,
             policy_digest,
         )
-        if cached is not None:
+        if (
+            cached is not None
+            and getattr(cached, "model_profile", self.cache_identity)
+            == self.cache_identity
+        ):
             return cached
         working_set = await self.working_set(session_id, run_id)
         source_tokens = estimate_tokens(older)
@@ -346,7 +551,7 @@ class ContextBudgetManager:
             output_tokens=output_tokens,
             source_tokens=source_tokens,
             target_tokens=self.target_tokens,
-            model_profile=self.model_profile,
+            model_profile=self.cache_identity,
             source_digest=source_digest,
             memory_revision_digest=memory_revision_digest,
             summary_policy_digest=policy_digest,
@@ -449,6 +654,7 @@ class ContextBudgetManager:
             self.last_no_progress_reason = "mandatory context exceeds target"
         return record
 
+    @_timed_context("context_build")
     async def build(
         self,
         session_id: str,
@@ -463,55 +669,65 @@ class ContextBudgetManager:
         if self.failures >= self.settings.max_compaction_failures:
             raise ContextBudgetExceeded("context compaction failure limit reached")
 
+        self.last_retrieval_diagnostics = {}
+
         async def history():
-            try:
-                excluded = (
-                    await self.memory.excluded_runs()
-                    if self.memory is not None and memory_enabled
-                    else set()
-                )
-            except Exception:
-                excluded = set()
+            excluded = await self._retrieval(
+                "memory.exclusions",
+                self.memory.excluded_runs()
+                if self.memory is not None and memory_enabled
+                else None,
+                set(),
+                run_id=run_id,
+                session_id=session_id,
+            )
             return await self.sessions.context_entries(
                 session_id, excluded_run_ids=excluded | {run_id}
             )
 
-        history_task = asyncio.create_task(history())
-        recall_task = (
-            asyncio.create_task(self.memory.recall_context(question, run_id=run_id))
-            if self.memory is not None and memory_enabled
-            else None
-        )
-        episodic_task = (
-            asyncio.create_task(
-                self.episodic.search(
-                    question,
+        async with asyncio.TaskGroup() as tasks:
+            history_task = tasks.create_task(history())
+            recall_task = tasks.create_task(
+                self._retrieval(
+                    "memory.recall",
+                    self.memory.recall_context(question, run_id=run_id)
+                    if self.memory is not None and memory_enabled
+                    else None,
+                    ("", []),
+                    run_id=run_id,
                     session_id=session_id,
-                    exclude_run_id=run_id,
-                    limit=self.settings.episodic_recall_limit,
-                    byte_budget=self.settings.episodic_recall_bytes,
                 )
             )
-            if self.episodic is not None and self.settings.episodic_recall_enabled
-            else None
-        )
-        entries = await history_task
-        try:
-            memory_context, recalls = await recall_task if recall_task else ("", [])
-        except Exception:
-            memory_context, recalls = "", []
-        try:
-            episodic_hits = await episodic_task if episodic_task else []
-        except Exception:
-            episodic_hits = []
-        try:
-            memory_revision_digest = (
-                await self.memory.revision_digest()
-                if self.memory is not None and memory_enabled
-                else ""
+            episodic_task = tasks.create_task(
+                self._retrieval(
+                    "episodic.recall",
+                    self.episodic.search(
+                        question,
+                        session_id=session_id,
+                        exclude_run_id=run_id,
+                        limit=self.settings.episodic_recall_limit,
+                        byte_budget=self.settings.episodic_recall_bytes,
+                    )
+                    if self.episodic is not None
+                    and self.settings.episodic_recall_enabled
+                    else None,
+                    [],
+                    run_id=run_id,
+                    session_id=session_id,
+                )
             )
-        except Exception:
-            memory_revision_digest = ""
+        entries = history_task.result()
+        memory_context, recalls = recall_task.result()
+        episodic_hits = episodic_task.result()
+        memory_revision_digest = await self._retrieval(
+            "memory.revision",
+            self.memory.revision_digest()
+            if self.memory is not None and memory_enabled
+            else None,
+            "",
+            run_id=run_id,
+            session_id=session_id,
+        )
         bundle = (
             instructions
             if isinstance(instructions, PromptBundle)
@@ -563,7 +779,8 @@ class ContextBudgetManager:
             )
         active = await self.compactions.active(session_id)
         if active is not None and (
-            active.memory_revision_digest != memory_revision_digest
+            active.model_profile != self.cache_identity
+            or active.memory_revision_digest != memory_revision_digest
             or active.summary_policy_digest != SUMMARY_POLICY_DIGEST
         ):
             # Memory is injected independently from the conversation summary. A
@@ -612,7 +829,8 @@ class ContextBudgetManager:
             {"role": "user", "content": expanded_question},
         ]
         estimate = self.estimate(messages)
-        if not self.settings.auto_compact or estimate <= self.trigger_tokens:
+        decision = self.compaction_decision(estimate)
+        if not self.settings.auto_compact or decision.action == "none":
             if estimate > self.input_budget:
                 raise ContextBudgetExceeded("context input exceeds the model budget")
             return ContextBuildResult(
@@ -630,7 +848,7 @@ class ContextBudgetManager:
         self.last_micro_compaction_saved_tokens = saved
         entries = _apply_externalized_tool_results(entries, messages)
         estimate = self.estimate(messages)
-        if estimate <= self.trigger_tokens:
+        if self.compaction_decision(estimate).action == "none":
             return ContextBuildResult(
                 messages,
                 recalls,
@@ -814,11 +1032,9 @@ class ContextBudgetManager:
         *,
         session_id: str,
         run_id: str,
-        preserve_messages: int = 12,
     ) -> tuple[list[dict[str, object]], int]:
         """Externalize old tool results before replacing them in model context."""
         before = self.estimate(messages)
-        del preserve_messages  # Retained for Python API compatibility.
         compacted: list[dict[str, object]] = []
         persistence_failed = False
         oversized = [
@@ -928,11 +1144,54 @@ class ContextBudgetManager:
         tool_schemas: list[dict[str, object]],
         actual_input_tokens: int,
     ) -> None:
+        self._reset_growth_if_needed()
         await self.estimator.observe(
             {"messages": messages, "tools": tool_schemas}, actual_input_tokens
         )
+        if actual_input_tokens > 0:
+            self._has_usage_observation = True
 
     async def compact_checkpoint(
+        self,
+        messages: list[dict[str, object]],
+        *,
+        session_id: str,
+        run_id: str,
+        summarizer: ChatModel,
+        force: bool = False,
+    ) -> list[dict[str, object]]:
+        self.observe_context_size(self.estimate(messages))
+        decision = self.compaction_decision(self.estimate(messages), force=force)
+        await self._diagnostic_span(
+            "compaction_decision",
+            time.perf_counter(),
+            run_id,
+            session_id,
+            attributes={
+                "action": decision.action,
+                "reason": decision.reason,
+                "estimated_tokens": decision.estimated_tokens,
+                "trigger_tokens": decision.soft_trigger_tokens,
+                "hard_limit_tokens": decision.hard_limit_tokens,
+                "expected_growth_tokens": self.expected_growth_tokens,
+                "policy": "ratio_fallback"
+                if self.expected_growth_tokens is None
+                else "observed_growth",
+            },
+        )
+        result = await self._compact_checkpoint(
+            messages,
+            session_id=session_id,
+            run_id=run_id,
+            summarizer=summarizer,
+            force=force,
+        )
+        self._previous_context_tokens = self.estimate(result)
+        if self._previous_context_tokens > self.hard_limit_tokens:
+            raise ContextBudgetExceeded("context input exceeds the model budget")
+        return result
+
+    async def _compact_checkpoint(
         self,
         messages: list[dict[str, object]],
         *,
@@ -946,7 +1205,7 @@ class ContextBudgetManager:
             if force:
                 raise ContextBudgetExceeded("automatic context compaction is disabled")
             return messages
-        if not force and estimate <= self.trigger_tokens:
+        if not force and self.compaction_decision(estimate).action == "none":
             return messages
         before_summary_tokens = estimate
         if self.failures >= self.settings.max_compaction_failures:
@@ -956,7 +1215,7 @@ class ContextBudgetManager:
         )
         self.last_micro_compaction_saved_tokens = _saved
         estimate = self.estimate(messages)
-        if not force and estimate <= self.trigger_tokens:
+        if not force and self.compaction_decision(estimate).action == "none":
             return messages
         pinned: list[dict[str, object]] = []
         conversation: list[dict[str, object]] = []
@@ -1339,19 +1598,15 @@ class ContextBudgetManager:
         overflow_depth: int = 0,
     ) -> tuple[dict[str, object], int, int]:
         digest = _digest(entries)
-        if hasattr(self.compactions, "summary_segment"):
-            try:
-                cached = await self.compactions.summary_segment(
-                    digest, self.model_profile, policy_digest
-                )
-            except TypeError:
-                # Compatibility for third-party repository adapters. Their old cache
-                # is never trusted for a focus/slim policy.
-                cached = (
-                    await self.compactions.summary_segment(digest, self.model_profile)
-                    if policy_digest == SUMMARY_POLICY_DIGEST
-                    else None
-                )
+        cache = (
+            self.compactions
+            if isinstance(self.compactions, SummarySegmentCache)
+            else None
+        )
+        if cache is not None:
+            cached = await cache.summary_segment(
+                digest, self.cache_identity, policy_digest
+            )
             if cached is not None:
                 return _with_source_coverage(_validate_summary(cached), entries), 0, 0
         if not self._summary_request_fits(
@@ -1401,27 +1656,18 @@ class ContextBudgetManager:
             input_tokens += current_input
             output_tokens += current_output
         summary = _with_source_coverage(summary, entries)
-        if hasattr(self.compactions, "store_summary_segment"):
-            arguments = {
-                "source_digest": digest,
-                "model_profile": self.model_profile,
-                "summary_policy_digest": policy_digest,
-                "summary": summary,
-                "source_refs": [
+        if cache is not None:
+            await cache.store_summary_segment(
+                source_digest=digest,
+                model_profile=self.cache_identity,
+                summary_policy_digest=policy_digest,
+                summary=summary,
+                source_refs=[
                     str(item["id"]) for item in entries if item.get("id") is not None
                 ],
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-            }
-            try:
-                await self.compactions.store_summary_segment(**arguments)
-            except TypeError as exc:
-                if "summary_policy_digest" not in str(exc):
-                    raise
-                if policy_digest != SUMMARY_POLICY_DIGEST:
-                    return summary, input_tokens, output_tokens
-                arguments.pop("summary_policy_digest")
-                await self.compactions.store_summary_segment(**arguments)
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+            )
         return summary, input_tokens, output_tokens
 
     async def _summarize_once(

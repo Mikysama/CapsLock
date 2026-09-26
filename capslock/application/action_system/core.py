@@ -155,6 +155,7 @@ class ActionCoordinator:
         permission = payload.pop("_permission", None)
         proposal = await self.handlers[action_type].propose(action_type, payload)
         request = dict(proposal.request)
+        request.pop("_manual_approval", None)
         if isinstance(permission, dict):
             request["_permission"] = permission
         record = await self.action_repository.create(
@@ -192,6 +193,7 @@ class ActionCoordinator:
             )
         )
         if requires_approval:
+            record = await self.action_repository.mark_manual_approval(record.id)
             if self.approval_authorizer is None:
                 return record
             try:

@@ -27,7 +27,7 @@ from capslock.tooling.contracts import (
     define_tool,
 )
 from capslock.tooling.executor import ToolRuntime
-from capslock.tooling.schema import validate_json_schema
+from capslock.tooling.schema import compile_json_schema
 from capslock.tooling.tools import workspace_tools
 from capslock.tooling.tools.filesystem.search import search_files
 from capslock.tooling.permission_policy.engine import PermissionEngine
@@ -73,7 +73,10 @@ def test_search_files_enforces_read_limit_with_and_without_ripgrep(
     result = asyncio.run(
         search_files(context, {"path": ".", "query": "needle", "limit": 1})
     )
-    assert result.ok and result.data == []
+    if use_ripgrep:
+        assert result.ok and result.data == []
+    else:
+        assert not result.ok and result.error_code == "search_backend_unavailable"
 
 
 @pytest.mark.parametrize("use_ripgrep", [True, False])
@@ -93,22 +96,20 @@ def test_search_files_honors_privacy_glob_and_result_limits(
             {"path": ".", "query": "needle", "glob": "*.txt", "limit": 1},
         )
     )
+    if not use_ripgrep:
+        assert not result.ok and result.error_code == "search_backend_unavailable"
+        return
     assert result.ok and len(result.data) == 1
     assert result.data[0]["path"].endswith("one.txt")
     assert "secret" not in result.data[0]["text"]
 
 
-def test_search_files_fallback_rejects_symlinked_matches(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_search_files_rejects_symlinked_matches(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     secret = tmp_path / "secret.txt"
     secret.write_text("needle-secret", encoding="utf-8")
     (workspace / "linked.txt").symlink_to(secret)
-    monkeypatch.setattr(
-        "capslock.tooling.tools.filesystem.search.shutil.which", lambda _: None
-    )
     result = asyncio.run(
         search_files(_context(workspace), {"path": ".", "query": "needle"})
     )
@@ -315,12 +316,12 @@ def test_mcp_stdio_reconnect_retries_only_read_only_tools(tmp_path: Path) -> Non
 
 def test_all_builtin_tools_have_output_contracts_and_selection_metadata() -> None:
     runtime = workspace_tools()
-    assert len(runtime.names) == 53
+    assert len(runtime.names) == 49
     for tool in runtime.catalog._tools.values():
         assert tool.contract.output_schema is not None
         assert tool.contract.intent_tags
         assert tool.contract.tool_group
-        validate_json_schema({}, tool.contract.output_schema)
+        compile_json_schema(tool.contract.output_schema)
 
 
 def test_filesystem_path_mistakes_are_repairable_tool_outcomes(tmp_path: Path) -> None:

@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import random
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 from ..configuration import (
@@ -30,7 +32,6 @@ from ..domain import (
 )
 from ..ports import ModelAuditPort
 from ..structured_output import StrictSchemaError, prompt_schema_messages
-from ..models import SELECTABLE_MODELS
 from .model import (
     ChatModel,
     ModelDelta,
@@ -39,6 +40,8 @@ from .model import (
     ModelRunSession,
     ModelUsage,
     StreamingChatModel,
+    stream_model_response,
+    validate_completion,
 )
 
 
@@ -75,7 +78,7 @@ class RoutePlanner:
         if not candidates:
             await self.router._record_failed_route(run_id, role, exclusions)
             self.router._raise_no_route(exclusions)
-        baseline = self.router.profiles[getattr(self.router.routing, role.value)[0]]
+        baseline = self.router.profiles[self.router._route_names(role)[0]]
         policy = self.router.providers[baseline.provider].data_policy
         return RoutePlan(run_id, role, candidates, exclusions, policy)
 
@@ -209,6 +212,9 @@ class ModelRouter:
         self._run_budget_base: ContextVar[tuple[int, float]] = ContextVar(
             "model_run_budget_base", default=(0, 0.0)
         )
+        self._profile_id: ContextVar[str | None] = ContextVar(
+            "model_profile_id", default=None
+        )
         self._hard_budget: ContextVar[bool] = ContextVar(
             "model_hard_budget", default=False
         )
@@ -223,9 +229,11 @@ class ModelRouter:
         limit_token = self._run_limits.set(context.limits)
         base_token = self._run_budget_base.set(context.budget_base)
         hard_token = self._hard_budget.set(context.hard_budget)
+        profile_token = self._profile_id.set(context.profile_id)
         try:
             yield
         finally:
+            self._profile_id.reset(profile_token)
             self._hard_budget.reset(hard_token)
             self._run_budget_base.reset(base_token)
             self._run_limits.reset(limit_token)
@@ -251,7 +259,7 @@ class ModelRouter:
         previous: str | None = None
         last_error: Exception | None = None
         for configured_profile in plan.candidates:
-            profile = _model_override(configured_profile, model, role)
+            profile = configured_profile
             provider = self.providers[profile.provider]
             request_messages, request_format = _structured_output_request(
                 provider, messages, response_format
@@ -278,6 +286,8 @@ class ModelRouter:
                 call_id, started = await self.attempt_executor.start(
                     run_id, decision_id, role, profile, attempt, previous
                 )
+                usage = ModelUsage(source="unknown")
+                response = None
                 try:
                     arguments: dict[str, object] = {
                         "model": profile.model,
@@ -288,19 +298,49 @@ class ModelRouter:
                     if request_format is not None:
                         arguments["response_format"] = request_format
                     response = await client.complete(**arguments)
+                    usage = response.usage
+                    validate_completion(
+                        response.completion_status,
+                        response.incomplete_reason,
+                        response.error_message,
+                    )
+                except asyncio.CancelledError:
+                    await self.audit.finish_call(
+                        call_id,
+                        duration_ms=_elapsed(started),
+                        error_code=ModelErrorCode.UNAVAILABLE.value,
+                        error_message="model call cancelled",
+                        **_usage_audit(profile, usage),
+                    )
+                    raise
                 except Exception as exc:
+                    if response is not None and isinstance(exc, ModelRoutingError):
+                        exc.partial_message = response.message
+                        exc.usage = response.usage
                     last_error = exc
                     code, retryable = _classify_error(exc)
+                    delay = (
+                        _retry_delay(exc, attempt)
+                        if retryable and attempt <= self.retries
+                        else None
+                    )
                     await self.audit.finish_call(
                         call_id,
                         duration_ms=_elapsed(started),
                         error_code=code.value,
                         error_message=str(exc) or type(exc).__name__,
+                        **_usage_audit(profile, usage),
+                        retry_delay_ms=round(delay * 1000)
+                        if delay is not None
+                        else None,
+                        output_started=bool(usage.input_tokens or usage.output_tokens),
                     )
                     if retryable and attempt <= self.retries:
-                        await asyncio.sleep(_retry_delay(exc, attempt))
+                        await asyncio.sleep(delay)
                         continue
                     if not retryable:
+                        if isinstance(exc, ModelRoutingError):
+                            raise
                         error = ModelRoutingError(
                             f"non-retryable provider error: {str(exc) or type(exc).__name__}"
                         )
@@ -331,7 +371,7 @@ class ModelRouter:
         previous: str | None = None
         last_error: Exception | None = None
         for configured_profile in plan.candidates:
-            profile = _model_override(configured_profile, model, role)
+            profile = configured_profile
             provider = self.providers[profile.provider]
             request_messages, request_format = _structured_output_request(
                 provider, messages, response_format
@@ -362,7 +402,8 @@ class ModelRouter:
                 call_id, started = await self.attempt_executor.start(
                     run_id, decision_id, role, profile, attempt, previous
                 )
-                emitted, usage = False, ModelUsage()
+                emitted, usage = False, ModelUsage(source="unknown")
+                first_token_ms = None
                 try:
                     arguments: dict[str, object] = {
                         "model": profile.model,
@@ -372,35 +413,63 @@ class ModelRouter:
                     arguments["max_output_tokens"] = effective_profile.max_output_tokens
                     if request_format is not None:
                         arguments["response_format"] = request_format
-                    async for delta in client.stream_complete(**arguments):
+                    async for delta in stream_model_response(client, **arguments):
                         emitted = emitted or bool(
                             delta.content
                             or delta.reasoning
                             or delta.tool_index is not None
                         )
+                        if emitted and first_token_ms is None:
+                            first_token_ms = _elapsed(started)
                         if delta.usage is not None:
-                            usage = delta.usage
+                            usage = replace(delta.usage, first_token_ms=first_token_ms)
+                            delta = replace(delta, usage=usage)
                         yield delta
-                except Exception as exc:
-                    last_error = exc
-                    code, retryable = _classify_error(exc)
+                except asyncio.CancelledError:
                     await self.audit.finish_call(
                         call_id,
                         duration_ms=_elapsed(started),
-                        input_tokens=usage.input_tokens,
-                        output_tokens=usage.output_tokens,
-                        cost_usd=_cost(profile, usage),
+                        error_code=ModelErrorCode.UNAVAILABLE.value,
+                        error_message="model call cancelled",
+                        **_usage_audit(profile, usage),
+                        output_started=emitted,
+                    )
+                    raise
+                except Exception as exc:
+                    last_error = exc
+                    code, retryable = _classify_error(exc)
+                    delay = (
+                        _retry_delay(exc, attempt)
+                        if retryable and not emitted and attempt <= self.retries
+                        else None
+                    )
+                    await self.audit.finish_call(
+                        call_id,
+                        duration_ms=_elapsed(started),
+                        **_usage_audit(
+                            profile, replace(usage, first_token_ms=first_token_ms)
+                        ),
+                        retry_delay_ms=round(delay * 1000)
+                        if delay is not None
+                        else None,
+                        output_started=emitted,
                         error_code=code.value,
                         error_message=str(exc) or type(exc).__name__,
                     )
                     if emitted:
-                        raise ModelRoutingError(
+                        if isinstance(exc, ModelRoutingError):
+                            raise
+                        error = ModelRoutingError(
                             "model stream failed after output started; retry suppressed"
-                        ) from exc
+                        )
+                        error.code = code
+                        raise error from exc
                     if retryable and attempt <= self.retries:
-                        await asyncio.sleep(_retry_delay(exc, attempt))
+                        await asyncio.sleep(delay)
                         continue
                     if not retryable:
+                        if isinstance(exc, ModelRoutingError):
+                            raise
                         error = ModelRoutingError(
                             f"non-retryable provider error: {str(exc) or type(exc).__name__}"
                         )
@@ -413,6 +482,17 @@ class ModelRouter:
                 return
             previous = profile.name
         await self.planner.exhausted(plan, previous, last_error)
+
+    def _route_names(self, role: ModelRole) -> tuple[str, ...]:
+        names = getattr(self.routing, role.value)
+        selected = self._profile_id.get() if role is ModelRole.REASONING else None
+        if selected is None:
+            return names
+        if selected not in self.profiles:
+            raise ModelRoutingError(
+                f"selected model profile is unavailable: {selected}"
+            )
+        return (selected, *(name for name in names if name != selected))
 
     def _required_run(self) -> str:
         run_id = self._run_id.get()
@@ -428,7 +508,7 @@ class ModelRouter:
         max_output_tokens: int | None = None,
         response_format: dict[str, object] | None = None,
     ) -> tuple[list[ModelProfileSettings], list[dict[str, str]]]:
-        names = getattr(self.routing, role.value)
+        names = self._route_names(role)
         candidates, prompt_fallbacks, exclusions = [], [], []
         override = self._run_limits.get()
         finite_usd_budget = bool(
@@ -600,7 +680,7 @@ class ModelRouter:
         profile: ModelProfileSettings,
         usage: ModelUsage,
     ) -> None:
-        if self._usage_required() and not (usage.input_tokens or usage.output_tokens):
+        if self._usage_required() and usage.source == "unknown":
             await self.audit.finish_call(
                 call_id,
                 duration_ms=_elapsed(started),
@@ -613,9 +693,7 @@ class ModelRouter:
         await self.audit.finish_call(
             call_id,
             duration_ms=_elapsed(started),
-            input_tokens=usage.input_tokens,
-            output_tokens=usage.output_tokens,
-            cost_usd=_cost(profile, usage),
+            **_usage_audit(profile, usage),
         )
 
     def _usage_required(self) -> bool:
@@ -684,13 +762,14 @@ class _RouterModelRunSession(ModelRunSession):
         response_format: dict[str, object] | None = None,
     ) -> ModelResponse:
         with self.router._bind_context(self.context):
-            return await self.router.complete(
-                model=model,
-                messages=messages,
-                tools=tools,
-                max_output_tokens=max_output_tokens,
-                response_format=response_format,
-            )
+            async with asyncio.timeout_at(self.context.deadline_monotonic):
+                return await self.router.complete(
+                    model=model,
+                    messages=messages,
+                    tools=tools,
+                    max_output_tokens=max_output_tokens,
+                    response_format=response_format,
+                )
 
     async def stream_complete(
         self,
@@ -702,14 +781,15 @@ class _RouterModelRunSession(ModelRunSession):
         response_format: dict[str, object] | None = None,
     ) -> AsyncIterator[ModelDelta]:
         with self.router._bind_context(self.context):
-            async for delta in self.router.stream_complete(
-                model=model,
-                messages=messages,
-                tools=tools,
-                max_output_tokens=max_output_tokens,
-                response_format=response_format,
-            ):
-                yield delta
+            async with asyncio.timeout_at(self.context.deadline_monotonic):
+                async for delta in self.router.stream_complete(
+                    model=model,
+                    messages=messages,
+                    tools=tools,
+                    max_output_tokens=max_output_tokens,
+                    response_format=response_format,
+                ):
+                    yield delta
 
     def for_role(self, role: ModelRole) -> ModelRunSession:
         return _RouterModelRunSession(
@@ -720,6 +800,8 @@ class _RouterModelRunSession(ModelRunSession):
                 self.context.limits,
                 self.context.budget_base,
                 self.context.hard_budget,
+                self.context.deadline_monotonic,
+                self.context.profile_id,
             ),
         )
 
@@ -746,20 +828,6 @@ def _structured_output_request(
     return messages, response_format
 
 
-def _model_override(
-    profile: ModelProfileSettings, requested: str, role: ModelRole
-) -> ModelProfileSettings:
-    """Apply only the small interactive model allowlist to an existing route."""
-
-    if (
-        role is ModelRole.REASONING
-        and requested in SELECTABLE_MODELS
-        and requested != profile.model
-    ):
-        return replace(profile, model=requested)
-    return profile
-
-
 def _tighter(configured, requested):
     if configured is None:
         return requested
@@ -769,10 +837,37 @@ def _tighter(configured, requested):
 
 
 def _cost(profile: ModelProfileSettings, usage: ModelUsage) -> float:
+    cached = min(usage.input_tokens, max(0, usage.cached_input_tokens or 0))
+    cached_price = profile.cached_input_cost_per_million
     return (
-        usage.input_tokens * profile.input_cost_per_million
+        (usage.input_tokens - cached) * profile.input_cost_per_million
+        + cached
+        * (profile.input_cost_per_million if cached_price is None else cached_price)
         + usage.output_tokens * profile.output_cost_per_million
     ) / 1_000_000
+
+
+def _usage_audit(profile: ModelProfileSettings, usage: ModelUsage) -> dict[str, Any]:
+    return {
+        "input_tokens": usage.input_tokens,
+        "output_tokens": usage.output_tokens,
+        "cost_usd": _cost(profile, usage),
+        "cached_input_tokens": usage.cached_input_tokens,
+        "reasoning_tokens": usage.reasoning_tokens,
+        "usage_source": usage.source,
+        "request_id": usage.request_id,
+        "first_token_ms": usage.first_token_ms,
+        "price_snapshot": {
+            "input_cost_per_million": profile.input_cost_per_million,
+            "output_cost_per_million": profile.output_cost_per_million,
+            "cached_input_cost_per_million": profile.cached_input_cost_per_million,
+            "estimated": usage.source != "provider"
+            or (
+                bool(usage.cached_input_tokens)
+                and profile.cached_input_cost_per_million is None
+            ),
+        },
+    }
 
 
 def _elapsed(started: float) -> int:
@@ -780,6 +875,8 @@ def _elapsed(started: float) -> int:
 
 
 def _classify_error(exc: Exception) -> tuple[ModelErrorCode, bool]:
+    if isinstance(exc, ModelRoutingError):
+        return exc.code, False
     status = getattr(exc, "status_code", None)
     name = type(exc).__name__.casefold()
     if isinstance(exc, StrictSchemaError):
@@ -859,8 +956,17 @@ def _retry_delay(exc: Exception, attempt: int) -> float:
     response = getattr(exc, "response", None)
     headers = getattr(response, "headers", {}) or {}
     raw = headers.get("retry-after") if hasattr(headers, "get") else None
+    if raw is None and hasattr(headers, "get"):
+        raw = headers.get("Retry-After")
     try:
         requested = float(raw)
     except (TypeError, ValueError):
-        requested = 0.25 * (2 ** (attempt - 1))
-    return max(0.0, min(requested, 2.0))
+        try:
+            requested = parsedate_to_datetime(str(raw)).timestamp() - time.time()
+        except (TypeError, ValueError, OverflowError):
+            requested = random.uniform(0.5, 1.0) * min(
+                30.0, 0.5 * (2 ** min(attempt - 1, 8))
+            )
+    if not math.isfinite(requested):
+        requested = 0.5
+    return max(0.0, requested)

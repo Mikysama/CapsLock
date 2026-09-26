@@ -230,7 +230,7 @@ def test_only_one_shell_assessment_and_composition_constructs_managers() -> None
 def test_core_tool_schema_fingerprint_is_stable() -> None:
     runtime = workspace_tools()
     assert runtime.snapshot().fingerprint == (
-        "4af8da301957b9da4d338cdc8bf1a3052b693900593541c2264bfa47015adf10"
+        "777b8a91a88318c0e7a719c30ed93d69a473c3b7528a1d088983e69cdfa45dfb"
     )
 
 
@@ -331,7 +331,7 @@ def test_direct_capability_tools_do_not_expose_proposal_adapters() -> None:
     direct_tools = {
         "shell",
         "edit_file",
-        "create_file",
+        "write_file",
         "web_search",
         "web_fetch",
     }

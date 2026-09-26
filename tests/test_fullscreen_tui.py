@@ -12,7 +12,7 @@ from textual.widgets import Static
 
 from capslock.cli.context import CliContext
 from capslock.cli.app import _ui_mode, build_parser
-from capslock.cli.commands import COMMANDS
+from capslock.cli.commands import COMMANDS, CommandOutcomeKind
 from capslock.cli.fullscreen_tui.app import (
     CSS,
     CapsLockApp,
@@ -359,10 +359,16 @@ class _Agent:
     async def enqueue(self, question: str):
         return SimpleNamespace(id="work-item", question=question)
 
-    async def set_model(self, value: str) -> str:
-        from capslock.models import selectable_model
+    def available_model_profiles(self):
+        return [
+            {"id": name, "provider": "test", "model": name, "available": True}
+            for name in ("deepseek-v4-flash", "deepseek-v4-pro")
+        ]
 
-        self.model = selectable_model(value)
+    async def set_model(self, value: str) -> str:
+        if value not in {item["id"] for item in self.available_model_profiles()}:
+            raise ValueError("model is not configured")
+        self.model = value
         return self.model
 
     async def delete_if_empty(self) -> bool:
@@ -921,7 +927,7 @@ def test_fullscreen_tui_uses_alternate_screen_driver(
 
     monkeypatch.setattr(CapsLockApp, "run_async", run_async)
     context = CliContext(make_console(), _Agent())
-    assert asyncio.run(run_fullscreen_tui(context)) == 0
+    assert asyncio.run(run_fullscreen_tui(context)).kind is CommandOutcomeKind.EXIT
     assert options == {"mouse": True}
 
 

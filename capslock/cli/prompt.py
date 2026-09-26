@@ -23,7 +23,6 @@ from prompt_toolkit.shortcuts import choice
 from prompt_toolkit.utils import get_cwidth
 
 from ..domain import ActionRecord, ApprovalChoice, ApprovalDecision
-from ..models import SELECTABLE_MODELS
 from ..permissions import PermissionMode
 from ..status import SPINNER_FRAMES
 from ..theme import build_prompt_style
@@ -255,7 +254,7 @@ def prompt_prelude(
     model: str | None = None,
     permission: str | None = None,
     workspace: str | None = None,
-    usage: tuple[int, int, float] = (0, 0, 0.0),
+    usage: tuple[int | None, int | None, float | None] = (0, 0, 0.0),
     context: tuple[int | None, int] = (None, 0),
 ) -> FormattedText:
     terminal_width = width or shutil.get_terminal_size(fallback=(80, 24)).columns
@@ -311,7 +310,7 @@ def prompt_footer(
     model: str | None = None,
     permission: str | None = None,
     workspace: str | None = None,
-    usage: tuple[int, int, float] = (0, 0, 0.0),
+    usage: tuple[int | None, int | None, float | None] = (0, 0, 0.0),
     context: tuple[int | None, int] = (None, 0),
 ) -> FormattedText:
     terminal_width = width or shutil.get_terminal_size(fallback=(80, 24)).columns
@@ -392,12 +391,14 @@ def _status_label(
     model: str | None,
     permission: str | None,
     workspace: str | None,
-    usage: tuple[int, int, float],
+    usage: tuple[int | None, int | None, float | None],
     context: tuple[int | None, int],
 ) -> str:
     del details_expanded
     input_tokens, output_tokens, cost_usd = usage
     context_label = _context_label(*context)
+    if any(value is None for value in usage) and terminal_width >= 72:
+        return f"{model or '-'}  ·  {permission or '-'}  ·  {context_label}  ·  usage unknown"
     if terminal_width >= 100:
         return (
             f"{workspace or '-'}  ·  {model or '-'}  ·  {permission or '-'}  ·  "
@@ -520,28 +521,37 @@ def select_permission_mode(current: PermissionMode) -> PermissionMode:
     )
 
 
-def select_model(current: str) -> str:
-    labels = {
-        "deepseek-v4-flash": "Fast model for everyday tasks",
-        "deepseek-v4-pro": "More capable model for complex tasks",
-    }
+def select_model(current: str, profiles: list[dict[str, object]] | None = None) -> str:
+    available = [item for item in profiles or [] if item["available"]]
+    unavailable = [
+        f"{item['id']} ({item['provider']} / {item['model']}) unavailable"
+        for item in profiles or []
+        if not item["available"]
+    ]
+    if not available:
+        raise ValueError(
+            "No available model profiles; check credentials and capabilities. "
+            + "; ".join(unavailable)
+        )
     options = [
         (
-            model,
+            str(item["id"]),
             FormattedText(
                 [
-                    ("class:command-name", model),
-                    ("class:footer", f"  {labels[model]}"),
+                    ("class:command-name", str(item["id"])),
+                    ("class:footer", f"  {item['provider']} / {item['model']}"),
                 ]
             ),
         )
-        for model in SELECTABLE_MODELS
+        for item in available
     ]
-    default = current if current in SELECTABLE_MODELS else SELECTABLE_MODELS[0]
+    values = [str(item["id"]) for item in available]
+    default = current if current in values else values[0]
     return choice(
         FormattedText(
             [
                 ("class:command-name", "Select model\n"),
+                *[("class:footer", item + "\n") for item in unavailable],
                 ("class:footer", "↑/↓ choose · Enter apply"),
             ]
         ),

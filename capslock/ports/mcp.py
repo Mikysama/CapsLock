@@ -25,6 +25,19 @@ class McpServer:
 
 
 @dataclass(frozen=True)
+class McpServerStatus:
+    """Safe runtime snapshot; never contains credentials or connection parameters."""
+
+    name: str
+    enabled: bool
+    connected: bool
+    scope: str | None = None
+    allowed_tools: tuple[str, ...] = ()
+    available_tools: tuple[str, ...] = ()
+    error: str | None = None
+
+
+@dataclass(frozen=True)
 class ManagedMcpTool:
     server: str
     name: str
@@ -48,6 +61,8 @@ class McpClientPort(Protocol):
     def errors(self) -> Mapping[str, str]: ...
 
     async def initialize(self) -> tuple[ManagedMcpTool, ...]: ...
+
+    def statuses(self) -> tuple[McpServerStatus, ...]: ...
 
     def server(self, name: str) -> McpServer: ...
 
@@ -75,4 +90,5 @@ __all__ = [
     "ManagedMcpTool",
     "McpClientPort",
     "McpServer",
+    "McpServerStatus",
 ]

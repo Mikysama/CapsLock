@@ -61,15 +61,15 @@ class NoCompactions:
 
 class CachingCompactions(NoCompactions):
     def __init__(self) -> None:
-        self.segments: dict[tuple[str, str], dict[str, object]] = {}
+        self.segments: dict[tuple[str, str, str], dict[str, object]] = {}
 
-    async def summary_segment(self, digest, profile):
-        return self.segments.get((digest, profile))
+    async def summary_segment(self, digest, profile, policy):
+        return self.segments.get((digest, profile, policy))
 
     async def store_summary_segment(
-        self, *, source_digest, model_profile, summary, **_values
+        self, *, source_digest, model_profile, summary_policy_digest, summary, **_values
     ):
-        self.segments[(source_digest, model_profile)] = summary
+        self.segments[(source_digest, model_profile, summary_policy_digest)] = summary
 
 
 def test_episodic_retrieval_indexes_messages_and_artifacts_with_session_isolation(

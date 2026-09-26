@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 from dataclasses import replace
@@ -121,8 +122,18 @@ def _run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--model-track", required=True, choices=("flash", "pro"))
     parser.add_argument("--profile", choices=("smoke", "core", "full"), required=True)
     parser.add_argument("--catalog", type=Path)
-    parser.add_argument("--wheel", type=Path, required=True)
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--wheel", type=Path)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate pinned inputs and print a conservative token cost bound without calls or environment creation",
+    )
+    parser.add_argument(
+        "--max-cost-usd",
+        type=float,
+        help="Reject a batch whose conservative token cost bound exceeds this amount",
+    )
     parser.add_argument("--runtime-root", type=Path, default=DEFAULT_RUNTIME_ROOT)
     parser.add_argument("--prompt", type=Path, default=DEFAULT_PROMPT)
     parser.add_argument("--quarantine-root", type=Path, default=DEFAULT_QUARANTINE)
@@ -306,6 +317,8 @@ def _doctor(args: argparse.Namespace, registry: ExternalRegistry) -> int:
 
 
 def _run(args: argparse.Namespace, registry: ExternalRegistry) -> int:
+    if not args.dry_run and (args.wheel is None or args.output is None):
+        raise ValueError("--wheel and --output are required unless --dry-run is used")
     cache = args.cache.expanduser().resolve()
     suite = registry.suite(args.suite)
     track = registry.model(args.model_track)
@@ -334,6 +347,53 @@ def _run(args: argparse.Namespace, registry: ExternalRegistry) -> int:
                 f"full profile for {suite.id} requires exactly {suite.full_size} tasks"
             )
         repetitions = registry.defaults.full_repetitions
+    maximum_cost = (
+        len(tasks)
+        * repetitions
+        * registry.defaults.max_tokens
+        * max(track.input_cost_per_million, track.output_cost_per_million)
+        / 1_000_000
+    )
+    if args.max_cost_usd is not None:
+        if not math.isfinite(args.max_cost_usd) or args.max_cost_usd < 0:
+            raise ValueError("--max-cost-usd must be finite and nonnegative")
+        if max(track.input_cost_per_million, track.output_cost_per_million) == 0:
+            raise ValueError("--max-cost-usd requires configured model token prices")
+        if maximum_cost > args.max_cost_usd:
+            raise ValueError("batch token cost upper bound exceeds --max-cost-usd")
+    # Validate all local inputs before creating a virtualenv or launching workers.
+    prompt = args.prompt.read_text(encoding="utf-8")
+    if not prompt.strip():
+        raise ValueError("prompt must not be empty")
+    if args.dry_run:
+        print(
+            json.dumps(
+                {
+                    "kind": "external_evaluation_dry_run",
+                    "provider_calls": 0,
+                    "suite": suite.id,
+                    "source_lock_hash": lock_hash,
+                    "model_track": track.name,
+                    "model": track.model,
+                    "task_ids": [task.instance_id for task in tasks],
+                    "repetitions": repetitions,
+                    "seed": registry.defaults.core_seed,
+                    "maximum_tokens_per_attempt": registry.defaults.max_tokens,
+                    "token_cost_upper_bound_usd": maximum_cost
+                    if max(track.input_cost_per_million, track.output_cost_per_million)
+                    > 0
+                    else None,
+                    "pricing_configured": max(
+                        track.input_cost_per_million, track.output_cost_per_million
+                    )
+                    > 0,
+                    "cost_bound_scope": "model tokens only; excludes infrastructure and external tool charges",
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 0
     wheel = args.wheel.expanduser().resolve()
     runtime_root = args.runtime_root.expanduser().resolve() / file_sha256(wheel)
     executable = runtime_root / (
@@ -349,7 +409,7 @@ def _run(args: argparse.Namespace, registry: ExternalRegistry) -> int:
         output_root=args.output.expanduser(),
         executable=executable,
         wheel=wheel,
-        prompt_template=args.prompt.read_text(encoding="utf-8"),
+        prompt_template=prompt,
         limits=RuntimeLimits(
             registry.defaults.max_tool_rounds,
             registry.defaults.max_tool_calls,

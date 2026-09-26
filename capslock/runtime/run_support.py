@@ -52,6 +52,7 @@ class RunOrchestrator:
         self.chat_model = chat_model
         self.default_limits = default_limits
         self.loop_settings = loop_settings
+        self.profile_id: str | None = None
 
     async def start(
         self,
@@ -86,6 +87,10 @@ class RunOrchestrator:
                 limits=snapshot.limits,
                 budget_base=(snapshot.tokens, snapshot.cost_usd),
                 hard_budget=mode is RunMode.EXEC,
+                profile_id=self.profile_id,
+                deadline_monotonic=(time.monotonic() + governor.remaining_seconds())
+                if governor.remaining_seconds() is not None
+                else None,
             ),
         )
         return ActiveRun(prepared, governor, model_session, time.monotonic())
@@ -133,6 +138,7 @@ class RunUsage:
     output_tokens: int
     cost_usd: float
     models: list[dict[str, Any]]
+    source: str = "provider"
 
 
 @dataclass(frozen=True)
@@ -163,6 +169,7 @@ class RunOutcomeBuilder:
             "input_tokens": usage.input_tokens,
             "output_tokens": usage.output_tokens,
             "cost_usd": usage.cost_usd,
+            "source": usage.source,
         }
         if stop_reason is not None:
             return RunOutcome(
@@ -249,7 +256,15 @@ class RunFinalizer:
             cost = (
                 input_tokens * self.input_cost + output_tokens * self.output_cost
             ) / 1_000_000
-        return RunUsage(input_tokens, output_tokens, cost, models)
+        source = "provider"
+        if model_session.metered:
+            unknown = sum(int(row.get("unknown_usage_calls", 0)) for row in models)
+            calls = sum(int(row.get("calls", 0)) for row in models)
+            if unknown:
+                source = "unknown" if unknown == calls else "partial"
+        elif not (input_tokens or output_tokens):
+            source = "unknown"
+        return RunUsage(input_tokens, output_tokens, cost, models, source)
 
     async def fail_if_running(
         self,
@@ -280,6 +295,7 @@ class RunFinalizer:
                     "input_tokens": usage.input_tokens,
                     "output_tokens": usage.output_tokens,
                     "cost_usd": usage.cost_usd,
+                    "source": usage.source,
                 },
                 "models": usage.models,
             },

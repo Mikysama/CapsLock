@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+from typing import Any
+
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -97,3 +101,15 @@ class ApprovalPolicy:
         if mode is PermissionMode.ASK_FOR_APPROVAL:
             return True
         return assessment.level == "high"
+
+
+def permission_arguments_digest(arguments: dict[str, Any]) -> str:
+    public = {
+        key: value
+        for key, value in arguments.items()
+        if not key.startswith("_permission_")
+    }
+    encoded = json.dumps(
+        public, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()

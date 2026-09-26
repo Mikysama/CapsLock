@@ -53,6 +53,7 @@ class UsageViewModel:
     output_tokens: int = 0
     cost_usd: float = 0.0
     duration_ms: int = 0
+    source: str = "unknown"
 
 
 @dataclass(frozen=True)
@@ -484,6 +485,7 @@ def _terminal(state: TuiState, event: AgentEvent) -> TuiState:
         int(usage.get("output_tokens", 0)) if isinstance(usage, dict) else 0,
         float(usage.get("cost_usd", 0)) if isinstance(usage, dict) else 0.0,
         int(event.data.get("duration_ms", 0)),
+        str(usage.get("source", "provider")) if isinstance(usage, dict) else "unknown",
     )
     return replace(
         state,

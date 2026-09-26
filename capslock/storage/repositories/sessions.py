@@ -22,12 +22,14 @@ class SessionRepository(Repository):
         self.workspace = workspace.resolve()
         self.episodic = episodic
 
-    async def create(self, model: str) -> SessionInfo:
+    async def create(
+        self, model: str, *, model_profile: str | None = None
+    ) -> SessionInfo:
         identifier, created = uuid.uuid4().hex, now()
         title = pending_session_title(created)
         async with self.database.transaction() as connection:
             await connection.execute(
-                "INSERT INTO sessions(id,model,created_at,updated_at,title,title_source,title_updated_at) VALUES(?,?,?,?,?,?,?)",
+                "INSERT INTO sessions(id,model,created_at,updated_at,title,title_source,title_updated_at,model_profile) VALUES(?,?,?,?,?,?,?,?)",
                 (
                     identifier,
                     model,
@@ -36,6 +38,7 @@ class SessionRepository(Repository):
                     title,
                     SessionTitleSource.PENDING.value,
                     created,
+                    model_profile,
                 ),
             )
             await connection.execute(
@@ -56,8 +59,19 @@ class SessionRepository(Repository):
 
     async def set_model(self, session_id: str, model: str) -> SessionInfo:
         updated = await self.execute(
-            "UPDATE sessions SET model=?,updated_at=? WHERE id=?",
+            "UPDATE sessions SET model=?,model_profile=NULL,updated_at=? WHERE id=?",
             (model, now(), session_id),
+        )
+        if not updated:
+            raise ValueError(f"session does not exist: {session_id}")
+        return await self.require(session_id)
+
+    async def set_model_profile(
+        self, session_id: str, profile: str, model: str
+    ) -> SessionInfo:
+        updated = await self.execute(
+            "UPDATE sessions SET model=?,model_profile=?,updated_at=? WHERE id=?",
+            (model, profile, now(), session_id),
         )
         if not updated:
             raise ValueError(f"session does not exist: {session_id}")
@@ -208,9 +222,17 @@ class SessionRepository(Repository):
                         "target run is not a completed agent run in this session"
                     )
             await connection.execute(
-                """INSERT INTO sessions(id,model,created_at,updated_at,title,title_source,title_updated_at)
-                   VALUES(?,?,?,?,?,'manual',?)""",
-                (identifier, parent.model, timestamp, timestamp, normalized, timestamp),
+                """INSERT INTO sessions(id,model,created_at,updated_at,title,title_source,title_updated_at,model_profile)
+                   VALUES(?,?,?,?,?,'manual',?,?)""",
+                (
+                    identifier,
+                    parent.model,
+                    timestamp,
+                    timestamp,
+                    normalized,
+                    timestamp,
+                    parent.model_profile,
+                ),
             )
             await connection.execute(
                 "INSERT INTO session_search(session_id,kind,content,created_at) VALUES(?, 'title', ?, ?)",
@@ -514,15 +536,21 @@ class SessionRepository(Repository):
                 continue
             if status != "completed":
                 event_rows = await self.all(
-                    """SELECT payload_json FROM run_events
-                       WHERE run_id=? AND event_kind='text_delta' ORDER BY sequence""",
+                    """SELECT event_kind,payload_json FROM run_events
+                       WHERE run_id=? AND event_kind IN ('text_delta','thinking') ORDER BY sequence""",
                     (run_id,),
                 )
                 text = "".join(
                     str(json.loads(event["payload_json"]).get("text", ""))
                     for event in event_rows
+                    if event["event_kind"] == "text_delta"
                 )
-                if text or row["error_message"]:
+                reasoning = "".join(
+                    str(json.loads(event["payload_json"]).get("text", ""))
+                    for event in event_rows
+                    if event["event_kind"] == "thinking"
+                )
+                if text or reasoning or row["error_message"]:
                     transcript.append(
                         {
                             "role": "assistant",
@@ -530,6 +558,7 @@ class SessionRepository(Repository):
                             "run_id": run_id,
                             "status": status,
                             "error": row["error_message"],
+                            **({"reasoning_content": reasoning} if reasoning else {}),
                         }
                     )
         # Foreign keys make this empty in normal operation. Keeping the fallback
@@ -550,4 +579,5 @@ class SessionRepository(Repository):
             title_updated_at=row["title_updated_at"],
             archived_at=row["archived_at"],
             deletion_state=row["deletion_state"],
+            model_profile=row["model_profile"],
         )

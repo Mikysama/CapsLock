@@ -38,6 +38,7 @@ class EventSink:
                 "cancelled",
                 "stopped",
                 "waiting_approval",
+                "waiting_input",
             }
             if (
                 terminal

@@ -746,7 +746,13 @@ class CapsLockApp(App[int]):
                 )
             return
         if name == "/model" and len(parts) == 1:
-            selected = await self._modal_wait(ModelScreen(self.agent_session.model))
+            selected = await self._modal_wait(
+                ModelScreen(
+                    getattr(self.agent_session, "model_profile_id", None)
+                    or self.agent_session.model,
+                    self.agent_session.available_model_profiles(),
+                )
+            )
             if selected is not None:
                 await self._capture_controller(actions.set_model, selected)
             return

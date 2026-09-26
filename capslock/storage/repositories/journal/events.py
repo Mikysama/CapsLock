@@ -74,7 +74,7 @@ class RunEventJournalRepository:
             )
             if not updated.rowcount:
                 raise ValueError("run step is not running")
-            if checkpoint is not None:
+            if checkpoint is not None and status is RunStepStatus.COMPLETED:
                 await connection.execute(
                     """UPDATE run_steps AS previous SET checkpoint_json=NULL
                        WHERE previous.run_id=(SELECT run_id FROM run_steps WHERE id=?)

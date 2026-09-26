@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import time
+import json
+import uuid
+from datetime import UTC, datetime
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator, Self
@@ -28,6 +32,9 @@ class AsyncDatabase:
         self.connection = connection
         self._transaction_lock = asyncio.Lock()
         self._readers: asyncio.Queue[aiosqlite.Connection] = asyncio.Queue()
+        self._commit_samples = 0
+        self._commit_total_ms = 0.0
+        self._commit_maximum_ms = 0.0
 
     @classmethod
     async def open(cls, path: str | Path) -> Self:
@@ -41,7 +48,10 @@ class AsyncDatabase:
             await instance._initialize_or_validate()
             await instance._configure_validated()
             await instance._open_readers()
-        except Exception:
+        except BaseException:
+            while not instance._readers.empty():
+                reader = await instance._readers.get()
+                await reader.close()
             await connection.close()
             raise
         return instance
@@ -95,8 +105,8 @@ class AsyncDatabase:
         if (
             self.label == "workspace"
             and app_id == self.application_id
-            and version in {6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19}
-            and self.schema_version == 20
+            and version in {6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20}
+            and self.schema_version == 21
         ):
             from .upgrades import upgrade_workspace_schema
 
@@ -131,7 +141,12 @@ class AsyncDatabase:
                 await _finish_database_operation(self.connection.rollback())
                 raise
             else:
+                started = time.perf_counter()
                 await _finish_database_operation(self.connection.commit())
+                duration = (time.perf_counter() - started) * 1000
+                self._commit_samples += 1
+                self._commit_total_ms += duration
+                self._commit_maximum_ms = max(self._commit_maximum_ms, duration)
 
     async def fetch_one(
         self, query: str, values: tuple[object, ...] = ()
@@ -165,7 +180,41 @@ class AsyncDatabase:
             cursor = await connection.execute(query, values)
             return int(cursor.rowcount)
 
+    async def flush_commit_timings(self) -> None:
+        if self.label != "workspace" or not self._commit_samples:
+            return
+        samples, total, maximum = (
+            self._commit_samples,
+            self._commit_total_ms,
+            self._commit_maximum_ms,
+        )
+        self._commit_samples = 0
+        self._commit_total_ms = self._commit_maximum_ms = 0.0
+        # Persist one aggregate per flush rather than recursively tracing each write.
+        try:
+            async with self._transaction_lock:
+                await self.connection.execute(
+                    "INSERT INTO performance_spans(id,trace_id,category,name,status,duration_ms,attributes_json,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                    (
+                        f"span_{uuid.uuid4().hex}",
+                        "database",
+                        "database",
+                        "commit",
+                        "ok",
+                        total,
+                        json.dumps({"samples": samples, "maximum_ms": maximum}),
+                        datetime.now(UTC).isoformat(),
+                    ),
+                )
+                await _finish_database_operation(self.connection.commit())
+        except Exception:
+            self._commit_samples += samples
+            self._commit_total_ms += total
+            self._commit_maximum_ms = max(self._commit_maximum_ms, maximum)
+            await _finish_database_operation(self.connection.rollback())
+
     async def close(self) -> None:
+        await self.flush_commit_timings()
         while not self._readers.empty():
             reader = await self._readers.get()
             await reader.close()
@@ -184,6 +233,35 @@ class WorkspaceDatabase(AsyncDatabase):
     schema_version = spec.schema_version
     schema = spec.schema
     label = spec.label
+
+    @classmethod
+    async def open(cls, path: str | Path, *, shared_owner: bool = False) -> Self:
+        from .ownership import acquire_workspace_lease, release_workspace_lease
+
+        lease, recovery_owner = acquire_workspace_lease(
+            Path(path).expanduser(), shared_owner=shared_owner
+        )
+        try:
+            instance = await super().open(path)
+        except BaseException:
+            release_workspace_lease(lease)
+            raise
+        instance._owner_lease = lease
+        instance.recovery_owner = recovery_owner
+        lease.ready = True
+        return instance
+
+    async def close(self) -> None:
+        from .ownership import release_workspace_lease
+
+        lease = getattr(self, "_owner_lease", None)
+        if lease is None:
+            return
+        try:
+            await super().close()
+        finally:
+            self._owner_lease = None
+            release_workspace_lease(lease)
 
 
 class MemoryDatabase(AsyncDatabase):

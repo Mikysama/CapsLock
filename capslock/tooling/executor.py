@@ -58,6 +58,18 @@ class ToolExecutor:
         arguments: dict[str, Any],
         reporter: ToolReporter = null_reporter,
     ) -> ToolInvocationResult:
+        return await self._run(name, context, arguments, reporter)
+
+    async def _run(
+        self,
+        name: str,
+        context: ExecutionContext,
+        arguments: dict[str, Any],
+        reporter: ToolReporter,
+        *,
+        pause: ToolPause | None = None,
+        response: object = None,
+    ) -> ToolInvocationResult:
         tool = self.catalog._tools.get(name)
         if tool is None:
             suggestions = list(self.catalog.candidates(name, 3))
@@ -78,10 +90,22 @@ class ToolExecutor:
                 ResolvedToolPolicy(),
                 {},
             )
+        if pause is not None and tool.resume is None:
+            return ToolInvocationResult(
+                ToolOutcome.failure(
+                    f"tool does not support resume: {name}",
+                    code="tool_resume_unsupported",
+                ),
+                arguments,
+                ResolvedToolPolicy(),
+                {},
+            )
         normalized = dict(arguments)
         timings: dict[str, int] = {}
         policy = ResolvedToolPolicy()
         execution_started = False
+        completed_outcome: ToolOutcome | None = None
+        postprocessing_failed = False
         context.event("tool_started", name=name)
         started = time.monotonic()
         try:
@@ -124,7 +148,13 @@ class ToolExecutor:
                 execution_started = True
 
                 async def execute_tool() -> ToolExecution:
-                    invocation = tool.execute(context, normalized, reporter)
+                    if pause is None:
+                        invocation = tool.execute(context, normalized, reporter)
+                    else:
+                        assert tool.resume is not None
+                        invocation = tool.resume(
+                            context, normalized, pause, response, reporter
+                        )
                     if policy.timeout_seconds is None:
                         return await invocation
                     async with asyncio.timeout(policy.timeout_seconds):
@@ -158,22 +188,13 @@ class ToolExecutor:
                 context.event("tool_paused", name=name, kind=execution.kind)
                 return ToolInvocationResult(execution, normalized, policy, timings)
 
-            outcome = execution
-            if tool.contract.output_schema is not None and outcome.ok:
-                try:
-                    compile_json_schema(tool.contract.output_schema).validate(
-                        outcome.data
-                    )
-                except SchemaValidationError as exc:
-                    outcome = replace(
-                        outcome,
-                        status=ToolOutcomeStatus.FAILED,
-                        error=str(exc),
-                        error_code="invalid_tool_output",
-                    )
+            completed_outcome = execution
+            outcome = self._validate_output(tool, execution)
             for item in reversed(self.middleware):
                 outcome = await item.after(tool, normalized, policy, outcome, context)
+            outcome = self._validate_output(tool, outcome)
         except TimeoutError:
+            postprocessing_failed = completed_outcome is not None
             uncertain = execution_started and (
                 policy.external_side_effects
                 or policy.destructive
@@ -198,8 +219,10 @@ class ToolExecutor:
                 },
             )
         except SchemaValidationError as exc:
+            postprocessing_failed = completed_outcome is not None
             outcome = ToolOutcome.failure(str(exc), code=exc.code, data=exc.detail())
         except InvalidPathError as exc:
+            postprocessing_failed = completed_outcome is not None
             outcome = ToolOutcome.failure(
                 str(exc),
                 code="invalid_path",
@@ -213,6 +236,7 @@ class ToolExecutor:
                 },
             )
         except PolicyError as exc:
+            postprocessing_failed = completed_outcome is not None
             message = str(exc)
             retryable = (
                 "file does not exist:" in message or "path is a directory:" in message
@@ -232,6 +256,7 @@ class ToolExecutor:
                 },
             )
         except Exception as exc:
+            postprocessing_failed = completed_outcome is not None
             uncertain = execution_started and (
                 policy.external_side_effects
                 or policy.destructive
@@ -258,10 +283,70 @@ class ToolExecutor:
                     "repair_attempt": 0,
                 },
             )
+        if (
+            completed_outcome is None
+            and execution_started
+            and (
+                policy.external_side_effects
+                or policy.destructive
+                or policy.context_mutation
+            )
+            and outcome.error_code
+            in {"invalid_tool_arguments", "invalid_path", "policy_denied"}
+        ):
+            outcome = replace(
+                outcome,
+                error_code="unknown_execution",
+                execution_state=ToolExecutionState.UNKNOWN,
+                data={
+                    **(outcome.data if isinstance(outcome.data, dict) else {}),
+                    "retryable": False,
+                },
+            )
+        # Postprocessing errors cannot erase a handler's confirmed side effect
+        # or invite parameter repair to execute that side effect a second time.
+        if (
+            completed_outcome is not None
+            and not outcome.ok
+            and (postprocessing_failed or completed_outcome.ok)
+        ):
+            outcome = replace(
+                outcome,
+                executed=completed_outcome.executed,
+                execution_state=completed_outcome.effective_execution_state,
+                data={**outcome.data, "retryable": False}
+                if isinstance(outcome.data, dict) and "retryable" in outcome.data
+                else outcome.data,
+                error_code=(
+                    "tool_postprocessing_failed"
+                    if outcome.error_code
+                    in {
+                        "invalid_tool_arguments",
+                        "invalid_path",
+                        "unknown_execution",
+                        "tool_timeout",
+                    }
+                    else outcome.error_code
+                ),
+            )
         duration = round((time.monotonic() - started) * 1000)
         timings["total"] = duration
         context.event("tool_finished", name=name, ok=outcome.ok, duration_ms=duration)
         return ToolInvocationResult(outcome, normalized, policy, timings)
+
+    @staticmethod
+    def _validate_output(tool: ToolDefinition, outcome: ToolOutcome) -> ToolOutcome:
+        if tool.contract.output_schema is not None and outcome.ok:
+            try:
+                compile_json_schema(tool.contract.output_schema).validate(outcome.data)
+            except SchemaValidationError as exc:
+                return replace(
+                    outcome,
+                    status=ToolOutcomeStatus.FAILED,
+                    error=str(exc),
+                    error_code="invalid_tool_output",
+                )
+        return outcome
 
     async def resume(
         self,
@@ -272,61 +357,13 @@ class ToolExecutor:
         response: object,
         reporter: ToolReporter = null_reporter,
     ) -> ToolInvocationResult:
-        tool = self.catalog._tools.get(name)
-        if tool is None:
-            return ToolInvocationResult(
-                ToolOutcome.failure(
-                    f"unsupported tool: {name}", code="unsupported_tool"
-                ),
-                arguments,
-                ResolvedToolPolicy(),
-                {},
-            )
-        if tool.resume is None:
-            return ToolInvocationResult(
-                ToolOutcome.failure(
-                    f"tool does not support resume: {name}",
-                    code="tool_resume_unsupported",
-                ),
-                arguments,
-                await self.resolve(name, context, arguments),
-                {},
-            )
-        started = time.monotonic()
-        normalized = dict(arguments)
-        stripped = strip_optional_nulls(normalized, tool.contract.input_schema)
-        assert isinstance(stripped, dict)
-        normalized = stripped
-        for item in self.middleware:
-            normalized = await item.normalize(tool, normalized, context)
-        compile_json_schema(tool.contract.input_schema).validate(normalized)
-        await tool.validate(normalized, context)
-        for item in self.middleware:
-            pre_authorize = getattr(item, "pre_authorize", None)
-            if not callable(pre_authorize):
-                continue
-            denied = await pre_authorize(tool, normalized, context)
-            if denied is not None:
-                if isinstance(denied, ToolPause):
-                    return ToolInvocationResult(
-                        denied,
-                        normalized,
-                        ResolvedToolPolicy(),
-                        {"resume": round((time.monotonic() - started) * 1000)},
-                    )
-                return ToolInvocationResult(
-                    denied,
-                    normalized,
-                    ResolvedToolPolicy(),
-                    {"resume": round((time.monotonic() - started) * 1000)},
-                )
-        policy = await tool.resolve_policy(normalized, context)
-        execution = await tool.resume(context, normalized, pause, response, reporter)
-        return ToolInvocationResult(
-            execution,
-            normalized,
-            policy,
-            {"resume": round((time.monotonic() - started) * 1000)},
+        return await self._run(
+            name,
+            context,
+            arguments,
+            reporter,
+            pause=pause,
+            response=response,
         )
 
 

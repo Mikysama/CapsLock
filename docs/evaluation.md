@@ -119,3 +119,58 @@ Provider 名称用于解析 `<PROVIDER>_API_KEY` 和可选的 `<PROVIDER>_BASE_U
 评测不会写入运行时配置或源码。只有两个独立 confirm seed 批次得出一致候选，且 recommendation 为 `request_human_approval` 时，维护者才可以更新 `capslock/behavior_defaults.py`。变更应同步默认值断言、README 示例和发布说明，并记录 report/recommendation 哈希。未达到最小收益或任一安全、质量门禁失败时保留当前默认值。
 
 `agents.max_depth` 等安全硬边界只登记、不参与矩阵搜索；修改它们需要独立的资源耗尽、模糊测试和安全评审。
+
+## Offline kernel regression gate
+
+`python scripts/evaluate_offline.py --dry-run` validates the versioned
+`evaluations/offline-regression-v1.json` manifest: 60 distinct executable scenarios,
+12 each for model/budget/routing, search/editing, process/cancellation,
+compaction/recovery, and approval/agent-conflict behavior. Each scenario references
+its actual pytest fixture, input, expected assertions and grader. Parameterized
+cases run all variants of that scenario in a fresh process and temporary workspace.
+External Python socket connections are blocked by the runner's pytest plugin;
+loopback IPC remains available. The curated tests use scripted providers and do
+not invoke paid models. This is a kernel correctness gate, **not a real-model
+problem-solving benchmark**.
+
+Run `python scripts/evaluate_offline.py --output /tmp/offline-report.json`;
+add `--repetitions 3` for repeated stability and `--resume` after interruption.
+Resume requires the same manifest, Python sources and repetition count. Reports
+are atomically checkpointed after each scenario. Skipped tests, setup errors,
+timeouts and collection errors are infrastructure failures, never passes.
+`TMPDIR=/dev/shm` can accelerate Linux runs; retain normal-disk persistence tests.
+
+For external benchmarks, `python scripts/evaluate_external.py run --suite
+setupbench --model-track flash --profile smoke --dry-run --cache /path/to/cache`
+validates already-pinned local catalogs, source locks, quarantine and prompt, then
+prints selected task IDs, seed, model and a conservative model-token cost bound.
+It does not install environments, fetch catalogs or call a provider. `--wheel`
+and `--output` remain required for a real run. `--max-cost-usd` rejects a batch
+whose token upper bound exceeds the supplied amount; configured prices are
+required and infrastructure/tool charges are outside this estimate. Existing
+`resume` and paired `report --baseline` workflows remain available.
+
+External reports retain legacy rates and add explicit `valid_attempt_count`,
+`infrastructure_failure_count`, `valid_resolve_rate`, and
+`cost_per_successful_task_usd`. Cost per success includes costs of all valid
+attempts divided by valid successful attempts, and is null when none succeed.
+Infrastructure failures remain listed and invalidate the infrastructure gate.
+`human_interventions` counts recorded waiting-approval/input events and remains
+null for historical results without measurements. `intervention_measurement_count`
+states the report's coverage; missing historical values are not fabricated zeros.
+
+Filtered tool selection remains opt-in; shadow is still the default. Discovered
+tools and visible mode controls are pinned, even beyond the soft schema budget;
+optional ranked schemas share the remaining budget. Stable alphabetical schema
+ordering is preserved. `capslock.evaluation.tool_selection.promotion_gate` requires
+zero hard-gate failures, at least 99% required-tool recall, at least 20% median
+schema-token reduction, paired real-task confidence lower bound >= -2 percentage
+points, and explicit live confirmation before recommending promotion. Offline
+success alone cannot promote filtered mode. No production context, Memory,
+concurrency or permission defaults change.
+The selection query combines the original user goal with runtime planning mode
+and the last twelve allowlisted tool names and success flags. Tool output and
+retrieval text cannot supply that state. Per-turn selection telemetry records
+schema token estimates, hashes and sizes of the initial system prefix and schemas,
+prefix changes, and provider-reported cached input/cache-hit state. Hash telemetry
+does not retain prompt contents; unknown cache usage remains null.

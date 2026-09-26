@@ -6,6 +6,9 @@ import asyncio
 import json
 import sys
 from typing import TextIO
+from pathlib import Path
+from ..application.events import event_record
+from ..output_schema import load_output_schema
 
 from ..domain import AgentEvent, AgentEventKind, RunLimits, RunMode
 from ..runtime import MemoryRunMode, RunRequest
@@ -13,7 +16,6 @@ from ..status import AgentStatus, status_for_event
 from .context import CliContext
 from .status import AsyncStatusRenderer
 
-EXEC_EVENT_SCHEMA_VERSION = 3
 APPROVAL_REQUIRED_EXIT = 3
 GOVERNANCE_STOP_EXIT = 4
 INPUT_REQUIRED_EXIT = 5
@@ -30,10 +32,12 @@ async def run_exec(
     limits: RunLimits | None = None,
     resume_from_run_id: str | None = None,
     no_memory: bool = False,
+    output_schema: Path | None = None,
 ) -> int:
     prompt = question if question is not None else sys.stdin.read()
     if not prompt.strip():
         raise ValueError("exec requires a prompt argument or non-empty stdin")
+    response_format = load_output_schema(output_schema) if output_schema else None
     exit_code = 0
     terminal_seen = False
     renderer = None
@@ -53,6 +57,7 @@ async def run_exec(
                 question=prompt,
                 mode=RunMode.EXEC,
                 limits=limits,
+                response_format=response_format,
                 resume_from_run_id=resume_from_run_id,
                 memory_mode=(
                     MemoryRunMode.IGNORE if no_memory else MemoryRunMode.DEFAULT
@@ -61,20 +66,7 @@ async def run_exec(
         )
         async for event in stream:
             if json_events:
-                record = {
-                    "schema_version": EXEC_EVENT_SCHEMA_VERSION,
-                    "sequence": event.sequence,
-                    "event_id": event.event_id,
-                    "trace_id": event.trace_id,
-                    "timestamp": event.timestamp,
-                    "session_id": event.session_id,
-                    "work_item_id": event.work_item_id,
-                    "run_id": event.run_id,
-                    "event": event.kind.value,
-                    "status": str(event.data.get("status", "running")),
-                    "terminal": event.terminal,
-                    "data": event.data,
-                }
+                record = event_record(event)
                 context.console.file.write(
                     json.dumps(record, ensure_ascii=False) + "\n"
                 )

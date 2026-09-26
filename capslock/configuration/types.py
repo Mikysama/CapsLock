@@ -54,6 +54,8 @@ class ModelProfileSettings:
     max_output_tokens: int
     input_cost_per_million: float
     output_cost_per_million: float
+    cached_input_cost_per_million: float | None = None
+    tokenizer: str | None = None
 
 
 @dataclass(frozen=True)

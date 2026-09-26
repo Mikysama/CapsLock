@@ -1,6 +1,6 @@
 # 当前运行内核与安全边界
 
-本文描述 CapsLock 2.7.6.3 的当前开发边界。产品在本机运行，支持直接能力工具、类型化斜杠命令、可审批 Action、AST 分析与沙箱保护的通用 Shell、session 隔离后台进程、受管理的本地/远程 MCP、LSP、IDE 上下文桥、受控仓库指令，以及单层但可持久化恢复的本机 Agent team；不提供远程控制、后台 daemon、跨机器 Agent 或第三方可执行 Hook。
+本文描述 CapsLock 2.7.6.4 的当前开发边界。产品在本机运行，支持直接能力工具、类型化斜杠命令、可审批 Action、AST 分析与沙箱保护的通用 Shell、session 隔离后台进程、受管理的本地/远程 MCP、LSP、IDE 上下文桥、受控仓库指令，以及单层但可持久化恢复的本机 Agent team；不提供远程控制、后台 daemon、跨机器 Agent 或第三方可执行 Hook。
 
 ## 模块边界
 
@@ -23,7 +23,7 @@
 
 ## 上下文、摘要与 episodic retrieval
 
-原始 transcript、Tool Result 和 Artifact 是事实来源；compaction summary、FTS 和分段缓存均为可重建派生数据。workspace schema 20 使用 session-scoped `episodic_documents` 与 FTS5 保存来源 ID、run、类型和分块序号，并为 compaction 记录 summary-policy digest、结果 token 与质量状态。文本 Artifact 按 8 KiB 分块，二进制或 prompt-injection quarantine 只索引安全元数据。每轮自动召回最多 5 条、合计 4 KiB，并以不可信 `episodic_recall` section 注入；显式 `search_session_history` 最多返回 20 条，深度读取仍通过 `read_tool_artifact`。
+原始 transcript、Tool Result 和 Artifact 是事实来源；compaction summary、FTS 和分段缓存均为可重建派生数据。workspace schema 21 使用 session-scoped `episodic_documents` 与 FTS5 保存来源 ID、run、类型和分块序号，并为 compaction 记录 summary-policy digest、结果 token 与质量状态。文本 Artifact 按 8 KiB 分块，二进制或 prompt-injection quarantine 只索引安全元数据。每轮自动召回最多 5 条、合计 4 KiB，并以不可信 `episodic_recall` section 注入；显式 `search_session_history` 最多返回 20 条，深度读取仍通过 `read_tool_artifact`。
 
 摘要按完整 turn/tool round 和 token 预算进行 map-reduce；超大单条消息继续分片，不允许对整体来源执行字符级截断。summary v3 保留来源覆盖、逐项 source map、用户反馈、当前工作、代码符号、验证状态、降级说明与引用式 working set，v1/v2 继续只读兼容。每个 map 分段按 source digest、模型 profile 与 summary-policy digest 缓存；focus 是独立的低优先级策略，不能改变 schema、安全或来源要求。文件及 Skill 正文不会因恢复自动注入。portable export 不包含 episodic 或摘要分段缓存；升级、导入、branch 和 rewind 必须幂等重建索引。
 
@@ -73,7 +73,7 @@ worker workspace 支持 `snapshot`、`worktree` 和 `shared_read`。snapshot/wor
 
 ## 当前数据协议
 
-当前格式为 config 13、workspace schema 20、memory schema 6、portable archive 7、session export 7、JSONL schema 3、IDE Bridge protocol 1 和 plugin protocol 4。workspace 启动支持 backup-first 的 v6-v19→v20 升级；模型传输只使用 OpenAI Responses API，旧配置中的 Provider 会迁移为 `kind="openai_responses"`，不存在 Chat Completions 回退。重建表的迁移必须显式列出源、目标字段，禁止依赖物理列顺序。memory schema v3-v5 与 config v3-v12 自动备份并升级。迁移失败保留原库和备份，不继续部分升级。
+当前格式为 config 14、workspace schema 21、memory schema 6、portable archive 8、session export 8、JSONL schema 3、IDE Bridge protocol 1 和 plugin protocol 4。workspace 启动支持 backup-first 的 v6-v20→v21 升级；模型传输只使用 OpenAI Responses API，旧配置中的 Provider 会迁移为 `kind="openai_responses"`，不存在 Chat Completions 回退。重建表的迁移必须显式列出源、目标字段，禁止依赖物理列顺序。memory schema v3-v5 与 config v3-v13 自动备份并升级。迁移失败保留原库和备份，不继续部分升级。
 
 ## 外部评测兼容与诊断
 

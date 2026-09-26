@@ -155,7 +155,19 @@ class ChildAgentRunner:
             runtime_controls=(self._runtime_contract(contract, bool(mailbox_tools)),),
         )
         suspended = False
+        mailbox_registered = False
         try:
+            collaboration = self._collaboration()
+            if mailbox_tools and collaboration is not None:
+                await collaboration.register_mailbox_runtime(contract.task_id)
+                mailbox_registered = True
+
+                async def drain_mailbox() -> list[dict[str, object]]:
+                    return await collaboration.drain_child_messages(
+                        contract.task_id, parent_run_id=contract.parent_run_id
+                    )
+
+                child.session.set_external_input_provider(drain_mailbox)
             attempt = await self.repository.latest_attempt(contract.task_id)
             if attempt is not None:
                 await self.repository.checkpoint_attempt(
@@ -258,6 +270,8 @@ class ChildAgentRunner:
                 child, contract, answer=answer, usage=usage, child_run_id=child_run_id
             )
         finally:
+            if mailbox_registered:
+                await self._collaboration().unregister_mailbox_runtime(contract.task_id)
             if not suspended:
                 await child.close()
 

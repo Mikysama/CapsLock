@@ -39,7 +39,6 @@ from .types import (
     McpSettings,
     MemorySettings,
     ModelProfileSettings,
-    ModelSettings,
     ObservabilitySettings,
     ProviderSettings,
     RoutingSettings,
@@ -112,16 +111,6 @@ def resolve_settings(
         providers = {provider.name: provider}
         models = {profile.name: profile}
         routing = RoutingSettings((profile.name,), (profile.name,), (), ())
-    primary = models[routing.reasoning[0]]
-    provider = providers[primary.provider]
-    primary_model = ModelSettings(
-        provider.api_key,
-        provider.base_url,
-        primary.model,
-        provider.timeout_seconds,
-        primary.input_cost_per_million,
-        primary.output_cost_per_million,
-    )
     raw_lsp_servers = group("lsp").get("servers", {})
     lsp_servers = {
         str(name): LspServerSettings(
@@ -137,7 +126,6 @@ def resolve_settings(
         if isinstance(server, dict)
     }
     return settings_factory(
-        model_config=primary_model,
         runtime=RuntimeSettings(
             max_tool_rounds=max_tool_rounds(group("runtime")),
         ),

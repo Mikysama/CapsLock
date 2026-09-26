@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .support import _outcome
+
 import hashlib
 from dataclasses import replace
 from typing import Any
@@ -20,22 +22,9 @@ from ..contracts import (
     ResolvedToolPolicy,
     ToolDefinition,
     ToolOutcome,
-    ToolOutcomeStatus,
     define_tool,
 )
-
-
-def _outcome(
-    ok: bool, data: object, error: str | None = None, **values: Any
-) -> ToolOutcome:
-    return ToolOutcome(
-        ToolOutcomeStatus.SUCCEEDED if ok else ToolOutcomeStatus.FAILED,
-        ok,
-        data=data,
-        error=error,
-        error_code=None if ok else "tool_failed",
-        **values,
-    )
+from ..schema import SchemaValidationError
 
 
 def delegation_tool() -> ToolDefinition:
@@ -384,7 +373,7 @@ def agent_control_tools() -> list[ToolDefinition]:
         open_world=True,
         interrupt_behavior=InterruptBehavior.CANCEL,
     )
-    return [
+    tools = [
         define_tool(
             "get_agent_task",
             "Read or briefly wait for one background child Agent task.",
@@ -422,27 +411,18 @@ def agent_control_tools() -> list[ToolDefinition]:
         ),
         define_tool(
             "send_agent_message",
-            "Send a bounded instruction, response, or cancellation to one owned child Agent task.",
-            {
-                "type": "object",
-                "properties": {
-                    "task_id": {"type": "string"},
-                    "kind": {
-                        "type": "string",
-                        "enum": ["instruction", "response", "cancel"],
-                    },
-                    "payload": {"type": "object"},
-                },
-                "required": ["task_id", "kind", "payload"],
-                "additionalProperties": False,
-            },
-            _send_agent_message,
+            "Send a bounded message to an explicitly selected task, persistent Agent, or team. "
+            "Task messages require kind; Agent and team messages are instructions. "
+            "Team messages require explicit broadcast=true.",
+            _agent_message_schema(compatibility=True),
+            _send_routed_agent_message,
+            validate=_validate_agent_message,
             policy=ResolvedToolPolicy(
                 context_mutation=True,
                 interrupt_behavior=InterruptBehavior.COMPLETE,
             ),
             deferred=True,
-            search_hint="message instruct answer child Agent",
+            search_hint="message instruct answer child Agent broadcast teammate team",
         ),
         define_tool(
             "read_agent_messages",
@@ -608,17 +588,17 @@ def agent_control_tools() -> list[ToolDefinition]:
         ),
         define_tool(
             "stop_agent",
-            "Stop a session-owned persistent Agent and cancel its active task.",
-            {
-                "type": "object",
-                "properties": {"agent_id": {"type": "string"}},
-                "required": ["agent_id"],
-                "additionalProperties": False,
-            },
-            _stop_agent,
-            policy=ResolvedToolPolicy(context_mutation=True),
+            "Cancel an explicitly selected session-owned child task, or stop a "
+            "session-owned persistent Agent and cancel its active task.",
+            _agent_stop_schema(compatibility=True),
+            _stop_routed_agent,
+            validate=_validate_agent_stop,
+            policy=ResolvedToolPolicy(
+                context_mutation=True,
+                interrupt_behavior=InterruptBehavior.COMPLETE,
+            ),
             deferred=True,
-            search_hint="stop persistent Agent worker",
+            search_hint="stop cancel background child task persistent Agent worker",
         ),
         define_tool(
             "send_team_message",
@@ -640,6 +620,193 @@ def agent_control_tools() -> list[ToolDefinition]:
             search_hint="message broadcast Agent teammate",
         ),
     ]
+    schemas = {
+        "stop_agent": _agent_stop_schema(),
+        "send_agent_message": _agent_message_schema(),
+    }
+    return [
+        replace(
+            tool,
+            contract=replace(
+                tool.contract,
+                model_visible=tool.name not in {"stop_agent_task", "send_team_message"},
+                model_input_schema=schemas.get(tool.name),
+            ),
+        )
+        for tool in tools
+    ]
+
+
+def _agent_stop_schema(*, compatibility: bool = False) -> dict[str, Any]:
+    schema: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "target_type": {"type": "string", "enum": ["task", "agent"]},
+            "target_id": {"type": "string", "minLength": 1},
+        },
+        "required": ["target_type", "target_id"],
+        "additionalProperties": False,
+    }
+    if compatibility:
+        schema["properties"]["agent_id"] = {"type": "string"}
+        schema.pop("required")
+        schema["oneOf"] = [
+            {
+                "required": ["target_type", "target_id"],
+                "not": {"required": ["agent_id"]},
+            },
+            {
+                "required": ["agent_id"],
+                "not": {
+                    "anyOf": [
+                        {"required": ["target_type"]},
+                        {"required": ["target_id"]},
+                    ]
+                },
+            },
+        ]
+    return schema
+
+
+def _agent_message_schema(*, compatibility: bool = False) -> dict[str, Any]:
+    schema: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "target_type": {"type": "string", "enum": ["task", "agent", "team"]},
+            "target_id": {"type": "string", "minLength": 1},
+            "payload": {"type": "object"},
+            "kind": {
+                "type": ["string", "null"],
+                "enum": ["instruction", "response", "cancel", None],
+                "description": "Required for task targets; omit for Agent and team targets.",
+            },
+            "broadcast": {
+                "type": "boolean",
+                "description": "Must be explicitly true for team targets; must not be true for other targets.",
+            },
+        },
+        "required": ["target_type", "target_id", "payload"],
+        "additionalProperties": False,
+    }
+    if compatibility:
+        schema["properties"]["task_id"] = {"type": "string"}
+        schema["required"] = ["payload"]
+        schema["oneOf"] = [
+            {
+                "required": ["target_type", "target_id"],
+                "not": {"required": ["task_id"]},
+            },
+            {
+                "required": ["task_id", "kind"],
+                "not": {
+                    "anyOf": [
+                        {"required": ["target_type"]},
+                        {"required": ["target_id"]},
+                        {"required": ["broadcast"]},
+                    ]
+                },
+            },
+        ]
+    return schema
+
+
+def resolve_agent_operation(
+    name: str, arguments: dict[str, Any]
+) -> tuple[str, dict[str, Any]]:
+    """Resolve explicit routes to historical operations for execution and policy checks."""
+    if name not in {"stop_agent", "send_agent_message"}:
+        return name, dict(arguments)
+    historical_id = "agent_id" if name == "stop_agent" else "task_id"
+    if historical_id in arguments:
+        allowed = (
+            {historical_id}
+            if name == "stop_agent"
+            else {historical_id, "kind", "payload"}
+        )
+        if set(arguments) - allowed:
+            raise ValueError(
+                "legacy and explicit Agent target arguments cannot be combined"
+            )
+        return name, dict(arguments)
+    target_type = arguments.get("target_type")
+    target_id = arguments.get("target_id")
+    allowed_types = (
+        {"task", "agent"} if name == "stop_agent" else {"task", "agent", "team"}
+    )
+    if (
+        target_type not in allowed_types
+        or not isinstance(target_id, str)
+        or not target_id
+    ):
+        raise ValueError("an explicit target_type and nonempty target_id are required")
+    if name == "stop_agent":
+        if target_type == "task":
+            return "stop_agent_task", {"task_id": target_id}
+        return "stop_agent", {"agent_id": target_id}
+    payload = arguments["payload"]
+    if target_type == "team":
+        if arguments.get("broadcast") is not True:
+            raise ValueError("team messages require explicit broadcast=true")
+    elif arguments.get("broadcast", False) is not False:
+        raise ValueError("broadcast=true is permitted only for team messages")
+    if target_type == "task":
+        if arguments.get("kind") not in {"instruction", "response", "cancel"}:
+            raise ValueError(
+                "task messages require kind instruction, response, or cancel"
+            )
+        return "send_agent_message", {
+            "task_id": target_id,
+            "kind": arguments["kind"],
+            "payload": payload,
+        }
+    if "kind" in arguments:
+        raise ValueError("kind is permitted only for task messages")
+    if target_type == "agent":
+        return "send_team_message", {
+            "recipient_agent_id": target_id,
+            "payload": payload,
+        }
+    return "send_team_message", {
+        "team_id": target_id,
+        "broadcast": True,
+        "payload": payload,
+    }
+
+
+async def _validate_agent_stop(
+    arguments: dict[str, Any], _context: ExecutionContext
+) -> None:
+    try:
+        resolve_agent_operation("stop_agent", arguments)
+    except ValueError as exc:
+        raise SchemaValidationError(str(exc)) from exc
+
+
+async def _validate_agent_message(
+    arguments: dict[str, Any], _context: ExecutionContext
+) -> None:
+    try:
+        resolve_agent_operation("send_agent_message", arguments)
+    except ValueError as exc:
+        raise SchemaValidationError(str(exc)) from exc
+
+
+async def _stop_routed_agent(
+    context: ExecutionContext, arguments: dict[str, Any]
+) -> ToolOutcome:
+    operation, routed = resolve_agent_operation("stop_agent", arguments)
+    if operation == "stop_agent_task":
+        return await _stop_agent_task(context, routed)
+    return await _stop_agent(context, routed)
+
+
+async def _send_routed_agent_message(
+    context: ExecutionContext, arguments: dict[str, Any]
+) -> ToolOutcome:
+    operation, routed = resolve_agent_operation("send_agent_message", arguments)
+    if operation == "send_team_message":
+        return await _send_team_message(context, routed)
+    return await _send_agent_message(context, routed)
 
 
 def _team_task_schema() -> dict[str, Any]:

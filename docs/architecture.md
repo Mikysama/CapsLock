@@ -6,8 +6,11 @@ extensions.
 
 ## Dependency direction
 
-- CLI command handlers depend on `cli.factory` and application services. The factory
-  does not import command dispatch or input-request handlers.
+- Local entry points use `composition.factory` and application services; `cli.factory`
+  preserves the CLI import surface. Factories do not import command dispatch or input
+  handlers. TUI and stdio clients share `ForegroundRunController` and the versioned
+  application event serializer. Durable request deduplication belongs to the work-item
+  repository.
 - `AgentSession` is the runtime entry point. Session administration, permission requests,
   planning requests, and run-stream coordination live in focused runtime services.
 - Tool execution depends on typed service ports in `tooling.service_ports`; optional
@@ -30,6 +33,11 @@ extensions.
 - Slash-command handlers live under `cli/command_handlers/`; filesystem handlers live
   under `tooling/tools/filesystem/`; external Web and MCP Actions live under
   `application/action_system/external_actions/`.
+
+- Model profiles are the configuration authority; `Settings.model_config` is a derived
+  read-only primary view. Output limits are selected per request, not per model name.
+- MCP presentation consumes safe manager snapshots; it never constructs a second
+  registry with different transport policy.
 
 ## Compatibility invariants
 

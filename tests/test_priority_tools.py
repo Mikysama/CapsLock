@@ -62,7 +62,6 @@ def test_priority_catalog_uses_only_direct_capability_names() -> None:
         "ask_user",
         "create_task",
         "list_tasks",
-        "get_task",
         "update_task",
         "read_pdf",
         "read_notebook",
@@ -70,14 +69,14 @@ def test_priority_catalog_uses_only_direct_capability_names() -> None:
         "create_worktree",
         "exit_worktree",
         "get_agent_task",
-        "stop_agent_task",
+        "stop_agent",
     } <= names
     assert not any(name.startswith("propose_") for name in names)
     assert "task_list_update" not in names
     assert "task_status_update" not in names
 
 
-def test_glob_python_fallback_honors_gitignore_and_reads_binary_images(
+def test_glob_missing_backend_and_binary_image_read(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     (tmp_path / ".gitignore").write_text("ignored/\n*.log\n", encoding="utf-8")
@@ -92,7 +91,8 @@ def test_glob_python_fallback_honors_gitignore_and_reads_binary_images(
     async def scenario() -> None:
         context = _context(tmp_path, actions=object())
         result = await glob_files(context, {"pattern": "**/*.py"})
-        assert result.data["files"] == ["top.py"]
+        assert not result.ok
+        assert result.error_code == "search_backend_unavailable"
         (tmp_path / "pixel.png").write_bytes(b"\x89PNG\r\n\x1a\n")
         image = await read_image(context, {"path": "pixel.png"})
         assert image.ok

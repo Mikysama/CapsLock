@@ -54,9 +54,19 @@ async def dispatch_slash_command(context: CliContext, text: str) -> CommandOutco
     return await spec.handler(context, parts, text)
 
 
-async def _handled(function, *args) -> CommandOutcome:
-    await function(*args)
-    return CommandOutcome()
+def _adapt(function, argument=None):
+    """Adapt a presentation handler to the typed command contract."""
+
+    async def handler(context, parts, raw):
+        if argument == "raw":
+            await function(context, raw)
+        elif argument == "parts":
+            await function(context, parts)
+        else:
+            await function(context)
+        return CommandOutcome()
+
+    return handler
 
 
 async def _help(context, parts, raw):
@@ -71,53 +81,28 @@ async def _exit(context, parts, raw):
     return CommandOutcome(CommandOutcomeKind.EXIT)
 
 
-async def _builtin(context, parts, raw):
-    name = parts[0]
-    if name == "/status":
-        await _status(context)
-    elif name == "/model":
-        await actions.model_command(context, raw)
-    elif name == "/permissions":
-        await actions.permissions(context, raw)
-    elif name == "/approvals":
-        if len(parts) == 3 and parts[1] == "approve":
-            item = await actions.approve_action(context, parts[2])
-            if item is not None:
-                return CommandOutcome(
-                    CommandOutcomeKind.ENQUEUE,
-                    work_item_id=item.id,
-                    question=item.question,
-                )
-        elif len(parts) == 3 and parts[1] == "reject":
-            await actions.reject_action(context, parts[2])
-        else:
-            await actions.render_approvals(context)
-            context.console.print(
-                "[text.secondary]Use /approvals approve <id> or /approvals reject <id>.[/]"
+async def _approvals(context, parts, raw):
+    if len(parts) == 3 and parts[1] == "approve":
+        item = await actions.approve_action(context, parts[2])
+        if item is not None:
+            return CommandOutcome(
+                CommandOutcomeKind.ENQUEUE, work_item_id=item.id, question=item.question
             )
-    elif name == "/queue":
-        await _queue(context, parts)
-    elif name == "/memory":
-        await memory_command(context, raw)
-    elif name == "/instructions":
-        await _instructions(context, parts)
-    elif name == "/skills":
-        await skills_command(context, raw)
-    elif name == "/agents":
-        await _agents(context, parts)
-    elif name == "/sources":
-        await actions.render_sources(context)
-    elif name == "/mcp":
-        await actions.mcp_command(context, raw)
-    elif name == "/diff":
-        await actions.show_git_diff(context)
-    elif name == "/undo":
-        await actions.undo(context)
-    elif name == "/rename":
-        if len(parts) < 2:
-            raise ValueError("usage: /rename <title>")
-        session = await context.session.rename(" ".join(parts[1:]))
-        context.console.print(f"[success]Renamed:[/] {session.title}")
+    elif len(parts) == 3 and parts[1] == "reject":
+        await actions.reject_action(context, parts[2])
+    else:
+        await actions.render_approvals(context)
+        context.console.print(
+            "[text.secondary]Use /approvals approve <id> or /approvals reject <id>.[/]"
+        )
+    return CommandOutcome()
+
+
+async def _rename(context, parts, raw):
+    if len(parts) < 2:
+        raise ValueError("usage: /rename <title>")
+    session = await context.session.rename(" ".join(parts[1:]))
+    context.console.print(f"[success]Renamed:[/] {session.title}")
     return CommandOutcome()
 
 
@@ -348,23 +333,21 @@ register_handler("/help", _help)
 register_handler("/plan", plan_command)
 register_handler("/exit", _exit)
 register_handler("/quit", _exit)
-for _path in (
-    "/status",
-    "/model",
-    "/permissions",
-    "/approvals",
-    "/queue",
-    "/memory",
-    "/skills",
-    "/agents",
-    "/sources",
-    "/mcp",
-    "/diff",
-    "/undo",
-    "/rename",
-):
-    register_handler(_path, _builtin)
 for _path, _handler in {
+    "/status": _adapt(_status),
+    "/model": _adapt(actions.model_command, "raw"),
+    "/permissions": _adapt(actions.permissions, "raw"),
+    "/approvals": _approvals,
+    "/queue": _adapt(_queue, "parts"),
+    "/memory": _adapt(memory_command, "raw"),
+    "/instructions": _adapt(_instructions, "parts"),
+    "/skills": _adapt(skills_command, "raw"),
+    "/agents": _adapt(_agents, "parts"),
+    "/sources": _adapt(actions.render_sources),
+    "/mcp": _adapt(actions.mcp_command, "raw"),
+    "/diff": _adapt(actions.show_git_diff),
+    "/undo": _adapt(actions.undo),
+    "/rename": _rename,
     "/resume": session_handlers.resume,
     "/init": init_handlers.initialize,
     "/btw": session_handlers.btw,

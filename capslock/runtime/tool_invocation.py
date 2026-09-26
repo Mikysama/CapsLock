@@ -146,7 +146,26 @@ class InvocationPreparer:
                 )
             else:
                 if governor is not None:
-                    attempt_id, _, _ = await governor.before_tool(call.name, arguments)
+                    from ..tooling.tools.shell import process_output
+
+                    definition = self.tools.get(call.name)
+                    trusted_poll = None
+                    if (
+                        definition is not None
+                        and definition.execute is process_output
+                        and context.process_manager is not None
+                    ):
+                        identifier = arguments.get("process_id")
+                        if isinstance(identifier, str):
+                            try:
+                                trusted_poll = context.process_manager.poll_progress(
+                                    context.session_id, identifier
+                                )
+                            except ValueError:
+                                pass
+                    attempt_id, _, _ = await governor.before_tool(
+                        call.name, arguments, trusted_poll=trusted_poll
+                    )
 
                 async def report(event: ToolEvent) -> None:
                     data = dict(event.data)

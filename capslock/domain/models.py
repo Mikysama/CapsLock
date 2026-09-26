@@ -14,6 +14,9 @@ class ModelRole(StrEnum):
 
 
 class ModelErrorCode(StrEnum):
+    INCOMPLETE = "model_incomplete"
+    STREAM_INCOMPLETE = "model_stream_incomplete"
+    RESPONSE_FAILED = "model_response_failed"
     UNAVAILABLE = "model_unavailable"
     RATE_LIMITED = "model_rate_limited"
     DATA_POLICY_MISMATCH = "model_data_policy_mismatch"

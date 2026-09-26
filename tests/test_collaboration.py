@@ -47,7 +47,7 @@ def test_child_tool_catalog_cannot_delegate_again() -> None:
         "resume_agent",
         "get_agent_team",
         "stop_agent",
-        "send_team_message",
+        "send_agent_message",
     }.issubset(workspace_tools().names)
 
 
@@ -546,7 +546,7 @@ def test_fresh_workspace_contains_collaboration_tables(tmp_path: Path) -> None:
         )
         try:
             version = await repositories.database.fetch_one("PRAGMA user_version")
-            assert int(version[0]) == 20
+            assert int(version[0]) == 21
             tables = await repositories.database.fetch_all(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'agent_%'"
             )

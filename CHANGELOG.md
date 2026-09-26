@@ -4,6 +4,30 @@
 
 ## [Unreleased]
 
+## [2.7.6.4] - 2026-09-26
+
+### Added
+
+- 新增 60 个固定离线内核回归场景、真实评测的预算与配对报告支持，以及工具选择 shadow 实验诊断；未据此宣称真实模型收益或调整默认选择模式。
+- 增加可撤销的工作区编辑授权预设、`exec --output-schema` 本地 JSON Schema 校验，以及带版本握手、幂等启动和可恢复交互的本地 stdio app-server。
+- Agent mailbox 增加进程内唤醒通知；自动压缩使用输出预留、安全余量和最近轮次增长观测确定软门槛。
+
+### Changed
+
+- 流式模型必须返回唯一成功终态才能执行其工具；profile 切换同步 Provider、窗口、计价和缓存身份，失败响应与未知用量保持可诊断。
+- 文件搜索统一使用 ripgrep 并明确无匹配、截断和错误；后台进程轮询以输出 offset 和真实进展判断停滞；模型网络重试统一由 Router 管理。
+- 合并重复工具与配置路径，细化内置工具输出契约，并统一普通调用和恢复调用的校验及后处理。
+
+### Fixed
+
+- 无效 MCP server 配置不再阻止整个应用启动；失效项隔离并供诊断查看。
+- 减少流式 delta 的持久化写入，同时保留终态和恢复所需事件。
+
+### Compatibility
+
+- config 14、workspace schema 21、portable archive 8、session export 8；memory schema 6、JSONL 3、permissions 2 保持不变。升级前备份，回退旧二进制前须恢复对应备份。
+- 默认权限、Memory 权重、Agent 并发和工具选择 shadow 模式不变；上下文压缩百分比仅在增长观测不足时作为兜底。
+
 ## [2.7.6.3] - 2026-09-24
 
 ### Added

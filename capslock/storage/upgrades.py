@@ -21,7 +21,7 @@ async def upgrade_workspace_schema(
     if source_version is None:
         row = await (await connection.execute("PRAGMA user_version")).fetchone()
         source_version = int(row[0])
-    if source_version not in {6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19}:
+    if source_version not in {6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20}:
         raise ValueError(f"unsupported workspace upgrade source: {source_version}")
     checkpoint = await connection.execute("PRAGMA wal_checkpoint(FULL)")
     await checkpoint.close()
@@ -161,11 +161,47 @@ async def upgrade_workspace_schema(
                     raise ValueError("workspace v20 canonical columns are incomplete")
                 await connection.execute("PRAGMA user_version=20")
                 await connection.commit()
+        if source_version < 21:
+            await connection.execute("BEGIN IMMEDIATE")
+            additions = {
+                "sessions": {"model_profile": "TEXT"},
+                "model_calls": {
+                    "cached_input_tokens": "INTEGER",
+                    "reasoning_tokens": "INTEGER",
+                    "usage_source": "TEXT",
+                    "request_id": "TEXT",
+                    "first_token_ms": "INTEGER",
+                    "retry_delay_ms": "INTEGER",
+                    "output_started": "INTEGER",
+                    "price_snapshot_json": "TEXT CHECK(price_snapshot_json IS NULL OR json_valid(price_snapshot_json))",
+                },
+            }
+            for table, fields in additions.items():
+                columns = {
+                    str(row[1])
+                    for row in await (
+                        await connection.execute(f"PRAGMA table_info({table})")
+                    ).fetchall()
+                }
+                for field, definition in fields.items():
+                    if field not in columns:
+                        await connection.execute(
+                            f"ALTER TABLE {table} ADD COLUMN {field} {definition}"
+                        )
+            await connection.execute("PRAGMA user_version=21")
+            await _validate_integrity(connection, "workspace")
+            await connection.commit()
         await _validate_integrity(connection, "workspace")
     except BaseException as exc:
         await connection.rollback()
-        await asyncio.to_thread(_write_migration_report, backup, source_version, exc)
+        # Recovery must not depend on a best-effort diagnostic file being writable.
         await _restore_backup(connection, backup)
+        try:
+            await asyncio.to_thread(
+                _write_migration_report, backup, source_version, exc
+            )
+        except OSError as report_error:
+            exc.add_note(f"migration report unavailable: {report_error}")
         raise
     return backup
 

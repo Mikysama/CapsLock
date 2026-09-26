@@ -37,6 +37,7 @@ class RolloutOutcome:
     peak_context_tokens: int = 0
     context_updates: int = 0
     context_compactions: int = 0
+    human_interventions: int | None = None
 
 
 class CapsLockRuntime:
@@ -306,6 +307,9 @@ def _parse_outcome(output: str, returncode: int, duration: float) -> RolloutOutc
     context_compactions = sum(
         1 for event in context_events if (event.get("data") or {}).get("compaction")
     )
+    human_interventions = sum(
+        event.get("event") in {"waiting_approval", "waiting_input"} for event in events
+    )
     data = terminal.get("data") or {}
     usage = data.get("usage") or {}
     governance = data.get("governance") or data.get("limits") or {}
@@ -336,4 +340,5 @@ def _parse_outcome(output: str, returncode: int, duration: float) -> RolloutOutc
         peak_context_tokens,
         len(context_events),
         context_compactions,
+        human_interventions,
     )

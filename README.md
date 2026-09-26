@@ -2,13 +2,15 @@
 
 CapsLock 是一个本机工作区 Agent，用于读取和修改代码、检索证据、运行受沙箱保护的 Shell、查询代码语义，以及按审批策略访问 Web、MCP 和本地插件。Tool Runtime v2 将工具契约、参数级策略、可恢复暂停、调度、富结果与审计统一到异步执行链。
 
-当前源码版本标识为 `2.7.6.3`。本版本改进长上下文压缩和超限恢复、剩余 token 预算分配与路径参数修复，并修复 SWE-bench prediction 转换、评分轮次隔离和旧评测结果兼容读取；新增峰值上下文与压缩次数统计。workspace schema 20、memory schema 6、portable archive 7、session export 7 和 config 13 保持不变。稳定版本边界见 [2.7.6.3 发布说明](docs/releases/v2.7.6.3.md)，开发边界见 [current](docs/development/v2/current.md)。
+当前源码版本为 `2.7.6.4`。数据格式为 workspace schema 21、memory schema 6、portable archive 8、session export 8 和 config 14，JSONL 保持 3。行为变化、验收边界与回退说明见 [优化交付说明](docs/reliability-optimization.md) 和 [2.7.6.4 发布说明](docs/releases/v2.7.6.4.md)。
 
 正式支持矩阵：Linux/macOS，Python 3.12。发布 CI 会在两个操作系统组合中执行测试、构建、依赖审计和安装冒烟。
 
 ## 安装
 
-需要 Python 3.12 或更高版本：
+需要 Python 3.12 或更高版本。工作区文件名与内容搜索依赖 `ripgrep`（`rg`），macOS 可运行 `brew install ripgrep`，Linux 使用系统包管理器安装（例如 `sudo apt install ripgrep`）。安装后运行 `capslock doctor` 验证；缺少依赖时搜索会明确报错，不自动安装或切换搜索语义。
+
+安装 Python 包：
 
 ```bash
 python -m venv .venv
@@ -89,7 +91,7 @@ TUI 保留以下命令：
 
 `/resume`、`/new`、`/branch` 和 `/rewind` 通过关闭当前 Application 并重新组合目标 session 完成导航；`/btw` 使用隔离 FAST 工具循环，正文只在当前 TUI 展示，审计用量与主统计分离。动作越过当前权限边界时，TUI 会在同一个 run 内阻塞，显示动作类型、风险、目标及最多 40 行/4 KiB 的脱敏命令或 diff 预览，然后给出默认拒绝的选择框；原始参数、完整文件内容和凭据不会进入预览。批准或拒绝的最终状态会返回模型继续推理。旧的 `/cost`、`/continue`、`/clear`、`/fork`、`/tasks`、`/changes`、`/commands`、`/web`、`/approve` 和 `/reject` 不解析。
 
-输入 `/model` 可用方向键在 `deepseek-v4-flash` 与 `deepseek-v4-pro` 之间选择，也可直接执行 `/model <name>`。选择仅作用于当前 session 并随 session 恢复；新 session 仍采用配置默认模型。活跃 run 期间不能切换，队列中尚未开始的请求会使用切换后的模型。
+输入 `/model` 从实际配置的 profiles 选择，列表展示 Provider、模型及可用状态；也可执行 `/model <profile-id>`。旧模型名称只有唯一匹配时才接受。选择持久化到 session，并同时更新窗口、输出限制、价格及缓存身份；新 session 使用 reasoning 路由的首选 profile。活跃 run 期间不能切换。
 
 inline TUI 将原 full-screen 设计系统映射到终端主缓冲区：用户、回答和系统消息保留语义化左边框，Queue、Activity、会话元数据、用量和 Composer 组成一个带完整边框的普通 inline prompt block。该输入块不锚定窗口底部，而是始终出现在最新上下文之后，并随新输出向下移动。reasoning 默认折叠成一行摘要，`Ctrl-O` 可切换当前及后续活动的详细显示；`◆ CapsLock` 下的回答使用透明背景的 Rich Markdown、代码高亮、表格和终端链接。连续读取/搜索工具合并为一条 `Explored` 摘要，编辑、命令和失败结果单独突出。Composer 支持 `$skill` 与 `@file[:line[-line]]` 补全，只有显式引用才会把有界文件内容作为不可信数据加入当前请求；`${CAPSLOCK_HOME:-~/.capslock}/keybindings.json` 可覆盖提交、换行、取消和详情按键并启用 Vim mode。`Ctrl-J` 插入换行，`Enter` 提交，`Ctrl-C` 取消当前 run 或在空闲时退出。可通过 `--no-spinner`、`--quiet`、`CAPSLOCK_NO_SPINNER=1` 或 `CI=true` 禁用动态状态。
 
@@ -190,7 +192,7 @@ path = "**/.env*"
 - 文件动作在提案和执行时校验路径、内容与哈希，且支持安全 `/undo`。
 - Shell 通过确定性规则、结构化权限和 OS 沙箱执行；默认断网，自动批准仅使用只读工作区，越界、写入、联网或宿主执行必须单独授权，取消使用 TERM→KILL 收尾。
 - Web 只访问公开 HTTP/HTTPS 地址，拒绝私网、重定向越界和非文本响应；来源始终是不可信数据。
-- MCP 只连接显式配置且带工具 allowlist 的 server；本地支持 stdio，远程支持公开 HTTPS 上的 Streamable HTTP/SSE。项目配置不得保存 header/env 凭据，Authorization 必须从本机 `env:` 或 `keyring:` 引用解析，远程 mutating tool 失败不会自动重放。
+- MCP 只连接显式配置且带工具 allowlist 的 server；本地支持 stdio，远程支持公开 HTTPS 上的 Streamable HTTP/SSE。项目配置不得保存 header/env 凭据，Authorization 必须从本机 `env:` 或 `keyring:` 引用解析，远程 mutating tool 失败不会自动重放。 配置错误、缺失凭据或连接失败会显示警告并隔离故障 server，不阻止 CapsLock 启动；用 `/mcp list` 查看当前错误、`capslock doctor` 严格校验配置。若整个配置文件不可解析，则停用 MCP，避免绕过本机覆盖规则；修复配置后会在下一轮工具刷新时重新发现。
 - 本地工具插件必须显式安装和逐工作区启用；安装、升级、权限变化和卸载均展示内容摘要与 capability 并记录审计。插件默认在 OS sandbox 中运行，通过宿主 broker 请求受限能力；没有 sandbox backend 时拒绝执行。
 
 ## Plan Mode
@@ -302,10 +304,10 @@ Inspect relevant files and return an evidence-backed summary.
 
 ## 配置
 
-配置根必须包含 `config_version = 13`。config v3-v12 会在原子备份后自动迁移；其他非当前格式拒绝加载。模型传输只使用 OpenAI Responses API，不保留 Chat Completions 回退。多模型使用 provider、credential reference、profile 和角色路由。携带工具的请求只会路由到 `strict_tool_calls=true` 的 provider；结构化正文优先路由到 `json_schema_outputs=true` 的 provider，若没有兼容候选则自动使用同一权威 Schema 的 Prompt 约束，并继续执行 Runtime 本地校验：
+配置根必须包含 `config_version = 14`。config v3-v13 会在原子备份后自动迁移；其他非当前格式拒绝加载。模型传输只使用 OpenAI Responses API，不保留 Chat Completions 回退。多模型使用 provider、credential reference、profile 和角色路由。携带工具的请求只会路由到 `strict_tool_calls=true` 的 provider；结构化正文优先路由到 `json_schema_outputs=true` 的 provider，若没有兼容候选则自动使用同一权威 Schema 的 Prompt 约束，并继续执行 Runtime 本地校验：
 
 ```toml
-config_version = 13
+config_version = 14
 
 [providers.primary]
 kind = "openai_responses"
@@ -476,7 +478,9 @@ CapsLock 只接受 canonical 布局：
 - 计划镜像：`.capslock/state/plans/<session-id>/<plan-id>.md`
 - 用户记忆：`${CAPSLOCK_HOME:-~/.capslock}/state/memory.sqlite3`
 
-工作区库和记忆库使用不同的 SQLite `application_id`。当前 workspace schema 为 20，memory schema 为 6；workspace schema v6-v19 与 memory schema v3-v5 在 WAL checkpoint 和 SQLite backup 后事务升级。schema 20 合并流式事件和 checkpoint 存储，移除可由权威数据替代的快照表，并保留 Agent 恢复、安全审计与状态机数据。portable archive 与 session export 当前为 version 7，portable archive 读取兼容 version 3–6。旧 application ID、其他非当前 schema 或未知已有表均拒绝启动。
+`events.jsonl` 中的连续正文/思考 delta 汇总为 `workflow_stream_summary`，只记录各类块数、字符数、UTF-8 字节数及首末时间和事件序号，不逐块重复记录正文。工具事件、无正文的思考开始事件及终态仍保留；实时 TUI、`exec --json` 和数据库事件内容不变。汇总在下一个非 delta 事件或正常关闭时写入；进程异常退出可能丢失尚未汇总的诊断计数。
+
+工作区库和记忆库使用不同的 SQLite `application_id`。当前 workspace schema 为 21，memory schema 为 6；workspace schema v6-v20 与 memory schema v3-v5 在 WAL checkpoint 和 SQLite backup 后事务升级。schema 20 合并流式事件和 checkpoint 存储，移除可由权威数据替代的快照表，并保留 Agent 恢复、安全审计与状态机数据。portable archive 与 session export 当前为 version 8，portable archive 读取兼容 version 3–7。旧 application ID、其他非当前 schema 或未知已有表均拒绝启动。
 
 ## 架构
 

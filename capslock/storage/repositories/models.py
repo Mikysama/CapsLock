@@ -56,6 +56,7 @@ class ModelRepository(Repository):
         attempt: int,
         data_policy: str,
         fallback_from: str | None,
+        price_snapshot: dict[str, Any] | None = None,
     ) -> str:
         identifier = uuid.uuid4().hex
         await self.execute(
@@ -76,6 +77,11 @@ class ModelRepository(Repository):
                 now(),
             ),
         )
+        if price_snapshot is not None:
+            await self.execute(
+                "UPDATE model_calls SET price_snapshot_json=? WHERE id=?",
+                (json.dumps(price_snapshot), identifier),
+            )
         return identifier
 
     async def finish_call(
@@ -88,10 +94,18 @@ class ModelRepository(Repository):
         cost_usd: float = 0,
         error_code: str | None = None,
         error_message: str | None = None,
+        cached_input_tokens: int | None = None,
+        reasoning_tokens: int | None = None,
+        usage_source: str | None = None,
+        request_id: str | None = None,
+        first_token_ms: int | None = None,
+        retry_delay_ms: int | None = None,
+        output_started: bool | None = None,
+        price_snapshot: dict[str, Any] | None = None,
     ) -> None:
         status = "failed" if error_code else "completed"
         await self.execute(
-            """UPDATE model_calls SET status=?,finished_at=?,duration_ms=?,input_tokens=?,output_tokens=?,cost_usd=?,error_code=?,error_message=?
+            """UPDATE model_calls SET status=?,finished_at=?,duration_ms=?,input_tokens=?,output_tokens=?,cost_usd=?,error_code=?,error_message=?,cached_input_tokens=?,reasoning_tokens=?,usage_source=?,request_id=?,first_token_ms=?,retry_delay_ms=?,output_started=?,price_snapshot_json=coalesce(?,price_snapshot_json)
                WHERE id=? AND status='running'""",
             (
                 status,
@@ -102,6 +116,14 @@ class ModelRepository(Repository):
                 max(0.0, cost_usd),
                 error_code,
                 error_message,
+                cached_input_tokens,
+                reasoning_tokens,
+                usage_source,
+                request_id,
+                first_token_ms,
+                retry_delay_ms,
+                int(output_started) if output_started is not None else None,
+                json.dumps(price_snapshot) if price_snapshot is not None else None,
                 identifier,
             ),
         )
@@ -128,6 +150,7 @@ class ModelRepository(Repository):
             """SELECT provider,model,role,count(*) calls,sum(input_tokens) input_tokens,
                       sum(output_tokens) output_tokens,sum(cost_usd) cost_usd,
                       sum(CASE WHEN status='failed' THEN 1 ELSE 0 END) errors,
+                      sum(CASE WHEN usage_source IS NULL OR usage_source='unknown' THEN 1 ELSE 0 END) unknown_usage_calls,
                       sum(coalesce(duration_ms,0)) duration_ms
                FROM model_calls WHERE run_id=? GROUP BY provider,model,role ORDER BY role,provider,model""",
             (run_id,),

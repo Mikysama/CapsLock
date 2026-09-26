@@ -15,7 +15,12 @@ from prompt_toolkit.output import DummyOutput
 from rich.console import Console
 
 from capslock.cli.app import async_main, build_parser
-from capslock.cli.commands import COMMANDS, command_completions, resolve_command
+from capslock.cli.commands import (
+    COMMANDS,
+    CommandOutcomeKind,
+    command_completions,
+    resolve_command,
+)
 from capslock.cli.choices import ChoiceViewModel
 from capslock.cli.command_ui import Choice
 from capslock.cli.context import CliContext
@@ -112,6 +117,7 @@ def test_parser_exposes_only_current_top_level_commands() -> None:
         action.choices for action in parser._actions if getattr(action, "choices", None)
     )
     assert set(choices) == {
+        "app-server",
         "exec",
         "resume",
         "session",
@@ -517,8 +523,24 @@ def test_model_selector_uses_arrow_keys_and_enter() -> None:
     with create_pipe_input() as pipe:
         pipe.send_text("\x1b[B\r")
         with create_app_session(input=pipe, output=DummyOutput()):
-            selected = select_model("deepseek-v4-flash")
-    assert selected == "deepseek-v4-pro"
+            selected = select_model(
+                "fast",
+                [
+                    {
+                        "id": "fast",
+                        "provider": "local",
+                        "model": "fast-model",
+                        "available": True,
+                    },
+                    {
+                        "id": "quality",
+                        "provider": "remote",
+                        "model": "quality-model",
+                        "available": True,
+                    },
+                ],
+            )
+    assert selected == "quality"
 
 
 def test_permission_selector_uses_current_default_and_arrow_keys() -> None:
@@ -593,14 +615,14 @@ def test_bare_permissions_opens_selector(monkeypatch: pytest.MonkeyPatch) -> Non
     assert "Permission mode: ask_for_approval" in output.getvalue()
 
 
-def test_model_command_switches_only_to_allowlisted_model() -> None:
-    from capslock.models import selectable_model
-
+def test_model_command_switches_only_to_configured_model() -> None:
     class Agent:
         model = "deepseek-v4-flash"
 
         async def set_model(self, value: str) -> str:
-            self.model = selectable_model(value)
+            if value not in {"deepseek-v4-flash", "deepseek-v4-pro"}:
+                raise ValueError("model is not configured")
+            self.model = value
             return self.model
 
     agent = Agent()
@@ -612,7 +634,7 @@ def test_model_command_switches_only_to_allowlisted_model() -> None:
 
     asyncio.run(dispatch_slash_command(context, "/model unsupported"))
     assert agent.model == "deepseek-v4-pro"
-    assert "model must be deepseek-v4-flash or deepseek-v4-pro" in output.getvalue()
+    assert "model is not configured" in output.getvalue()
 
 
 def test_inline_action_authorizer_returns_selected_decision(
@@ -812,7 +834,10 @@ def test_interactive_delete_returns_to_selector_after_no(
 def test_quit_alias_exits_tui() -> None:
     console, _ = console_buffer()
     context = CliContext(console, SimpleNamespace())
-    assert asyncio.run(dispatch_slash_command(context, "/quit")) == "exit"
+    assert (
+        asyncio.run(dispatch_slash_command(context, "/quit")).kind
+        is CommandOutcomeKind.EXIT
+    )
 
 
 def test_activity_footer_animates_thinking_and_running() -> None:

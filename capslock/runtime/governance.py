@@ -118,7 +118,11 @@ class RunGovernor:
         return self.snapshot
 
     async def before_tool(
-        self, name: str, arguments: dict[str, Any]
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        *,
+        trusted_poll: dict[str, Any] | None = None,
     ) -> tuple[int, dict[str, Any], str]:
         async with self._tool_attempt_lock:
             await self._check_common()
@@ -139,6 +143,17 @@ class RunGovernor:
                 f"{normalized_name}\n{payload}".encode("utf-8")
             ).hexdigest()
             detail = self._loop_detail(fingerprint)
+            if (
+                trusted_poll is not None
+                and trusted_poll.get("status") == "running"
+                and (detail is None or detail.get("pattern") != "failed_retry")
+            ):
+                stalled = time.monotonic() - float(trusted_poll["last_progress_at"])
+                detail = (
+                    {"pattern": "process_stalled", "seconds": stalled}
+                    if stalled >= 120
+                    else None
+                )
             if detail is not None:
                 await self.stop(StopReason.REPEATED_TOOL_CALL, detail=detail)
             attempt_id = await self.governance.reserve_attempt(
@@ -149,7 +164,13 @@ class RunGovernor:
                 fingerprint=fingerprint,
             )
             self.history.append(
-                {"attempt_id": attempt_id, "fingerprint": fingerprint, "ok": None}
+                {
+                    "attempt_id": attempt_id,
+                    "fingerprint": fingerprint,
+                    "ok": None,
+                    "running_poll": trusted_poll is not None
+                    and trusted_poll.get("status") == "running",
+                }
             )
             self.snapshot = replace(
                 self.snapshot, tool_calls=self.snapshot.tool_calls + 1
@@ -224,7 +245,12 @@ class RunGovernor:
         return max(0.0, limit - elapsed)
 
     def _loop_detail(self, fingerprint: str) -> dict[str, Any] | None:
-        fingerprints = [str(item.get("fingerprint")) for item in self.history]
+        fingerprints = [
+            f"running_poll:{item.get('attempt_id')}"
+            if item.get("running_poll") and item.get("ok") is True
+            else str(item.get("fingerprint"))
+            for item in self.history
+        ]
         prospective = fingerprints + [fingerprint]
         failed = 0
         for item in reversed(self.history):

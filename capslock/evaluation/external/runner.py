@@ -207,6 +207,7 @@ class ExternalBatchRunner:
                     peak_context_tokens=outcome.peak_context_tokens,
                     context_updates=outcome.context_updates,
                     context_compactions=outcome.context_compactions,
+                    human_interventions=outcome.human_interventions,
                 ).with_hash()
                 write_json(result_path, result.payload())
                 if not pending_grade:
@@ -262,6 +263,7 @@ class ExternalBatchRunner:
                 peak_context_tokens=outcome.peak_context_tokens,
                 context_updates=outcome.context_updates,
                 context_compactions=outcome.context_compactions,
+                human_interventions=outcome.human_interventions,
             ).with_hash()
         except Exception as exc:  # noqa: BLE001 - suite adapters are an error boundary
             stderr.parent.mkdir(parents=True, exist_ok=True)

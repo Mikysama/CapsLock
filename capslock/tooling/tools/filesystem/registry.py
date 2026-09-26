@@ -33,7 +33,14 @@ def filesystem_tools():
         define_tool(
             "list_files",
             "List entries under one workspace directory. Use for directory browsing; do not use for filename patterns or text search. `path` is workspace-relative.",
-            _schema({"path": _str(), "pattern": _str()}, ["path"]),
+            _schema(
+                {
+                    "path": _str(),
+                    "offset": {"type": "integer", "minimum": 0},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 1000},
+                },
+                ["path"],
+            ),
             list_files,
             policy=safe_read,
         ),
@@ -112,6 +119,9 @@ def filesystem_tools():
                     "path": _str(),
                     "query": _str(),
                     "glob": _str(),
+                    "mode": {"type": "string", "enum": ["regex", "literal"]},
+                    "case_sensitive": {"type": "boolean"},
+                    "include_hidden": {"type": "boolean"},
                     "context": {"type": "integer", "minimum": 0, "maximum": 20},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 100},
                 },
@@ -142,10 +152,11 @@ def filesystem_tools():
                 ["path", "content"],
             ),
             create_file,
+            model_visible=False,
         ),
         define_tool(
             "write_file",
-            "Replace complete file content using a read SHA-256 precondition. Use only for intentional whole-file rewrites after read_file; prefer edit_file for focused changes.",
+            "Create a text file with expected_sha256=null (asserting nonexistence), or replace complete content using the SHA-256 from read_file. Prefer edit_file for focused changes.",
             _schema(
                 {
                     "path": _str(),

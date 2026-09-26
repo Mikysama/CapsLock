@@ -31,20 +31,6 @@ class CommandOutcome:
     work_item_id: str | None = None
     question: str | None = None
 
-    def __eq__(self, other: object) -> bool:
-        if isinstance(other, str):
-            return self.kind.value == other
-        if isinstance(other, int):
-            return other == 0 and self.kind is CommandOutcomeKind.EXIT
-        if isinstance(other, CommandOutcome):
-            return (self.kind, self.session_id, self.work_item_id, self.question) == (
-                other.kind,
-                other.session_id,
-                other.work_item_id,
-                other.question,
-            )
-        return NotImplemented
-
 
 CommandHandler = Callable[["CliContext", list[str], str], Awaitable[CommandOutcome]]
 _HANDLERS: dict[str, CommandHandler] = {}

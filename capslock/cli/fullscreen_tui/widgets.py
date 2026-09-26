@@ -377,6 +377,9 @@ class StatusBar(Static):
             activity = f"{glyph} {activity}…"
         if width < 72:
             value = activity or f"{permission} · {context}"
+        elif usage.source in {"unknown", "partial"}:
+            value = f"{model} · {permission} · {context} · usage unknown"
+            value = f"{activity} · {value}" if activity else value
         elif width < 100:
             status = (
                 f"{model} · {permission} · {context} · "

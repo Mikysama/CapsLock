@@ -120,15 +120,22 @@ def model_routes(
             max_output,
             input_cost,
             output_cost,
+            float(value["cached_input_cost_per_million"])
+            if value.get("cached_input_cost_per_million") is not None
+            else None,
+            str(value["tokenizer"]) if value.get("tokenizer") is not None else None,
         )
-    remote_limits: dict[tuple[str, str], int] = {}
-    for item in models.values():
-        key = (item.provider, item.model)
-        previous = remote_limits.setdefault(key, item.max_output_tokens)
-        if previous != item.max_output_tokens:
-            raise ValueError(
-                "profiles sharing a provider/model must use the same max_output_tokens"
-            )
+        if (
+            models[name].cached_input_cost_per_million is not None
+            and models[name].cached_input_cost_per_million < 0
+        ):
+            raise ValueError(f"model profile {name} has invalid cached input price")
+        if (
+            models[name].tokenizer is not None
+            and models[name].tokenizer not in {"adaptive", "heuristic"}
+            and not models[name].tokenizer.startswith("tiktoken:")
+        ):
+            raise ValueError(f"model profile {name} has invalid tokenizer")
     raw_routing = document.get("routing", {})
     if not isinstance(raw_routing, dict):
         raise ValueError("[routing] must be a table")

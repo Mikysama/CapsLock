@@ -32,7 +32,7 @@ async def shell(context: ExecutionContext, arguments: dict[str, Any]) -> ToolExe
 
 
 async def process_output(
-    context: ExecutionContext, arguments: dict[str, Any]
+    context: ExecutionContext, arguments: dict[str, Any], reporter=None
 ) -> ToolOutcome:
     if context.process_manager is None:
         return ToolOutcome.failure(
@@ -43,16 +43,45 @@ async def process_output(
         return ToolOutcome.failure(
             "process_id must be a string", code="invalid_process_id"
         )
-    job = context.process_manager.get(context.session_id, identifier)
+    wait_ms = arguments.get("wait_ms", 1000)
+    stdout_offset = arguments.get("stdout_offset", 0)
+    stderr_offset = arguments.get("stderr_offset", 0)
+    for name, value in (
+        ("wait_ms", wait_ms),
+        ("stdout_offset", stdout_offset),
+        ("stderr_offset", stderr_offset),
+    ):
+        if (
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or value < 0
+            or (name == "wait_ms" and value > 30000)
+        ):
+            return ToolOutcome.failure(f"invalid {name}", code="invalid_process_poll")
+    seconds = wait_ms / 1000
+    if context.governor is not None:
+        remaining = context.governor.remaining_seconds()
+        if remaining is not None:
+            seconds = min(seconds, remaining)
+    job = await context.process_manager.wait_for_output(
+        context.session_id, identifier, seconds
+    )
     return ToolOutcome.success(
         {
             "process_id": job.id,
             "status": job.status,
             "exit_code": job.process.returncode,
-            "stdout": bytes(job.stdout).decode("utf-8", errors="replace"),
-            "stderr": bytes(job.stderr).decode("utf-8", errors="replace"),
-            "truncated": len(job.stdout) >= job.output_limit
-            or len(job.stderr) >= job.output_limit,
+            "stdout": bytes(job.stdout[stdout_offset:]).decode(
+                "utf-8", errors="replace"
+            ),
+            "stderr": bytes(job.stderr[stderr_offset:]).decode(
+                "utf-8", errors="replace"
+            ),
+            "stdout_offset": job.stdout_bytes,
+            "stderr_offset": job.stderr_bytes,
+            "progress_bytes": job.progress_bytes,
+            "truncated": job.stdout_bytes > len(job.stdout)
+            or job.stderr_bytes > len(job.stderr),
         }
     )
 
@@ -104,7 +133,15 @@ def shell_tools():
         define_tool(
             "process_output",
             "Read bounded output and status for a background process in this session.",
-            _schema({"process_id": _str()}, ["process_id"]),
+            _schema(
+                {
+                    "process_id": _str(),
+                    "stdout_offset": {"type": "integer", "minimum": 0},
+                    "stderr_offset": {"type": "integer", "minimum": 0},
+                    "wait_ms": {"type": "integer", "minimum": 0, "maximum": 30000},
+                },
+                ["process_id"],
+            ),
             process_output,
             policy=ResolvedToolPolicy(
                 read_only=True,

@@ -30,7 +30,7 @@ def read_config_document(path: Path) -> dict[str, object]:
 
 def load_config_document(path: Path) -> dict[str, object]:
     document = read_config_document(path)
-    if document.get("config_version") in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12}:
+    if document.get("config_version") in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13}:
         _upgrade_config(path)
         document = read_config_document(path)
     errors = [
@@ -43,130 +43,150 @@ def load_config_document(path: Path) -> dict[str, object]:
 
 
 def _upgrade_config(path: Path) -> None:
-    """Backup and atomically upgrade a v3-v12 document without losing comments."""
+    """Validate, back up and atomically upgrade without losing comments."""
     import tomlkit
 
     source = path.read_text(encoding="utf-8")
     document = tomlkit.parse(source)
     source_version = document.get("config_version")
-    if source_version not in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12}:
+    if source_version not in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13}:
         return
-    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    document["config_version"] = 14
+    if source_version < 13:
+        document.setdefault(
+            "storage",
+            {
+                "maintenance_enabled": True,
+                "operation_retention_days": 30,
+                "audit_retention_days": 180,
+                "maintenance_interval_hours": 24,
+            },
+        )
+        memory = document.setdefault("memory", {})
+        if isinstance(memory, dict):
+            old_enabled = bool(memory.pop("enabled", True))
+            memory.setdefault("capture_enabled", old_enabled)
+            memory.setdefault("recall_enabled", old_enabled)
+            memory.setdefault("manual_write_enabled", old_enabled)
+            memory.setdefault("maintenance_enabled", old_enabled)
+            memory.setdefault("policy", "automatic" if old_enabled else "off")
+        document.setdefault(
+            "tools",
+            {
+                "schema_budget_tokens": 8000,
+                "max_read_concurrency": DEFAULT_MAX_READ_CONCURRENCY,
+                "aggregate_result_bytes": 65536,
+            },
+        )
+        tools = document.setdefault("tools", {})
+        if isinstance(tools, dict):
+            tools.setdefault("selection_mode", "shadow")
+            tools.setdefault(
+                "max_argument_repair_attempts", DEFAULT_MAX_ARGUMENT_REPAIR_ATTEMPTS
+            )
+        providers = document.get("providers", {})
+        if isinstance(providers, dict):
+            for provider in providers.values():
+                if isinstance(provider, dict):
+                    provider["kind"] = "openai_responses"
+                    provider.setdefault("strict_tool_calls", False)
+                    provider.setdefault("json_schema_outputs", False)
+        document.setdefault(
+            "shell",
+            {
+                "enabled": True,
+                "default_timeout_seconds": 120,
+                "max_timeout_seconds": 600,
+                "classifier_enabled": True,
+                "classifier_threshold": 0.95,
+                "background_enabled": True,
+                "output_bytes": 100000,
+            },
+        )
+        document.setdefault(
+            "lsp",
+            {
+                "enabled": True,
+                "startup_timeout_seconds": 10,
+                "request_timeout_seconds": 15,
+                "idle_timeout_seconds": 300,
+            },
+        )
+        document.setdefault(
+            "documents",
+            {
+                "max_pdf_bytes": 52428800,
+                "max_pdf_pages": 10,
+                "max_notebook_bytes": 10485760,
+                "max_notebook_cells": 50,
+                "max_cell_output_bytes": 65536,
+            },
+        )
+        document.setdefault("worktree", {"enabled": True, "max_per_session": 4})
+        agents = document.setdefault("agents", {})
+        if isinstance(agents, dict):
+            agents.setdefault("max_children", DEFAULT_AGENT_MAX_CHILDREN)
+            agents.setdefault("max_concurrency", DEFAULT_AGENT_MAX_CONCURRENCY)
+            agents.setdefault("max_depth", DEFAULT_AGENT_MAX_DEPTH)
+            agents.setdefault(
+                "max_child_tool_rounds", DEFAULT_AGENT_MAX_CHILD_TOOL_ROUNDS
+            )
+            agents.setdefault("background_enabled", True)
+            agents.setdefault("mailbox_enabled", True)
+            agents.setdefault("default_workspace_mode", "snapshot")
+            agents.setdefault("message_ttl_seconds", 3600)
+        context = document.setdefault("context", {})
+        if isinstance(context, dict):
+            context.setdefault("trigger_ratio", DEFAULT_CONTEXT_TRIGGER_RATIO)
+            context.setdefault("target_ratio", DEFAULT_CONTEXT_TARGET_RATIO)
+            context.setdefault(
+                "preserve_recent_turns", DEFAULT_CONTEXT_PRESERVE_RECENT_TURNS
+            )
+            context.setdefault(
+                "preserve_recent_tokens", DEFAULT_CONTEXT_PRESERVE_RECENT_TOKENS
+            )
+            context.setdefault(
+                "max_compaction_failures", DEFAULT_CONTEXT_MAX_COMPACTION_FAILURES
+            )
+            context.setdefault("tokenizer", "adaptive")
+        mcp = document.setdefault("mcp", {})
+        if isinstance(mcp, dict):
+            mcp.setdefault("remote_enabled", True)
+        document.setdefault(
+            "bridge",
+            {"enabled": False, "max_selection_bytes": 65536, "max_diagnostics": 500},
+        )
+        document.setdefault(
+            "observability",
+            {"enabled": True, "retention_days": 30, "max_spans": 100000},
+        )
+    candidate = tomlkit.dumps(document)
+    errors = [
+        item
+        for item in validate_config_document(tomlkit.parse(candidate).unwrap())
+        if item.severity == "error"
+    ]
+    if errors:
+        first = errors[0]
+        raise ValueError(f"invalid config at {first.path}: {first.message}")
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
     backup = path.with_name(f"{path.name}.v{source_version}-{timestamp}.bak")
-    backup.write_text(source, encoding="utf-8")
-    document["config_version"] = 13
-    document.setdefault(
-        "storage",
-        {
-            "maintenance_enabled": True,
-            "operation_retention_days": 30,
-            "audit_retention_days": 180,
-            "maintenance_interval_hours": 24,
-        },
-    )
-    memory = document.setdefault("memory", {})
-    if isinstance(memory, dict):
-        old_enabled = bool(memory.pop("enabled", True))
-        memory.setdefault("capture_enabled", old_enabled)
-        memory.setdefault("recall_enabled", old_enabled)
-        memory.setdefault("manual_write_enabled", old_enabled)
-        memory.setdefault("maintenance_enabled", old_enabled)
-        memory.setdefault("policy", "automatic" if old_enabled else "off")
-    document.setdefault(
-        "tools",
-        {
-            "schema_budget_tokens": 8000,
-            "max_read_concurrency": DEFAULT_MAX_READ_CONCURRENCY,
-            "aggregate_result_bytes": 65536,
-        },
-    )
-    tools = document.setdefault("tools", {})
-    if isinstance(tools, dict):
-        tools.setdefault("selection_mode", "shadow")
-        tools.setdefault(
-            "max_argument_repair_attempts", DEFAULT_MAX_ARGUMENT_REPAIR_ATTEMPTS
-        )
-    providers = document.get("providers", {})
-    if isinstance(providers, dict):
-        for provider in providers.values():
-            if isinstance(provider, dict):
-                provider["kind"] = "openai_responses"
-                provider.setdefault("strict_tool_calls", False)
-                provider.setdefault("json_schema_outputs", False)
-    document.setdefault(
-        "shell",
-        {
-            "enabled": True,
-            "default_timeout_seconds": 120,
-            "max_timeout_seconds": 600,
-            "classifier_enabled": True,
-            "classifier_threshold": 0.95,
-            "background_enabled": True,
-            "output_bytes": 100000,
-        },
-    )
-    document.setdefault(
-        "lsp",
-        {
-            "enabled": True,
-            "startup_timeout_seconds": 10,
-            "request_timeout_seconds": 15,
-            "idle_timeout_seconds": 300,
-        },
-    )
-    document.setdefault(
-        "documents",
-        {
-            "max_pdf_bytes": 52428800,
-            "max_pdf_pages": 10,
-            "max_notebook_bytes": 10485760,
-            "max_notebook_cells": 50,
-            "max_cell_output_bytes": 65536,
-        },
-    )
-    document.setdefault("worktree", {"enabled": True, "max_per_session": 4})
-    agents = document.setdefault("agents", {})
-    if isinstance(agents, dict):
-        agents.setdefault("max_children", DEFAULT_AGENT_MAX_CHILDREN)
-        agents.setdefault("max_concurrency", DEFAULT_AGENT_MAX_CONCURRENCY)
-        agents.setdefault("max_depth", DEFAULT_AGENT_MAX_DEPTH)
-        agents.setdefault("max_child_tool_rounds", DEFAULT_AGENT_MAX_CHILD_TOOL_ROUNDS)
-        agents.setdefault("background_enabled", True)
-        agents.setdefault("mailbox_enabled", True)
-        agents.setdefault("default_workspace_mode", "snapshot")
-        agents.setdefault("message_ttl_seconds", 3600)
-    context = document.setdefault("context", {})
-    if isinstance(context, dict):
-        context.setdefault("trigger_ratio", DEFAULT_CONTEXT_TRIGGER_RATIO)
-        context.setdefault("target_ratio", DEFAULT_CONTEXT_TARGET_RATIO)
-        context.setdefault(
-            "preserve_recent_turns", DEFAULT_CONTEXT_PRESERVE_RECENT_TURNS
-        )
-        context.setdefault(
-            "preserve_recent_tokens", DEFAULT_CONTEXT_PRESERVE_RECENT_TOKENS
-        )
-        context.setdefault(
-            "max_compaction_failures", DEFAULT_CONTEXT_MAX_COMPACTION_FAILURES
-        )
-        context.setdefault("tokenizer", "adaptive")
-    mcp = document.setdefault("mcp", {})
-    if isinstance(mcp, dict):
-        mcp.setdefault("remote_enabled", True)
-    document.setdefault(
-        "bridge",
-        {"enabled": False, "max_selection_bytes": 65536, "max_diagnostics": 500},
-    )
-    document.setdefault(
-        "observability",
-        {"enabled": True, "retention_days": 30, "max_spans": 100000},
-    )
+    with backup.open("x", encoding="utf-8") as handle:
+        os.fchmod(handle.fileno(), 0o600)
+        handle.write(source)
+        handle.flush()
+        os.fsync(handle.fileno())
     temporary: str | None = None
     try:
         with tempfile.NamedTemporaryFile(
-            "w", encoding="utf-8", dir=path.parent, prefix=".config-v12-", delete=False
+            "w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=".config-upgrade-",
+            delete=False,
         ) as handle:
             temporary = handle.name
-            handle.write(tomlkit.dumps(document))
+            handle.write(candidate)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
