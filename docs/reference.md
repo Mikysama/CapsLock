@@ -285,9 +285,9 @@ worker workspace 支持 `snapshot`、`worktree`、`shared_read`。前两者记�
 
 team task 只有在全部依赖成功后才从 blocked 转为 ready，同一 worker 同时只运行一个任务；claim token 与 attempt ordinal 防止重复领取。每次 attempt 记录预算 reserve/settle/release ledger、child approval link 和 checkpoint。恢复必须复用原 attempt 与 child session/workspace，并重新验证 contract digest；只有显式 resumable checkpoint 可以恢复，未知副作用不得自动重放。子快照排除 `.git`、`.capslock`、环境文件和符号链接，并使用自己的 workspace/memory 数据库。后台任务通过 `agent_mailbox` 交换 instruction/question/response/progress/artifact offer/cancel，team message 可点对点或广播；消息先脱敏并限制为 32 KiB，读取时复验 SHA-256，状态为 queued/delivered/acknowledged/expired，正文始终视为不可信数据。`AgentOutputVerifier` 校验输出对象、allowlist 路径、必需检查、文件大小和 SHA-256；未通过的输出只返回失败诊断。
 
-workspace schema 22 使用 Agent team/worker/task/dependency/attempt/checkpoint/budget/approval/workspace/mailbox、performance span、Tool invocation、input request、session lineage、active compaction、episodic document、session worktree 与 Plan Mode 表保存可恢复状态、审计与验证结果。Agent capability 以校验过 digest 的 task contract 为权威来源，citation 以终态 run event 为权威来源。portable archive 默认不包含 artifact 正文，也不包含可重建的 episodic 与摘要分段索引。
+workspace schema 24 使用 Agent team/worker/task/dependency/attempt/checkpoint/budget/approval/workspace/mailbox、performance span、Tool invocation、input request、session lineage、active compaction、episodic document、session worktree 与 Plan Mode 表保存可恢复状态、审计与验证结果。Agent capability 以校验过 digest 的 task contract 为权威来源，citation 以终态 run event 为权威来源。portable archive 默认不包含 artifact 正文，也不包含可重建的 episodic 与摘要分段索引。
 
-活跃父子 Agent 由运行时自动收信；消息变更触发通知，活跃端每 30 秒只读补查。每批最多 32 封、64 KiB，并受剩余上下文预算限制。问题、回复和指令可让协作等待提前返回；普通进展不单独触发模型调用。空闲 worker 和已结束运行的来信只排队，必须显式 follow-up 或恢复才处理。ACK 表示接收端已可靠保存，不能作为模型完成请求的证明。两套 TUI 和 stdio/JSONL 使用可选 `context_updated.data.mailbox` 只展示数量、大小、活跃状态和唤醒原因，不在诊断中输出正文。完整语义、崩溃恢复与性能验证见 [Agent 通信与可靠投递](agent-communication.md)。
+活跃父子 Agent 由运行时自动收信；消息变更触发通知，活跃端每 30 秒只读补查。每批最多 32 封、64 KiB，并受剩余上下文预算限制。问题、回复和指令可让协作等待提前返回；普通进展不单独触发模型调用。空闲 worker 和已结束运行的来信只排队，必须显式 follow-up 或恢复才处理。ACK 在接收端上下文 checkpoint 提交后发生，不能作为模型完成请求的证明。两套 TUI 和 stdio/JSONL 使用可选 `context_updated.data.mailbox` 只展示数量、大小、活跃状态和唤醒原因，不在诊断中输出正文。完整语义、崩溃恢复与性能验证见 [Agent 通信与可靠投递](agent-communication.md)。
 
 ## 记忆契约
 

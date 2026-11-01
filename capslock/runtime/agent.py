@@ -621,13 +621,6 @@ class AgentSession:
                         self.session_id, run_id, resume_from_run_id
                     )
                 )
-                if resume_from_run_id:
-                    await self.mailbox_receipts.rebind_pending(
-                        self.session_id,
-                        [resume_from_run_id],
-                        run_id,
-                        task_ids=task_ids,
-                    )
                 self._active_mailbox = MailboxReceiver(
                     source=service.repository,
                     receipts=self.mailbox_receipts,

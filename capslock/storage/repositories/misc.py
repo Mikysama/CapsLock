@@ -371,7 +371,6 @@ class SnapshotRepository(Repository):
         "agent_approval_links",
         "agent_messages",
         "agent_mailbox",
-        "mailbox_deliveries",
         "agent_outputs",
         "performance_spans",
     )
@@ -413,8 +412,6 @@ class SnapshotRepository(Repository):
             elif table == "agent_approval_links":
                 query = """SELECT l.* FROM agent_approval_links l JOIN agent_attempts a ON a.id=l.attempt_id
                            JOIN agent_tasks t ON t.id=a.task_id WHERE t.owner_session_id=? ORDER BY l.rowid"""
-            elif table == "mailbox_deliveries":
-                query = "SELECT * FROM mailbox_deliveries WHERE recipient_session_id=? ORDER BY receipt_sequence"
             elif table == "agent_mailbox":
                 query = "SELECT m.* FROM agent_mailbox m JOIN runs r ON r.id=m.parent_run_id WHERE r.session_id=? ORDER BY m.rowid"
             elif table in {

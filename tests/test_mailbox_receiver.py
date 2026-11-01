@@ -8,27 +8,21 @@ import pytest
 
 class ReceiptStore:
     def __init__(self):
-        self.rows = {}
+        self.delivered = set()
         self.commits = []
 
-    async def accept(self, session_id, run_id, messages):
-        for message in messages:
-            self.rows.setdefault(message["id"], dict(message))
+    async def delivered_ids(self, session_id):
+        return set(self.delivered)
 
-    async def pending(self, session_id, run_id, **kwargs):
-        values = list(self.rows.values())
-        if kwargs.get("actionable_only"):
-            values = [
-                m
-                for m in values
-                if m["message_kind"] in {"question", "response", "instruction"}
-            ]
-        return {"messages": values, "has_more": False}
+    async def historical_pending(self, session_id):
+        return []
+
+    async def clear_historical(self, session_id, message_ids):
+        pass
 
     async def commit_delivery(self, session_id, run_id, message_ids, checkpoint):
         self.commits.append(checkpoint)
-        for key in message_ids:
-            self.rows.pop(key, None)
+        self.delivered.update(message_ids)
 
 
 class Source:
@@ -91,19 +85,20 @@ def test_empty_mailbox_does_not_query_each_model_round():
     asyncio.run(scenario())
 
 
-def test_receive_saves_before_ack_and_checkpoint_before_context_changes():
+def test_checkpoint_precedes_source_ack_and_context_change():
     async def scenario():
         receiver, source, store, registry = await make_receiver()
         source.messages = [mail()]
         original_ack = source.acknowledge_mailbox_batch
 
         async def checked_ack(ids, *, address):
-            assert "m1" in store.rows
+            assert "m1" in store.delivered
             await original_ack(ids, address=address)
 
         source.acknowledge_mailbox_batch = checked_ack
         await receiver.start()
         try:
+            assert source.acks == []
             messages = [{"role": "user", "content": "real objective"}]
             assert await receiver.poll(messages) == 1
             assert source.acks == ["m1"]
@@ -117,7 +112,7 @@ def test_receive_saves_before_ack_and_checkpoint_before_context_changes():
     asyncio.run(scenario())
 
 
-def test_checkpoint_failure_does_not_change_live_context_or_lose_receipt():
+def test_checkpoint_failure_does_not_change_live_context_or_ack_source():
     async def scenario():
         receiver, source, store, _ = await make_receiver()
         source.messages = [mail()]
@@ -132,7 +127,8 @@ def test_checkpoint_failure_does_not_change_live_context_or_lose_receipt():
             with pytest.raises(OSError, match="disk full"):
                 await receiver.poll(messages)
             assert len(messages) == 1
-            assert "m1" in store.rows
+            assert source.acks == []
+            assert source.messages[0]["id"] == "m1"
         finally:
             await receiver.close()
 
@@ -151,7 +147,7 @@ def test_manual_delivery_is_not_also_injected_automatically():
             await receiver.confirm_manual(messages)
             assert await receiver.poll(messages) == 0
             assert len(messages) == 1
-            assert not store.rows
+            assert store.delivered == {"m1"}
         finally:
             await receiver.close()
 
@@ -172,7 +168,7 @@ def test_context_budget_defers_whole_message_without_acknowledging_processing():
             messages = [{"role": "user", "content": "goal"}]
             assert await receiver.poll(messages) == 0
             assert len(messages) == 1
-            assert "m1" in store.rows
+            assert source.acks == []
             assert receiver.pending_count == 1
         finally:
             await receiver.close()
@@ -191,7 +187,7 @@ def test_receiving_progress_does_not_hide_a_later_question():
             messages = []
             assert await receiver.poll(messages, actionable_only=True) == 1
             assert "question" in messages[0]["content"]
-            assert "progress" in store.rows
+            assert any(m["id"] == "progress" for m in receiver._pending)
         finally:
             await receiver.close()
 

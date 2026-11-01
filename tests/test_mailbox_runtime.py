@@ -72,7 +72,7 @@ def test_parent_wait_child_question_reply_finishes_without_manual_parent_read(tm
             AgentWorkspaceManager,
             MailboxMessageKind,
         )
-        from capslock.storage.repositories.mailbox import MailboxDeliveryRepository
+        from capslock.storage.repositories.mailbox import MailboxCheckpointRepository
         from capslock.runtime.model import (
             ModelResponse,
             ModelMessage,
@@ -174,7 +174,7 @@ def test_parent_wait_child_question_reply_finishes_without_manual_parent_read(tm
             agent = make_agent(tmp_path, repos, session.id, model, tools=tools)
             agent.collaboration = service
             agent._mailbox_service = service
-            agent.mailbox_receipts = MailboxDeliveryRepository(repos.database)
+            agent.mailbox_receipts = MailboxCheckpointRepository(repos.database)
             events = []
             async with asyncio.timeout(15):
                 async for event in agent.run_stream(

@@ -8,6 +8,7 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 import sqlite3
+import uuid
 
 import aiosqlite
 
@@ -38,6 +39,8 @@ async def upgrade_workspace_schema(
         19,
         20,
         21,
+        22,
+        23,
     }:
         raise ValueError(f"unsupported workspace upgrade source: {source_version}")
     checkpoint = await connection.execute("PRAGMA wal_checkpoint(FULL)")
@@ -210,6 +213,10 @@ async def upgrade_workspace_schema(
             await connection.commit()
         if source_version < 22:
             await _upgrade_workspace_twenty_two(connection)
+        if source_version < 23:
+            await _upgrade_workspace_twenty_three(connection)
+        if source_version < 24:
+            await _upgrade_workspace_twenty_four(connection)
         await _validate_integrity(connection, "workspace")
     except BaseException as exc:
         await connection.rollback()
@@ -303,7 +310,9 @@ def _write_migration_report(
 
 async def _restore_backup(connection: aiosqlite.Connection, backup_path: Path) -> None:
     """Restore the pre-migration image into the still-owned connection."""
-    source = await aiosqlite.connect(f"file:{backup_path}?mode=ro", uri=True)
+    source = await aiosqlite.connect(backup_path)
+    query_only = await source.execute("PRAGMA query_only=ON")
+    await query_only.close()
     try:
         await source.backup(connection)
     finally:
@@ -1753,7 +1762,7 @@ async def _upgrade_workspace_twenty_two(connection: aiosqlite.Connection) -> Non
     }
     if "recipient_address" not in columns:
         start = WORKSPACE_SCHEMA.index("CREATE TABLE agent_mailbox (")
-        end = WORKSPACE_SCHEMA.index("CREATE TABLE mailbox_deliveries (", start)
+        end = WORKSPACE_SCHEMA.index("CREATE TABLE agent_outputs (", start)
         definition = WORKSPACE_SCHEMA[start:end]
         await connection.execute(
             "ALTER TABLE agent_mailbox RENAME TO agent_mailbox_v21"
@@ -1793,10 +1802,8 @@ async def _upgrade_workspace_twenty_two(connection: aiosqlite.Connection) -> Non
         await connection.execute(
             "ALTER TABLE agent_mailbox ADD COLUMN delivery_suspended INTEGER NOT NULL DEFAULT 0 CHECK(delivery_suspended IN (0,1))"
         )
-    start = WORKSPACE_SCHEMA.index("CREATE TABLE mailbox_deliveries (")
-    end = WORKSPACE_SCHEMA.index("CREATE TABLE agent_outputs (", start)
     for statement in (
-        WORKSPACE_SCHEMA[start:end]
+        _HISTORICAL_MAILBOX_DELIVERIES
         .replace(
             "CREATE TABLE mailbox_deliveries",
             "CREATE TABLE IF NOT EXISTS mailbox_deliveries",
@@ -1814,11 +1821,154 @@ async def _upgrade_workspace_twenty_two(connection: aiosqlite.Connection) -> Non
         end = WORKSPACE_SCHEMA.index("CREATE TABLE run_events (", start)
         definition = WORKSPACE_SCHEMA[start:end].replace(
             "CREATE TABLE run_steps", "CREATE TABLE run_steps_v22"
+        ).replace(
+            "  mailbox_ids_json TEXT CHECK(mailbox_ids_json IS NULL OR json_valid(mailbox_ids_json)),\n", ""
+        ).replace(
+            "  mailbox_pending_json TEXT CHECK(mailbox_pending_json IS NULL OR json_valid(mailbox_pending_json)),\n", ""
+        ).replace(
+            "  mailbox_pending_sha256 TEXT,\n", ""
         )
         await connection.execute(definition)
-        await connection.execute("INSERT INTO run_steps_v22 SELECT * FROM run_steps")
+        await connection.execute(
+            """INSERT INTO run_steps_v22(id,run_id,ordinal,kind,status,checkpoint_json,started_at,finished_at,error)
+               SELECT id,run_id,ordinal,kind,status,checkpoint_json,started_at,finished_at,error
+               FROM run_steps"""
+        )
         await connection.execute("DROP TABLE run_steps")
         await connection.execute("ALTER TABLE run_steps_v22 RENAME TO run_steps")
     await connection.execute("PRAGMA user_version=22")
+    await _validate_integrity(connection, "workspace")
+    await connection.commit()
+
+
+async def _upgrade_workspace_twenty_four(connection: aiosqlite.Connection) -> None:
+    """Move undelivered old receipts into run steps and remove the receipt table."""
+    await connection.execute("BEGIN IMMEDIATE")
+    columns = {
+        str(row[1]) for row in await (
+            await connection.execute("PRAGMA table_info(run_steps)")
+        ).fetchall()
+    }
+    if "mailbox_pending_json" not in columns:
+        await connection.execute(
+            "ALTER TABLE run_steps ADD COLUMN mailbox_pending_json TEXT CHECK(mailbox_pending_json IS NULL OR json_valid(mailbox_pending_json))"
+        )
+    if "mailbox_pending_sha256" not in columns:
+        await connection.execute(
+            "ALTER TABLE run_steps ADD COLUMN mailbox_pending_sha256 TEXT"
+        )
+    table = await (
+        await connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='mailbox_deliveries'"
+        )
+    ).fetchone()
+    if table is not None:
+        rows = await (
+            await connection.execute(
+                """SELECT run_id,message_id,envelope_json,envelope_sha256,received_at
+                   FROM mailbox_deliveries WHERE status='received'
+                   ORDER BY run_id,receipt_sequence"""
+            )
+        ).fetchall()
+        ordinals: dict[str, int] = {}
+        for row in rows:
+            run_id = str(row["run_id"])
+            encoded = str(row["envelope_json"])
+            digest = str(row["envelope_sha256"])
+            if hashlib.sha256(encoded.encode("utf-8")).hexdigest() != digest:
+                raise ValueError(f"mailbox receipt digest does not match: {row['message_id']}")
+            if run_id not in ordinals:
+                next_ordinal = await (
+                    await connection.execute(
+                        "SELECT coalesce(max(ordinal),-1)+1 FROM run_steps WHERE run_id=?",
+                        (run_id,),
+                    )
+                ).fetchone()
+                ordinals[run_id] = int(next_ordinal[0])
+            await connection.execute(
+                """INSERT INTO run_steps(
+                     id,run_id,ordinal,kind,status,started_at,finished_at,
+                     mailbox_pending_json,mailbox_pending_sha256)
+                   VALUES(?,?,?,'mailbox','completed',?,?,?,?)""",
+                (
+                    uuid.uuid4().hex, run_id, ordinals[run_id],
+                    str(row["received_at"]), str(row["received_at"]), encoded, digest,
+                ),
+            )
+            ordinals[run_id] += 1
+        await connection.execute("DROP TABLE mailbox_deliveries")
+    await connection.execute("PRAGMA user_version=24")
+    await _validate_integrity(connection, "workspace")
+    await connection.commit()
+
+
+_HISTORICAL_MAILBOX_DELIVERIES = """
+CREATE TABLE mailbox_deliveries (
+  receipt_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+  recipient_session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  message_id TEXT NOT NULL,
+  task_id TEXT,
+  message_kind TEXT NOT NULL,
+  envelope_json TEXT NOT NULL CHECK(json_valid(envelope_json)),
+  envelope_sha256 TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'received' CHECK(status IN ('received','delivered','historical')),
+  received_at TEXT NOT NULL,
+  delivered_at TEXT,
+  UNIQUE(recipient_session_id,message_id)
+) STRICT;
+CREATE INDEX idx_mailbox_deliveries_pending ON mailbox_deliveries(recipient_session_id,run_id,receipt_sequence)
+  WHERE status='received';
+"""
+
+
+async def _upgrade_workspace_twenty_three(connection: aiosqlite.Connection) -> None:
+    """Replace receipt copies with durable message IDs on run steps."""
+    await connection.execute("BEGIN IMMEDIATE")
+    columns = {
+        str(row[1]) for row in await (
+            await connection.execute("PRAGMA table_info(run_steps)")
+        ).fetchall()
+    }
+    if "mailbox_ids_json" not in columns:
+        await connection.execute(
+            "ALTER TABLE run_steps ADD COLUMN mailbox_ids_json TEXT CHECK(mailbox_ids_json IS NULL OR json_valid(mailbox_ids_json))"
+        )
+    table = await (
+        await connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='mailbox_deliveries'"
+        )
+    ).fetchone()
+    if table is not None:
+        delivered = await (
+            await connection.execute(
+                "SELECT run_id,message_id FROM mailbox_deliveries WHERE status='delivered' ORDER BY run_id,receipt_sequence"
+            )
+        ).fetchall()
+        by_run: dict[str, list[str]] = {}
+        for row in delivered:
+            by_run.setdefault(str(row["run_id"]), []).append(str(row["message_id"]))
+        for run_id, ids in by_run.items():
+            ordinal = await (
+                await connection.execute(
+                    "SELECT coalesce(max(ordinal),-1)+1 FROM run_steps WHERE run_id=?",
+                    (run_id,),
+                )
+            ).fetchone()
+            await connection.execute(
+                """INSERT INTO run_steps(id,run_id,ordinal,kind,status,started_at,finished_at,mailbox_ids_json)
+                   VALUES(?,?,?,'mailbox','completed',?,?,?)""",
+                (f"mailbox_migration_{run_id}", run_id, int(ordinal[0]),
+                 datetime.now(UTC).isoformat(), datetime.now(UTC).isoformat(), json.dumps(ids)),
+            )
+        await connection.execute(
+            "DELETE FROM mailbox_deliveries WHERE status IN ('delivered','historical')"
+        )
+        pending = await (
+            await connection.execute("SELECT count(*) FROM mailbox_deliveries")
+        ).fetchone()
+        if int(pending[0]) == 0:
+            await connection.execute("DROP TABLE mailbox_deliveries")
+    await connection.execute("PRAGMA user_version=23")
     await _validate_integrity(connection, "workspace")
     await connection.commit()

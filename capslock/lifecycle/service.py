@@ -41,8 +41,8 @@ from .specs import (
 
 
 EXPORT_FORMAT = "capslock-lifecycle-export"
-ARCHIVE_VERSION = 9
-SUPPORTED_ARCHIVE_VERSIONS = frozenset({3, 4, 5, 6, 7, 8, ARCHIVE_VERSION})
+ARCHIVE_VERSION = 10
+SUPPORTED_ARCHIVE_VERSIONS = frozenset({3, 4, 5, 6, 7, 8, 9, ARCHIVE_VERSION})
 MAX_ARCHIVE_RECORDS = 100_000
 
 
@@ -155,6 +155,24 @@ class PortableArchiveService:
                         raise LifecycleError(
                             f"portable archive table {table} must be a list"
                         )
+            if int(manifest["version"]) <= 9:
+                old_receipts = data_workspace.pop("mailbox_deliveries", [])
+                if not isinstance(old_receipts, list):
+                    raise LifecycleError(
+                        "portable archive table mailbox_deliveries must be a list"
+                    )
+                pending_ids = {
+                    str(row["message_id"])
+                    for row in old_receipts
+                    if isinstance(row, dict)
+                    and row.get("status") == "received"
+                    and isinstance(row.get("message_id"), str)
+                }
+                for row in data_workspace.get("agent_mailbox", []):
+                    if isinstance(row, dict) and row.get("id") in pending_ids:
+                        row["status"] = "queued"
+                        row["acknowledged_at"] = None
+                        row["delivered_at"] = None
             if set(data_workspace) - set(WORKSPACE_TABLES) or set(data_memory) - set(
                 MEMORY_TABLES
             ):

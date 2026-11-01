@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- 新 Agent 消息正文统一保存在父工作区 `agent_mailbox`；接收端在 run step 保存已投递消息 ID，checkpoint 提交后再 ACK 源信箱。workspace schema 升至 24，portable archive 与 session export 升至 10；旧库待投递记录迁入 run step，升级时删除旧表，处理完成后清除临时记录。
+
 ## [2.7.6.4] - 2026-09-26
 
 ### Added

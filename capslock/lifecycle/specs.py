@@ -50,7 +50,6 @@ WORKSPACE_IMPORT_SPECS = tuple(
         ("agent_approval_links", "id"),
         ("agent_messages", "id"),
         ("agent_mailbox", "id"),
-        ("mailbox_deliveries", ("recipient_session_id", "message_id")),
         ("agent_outputs", "task_id"),
         ("performance_spans", "id"),
     )

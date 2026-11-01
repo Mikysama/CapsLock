@@ -43,7 +43,7 @@ from .storage.retention import run_retention_maintenance
 from .storage.repositories import WorkspaceRepositories
 from .workspace_writes import WorkspaceMutationCoordinator
 from .storage.artifacts import ToolArtifactStore
-from .storage.repositories.mailbox import MailboxDeliveryRepository
+from .storage.repositories.mailbox import MailboxCheckpointRepository
 from .bridge import IdeBridgeServer
 
 
@@ -408,7 +408,7 @@ class WorkspaceApplication:
                 loop_detection=settings.loop_detection,
                 interaction=interaction,
                 collaboration=collaboration,
-                mailbox_receipts=MailboxDeliveryRepository(repositories.database),
+                mailbox_receipts=MailboxCheckpointRepository(repositories.database),
                 context_evaluation_policy=context_evaluation_policy,
             )
 

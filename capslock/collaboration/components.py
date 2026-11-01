@@ -135,7 +135,7 @@ class CollaborationMailbox:
             task, parent_run_id=parent_run_id, session_id=session_id
         ):
             raise ValueError("mailbox message does not belong to this controller")
-        await self.repository.acknowledge_mailbox(message_id, recipient="parent")
+        raise ValueError("mailbox ACK is committed by the receiver after its context checkpoint")
 
     async def send_child_message(
         self,
@@ -210,7 +210,7 @@ class CollaborationMailbox:
             or str(task["parent_run_id"]) != parent_run_id
         ):
             raise ValueError("mailbox message does not belong to this child task")
-        await self.repository.acknowledge_mailbox(message_id, recipient="child")
+        raise ValueError("mailbox ACK is committed by the receiver after its context checkpoint")
 
 
 class CollaborationArtifactPublisher:

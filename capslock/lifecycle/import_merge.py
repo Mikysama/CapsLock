@@ -57,11 +57,6 @@ def merge_tables(
             )
             if table == "agent_mailbox":
                 record["delivery_suspended"] = 1
-            if table == "mailbox_deliveries":
-                # Receipt sequence is local, never an identity across archives.
-                record.pop("receipt_sequence", None)
-                if record.get("status") == "received":
-                    record["status"] = "historical"
             record_fingerprint = fingerprint(record)
             target_values = tuple(record[key] for key in keys)
             where = " AND ".join(f"{key}=?" for key in keys)
@@ -160,6 +155,14 @@ def rewrite_deferred_references(
                 )
                 if session_id and plan_id:
                     updates["mirror_relative_path"] = f"{session_id}/{plan_id}.md"
+            if table == "run_steps" and source.get("mailbox_ids_json"):
+                original_ids = json.loads(str(source["mailbox_ids_json"]))
+                rewritten_ids = [
+                    maps.get("agent_mailbox", {}).get(str(identifier), str(identifier))
+                    for identifier in original_ids
+                ]
+                if rewritten_ids != original_ids:
+                    updates["mailbox_ids_json"] = json.dumps(rewritten_ids)
             if not updates:
                 continue
             assignments = ",".join(f"{field}=?" for field in updates)
@@ -184,7 +187,7 @@ def rewrite_references(
         value = record.get(field)
         if value is not None and str(value) in maps.get(table, {}):
             record[field] = maps[table][str(value)]
-    if table_name in {"agent_mailbox", "mailbox_deliveries"}:
+    if table_name == "agent_mailbox":
         for field in ("sender_address", "recipient_address"):
             value = record.get(field)
             if isinstance(value, str) and ":" in value:
@@ -198,21 +201,6 @@ def rewrite_references(
                     record[field] = (
                         kind + ":" + maps.get(target, {}).get(identifier, identifier)
                     )
-        if table_name == "mailbox_deliveries":
-            # The original source mailbox may live in another database. Rewrite
-            # only identities whose mappings are present in this archive.
-            envelope = json.loads(record["envelope_json"])
-            rewrite_references("agent_mailbox", envelope, maps, target_workspace_key)
-            original_id = str(envelope.get("id", ""))
-            mapped_id = maps.get("agent_mailbox", {}).get(original_id, original_id)
-            envelope["id"] = record["message_id"] = mapped_id
-            encoded = json.dumps(
-                envelope, ensure_ascii=False, sort_keys=True, default=str
-            )
-            record["envelope_json"] = encoded
-            record["envelope_sha256"] = hashlib.sha256(
-                encoded.encode("utf-8")
-            ).hexdigest()
     if (
         target_workspace_key
         and "workspace_key" in record

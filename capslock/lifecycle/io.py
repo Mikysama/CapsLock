@@ -18,7 +18,8 @@ from .errors import LifecycleError
 
 def sqlite_backup(source: Path, target: Path) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
-    original = sqlite3.connect(f"file:{source}?mode=ro", uri=True)
+    original = sqlite3.connect(source)
+    original.execute("PRAGMA query_only=ON")
     copy = sqlite3.connect(target)
     try:
         original.backup(copy)

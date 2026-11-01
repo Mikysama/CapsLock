@@ -753,7 +753,13 @@ def test_real_agent_repository_records_and_message_routes_match_contracts(tmp_pa
             )
             received = await invoke("read_agent_messages", {"task_id": task["id"]})
             assert received["messages"][0]["id"] == message["id"]
-            await invoke("ack_agent_message", {"message_id": message["id"]})
+            premature_ack = await runtime.invoke(
+                "ack_agent_message", context, {"message_id": message["id"]}
+            )
+            assert not premature_ack.outcome.ok
+            assert (await repos.collaboration.mailbox_message(message["id"]))[
+                "status"
+            ] != "acknowledged"
             await invoke("stop_agent", {"target_type": "task", "target_id": task["id"]})
             await invoke(
                 "stop_agent", {"target_type": "agent", "target_id": worker["id"]}

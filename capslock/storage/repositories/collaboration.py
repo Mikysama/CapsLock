@@ -468,8 +468,10 @@ class CollaborationRepository(Repository):
 
         limit = min(max(int(limit), 1), 32)
         max_bytes = min(max(int(max_bytes), 0), 65_536)
-        clause = "recipient_address=? AND delivery_suspended=0 AND status IN ('queued','delivered') AND (expires_at IS NULL OR expires_at>?)"
-        values: list[Any] = [address, now()]
+        # Unacknowledged mail remains readable past its original TTL. The
+        # receiver now ACKs only after its context checkpoint is durable.
+        clause = "recipient_address=? AND delivery_suspended=0 AND status IN ('queued','delivered')"
+        values: list[Any] = [address]
         if task_ids is not None:
             # task-less messages are deliberately addressed to a persistent worker.
             placeholders = ",".join("?" for _ in task_ids)
@@ -504,7 +506,7 @@ class CollaborationRepository(Repository):
         )
 
     async def acknowledge_mailbox_batch(self, ids: list[str], *, address: str) -> None:
-        """Called only after the recipient database commits durable receipts."""
+        """Called only after the recipient context checkpoint is durable."""
         if not ids:
             return
         identifiers = list(dict.fromkeys(ids))

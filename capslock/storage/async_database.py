@@ -67,8 +67,13 @@ class AsyncDatabase:
 
     async def _open_readers(self, size: int = 2) -> None:
         for _ in range(size):
-            reader = await aiosqlite.connect(f"file:{self.path}?mode=ro", uri=True)
+            reader = await aiosqlite.connect(self.path)
             reader.row_factory = aiosqlite.Row
+            query_only = await reader.execute("PRAGMA query_only=ON")
+            await query_only.close()
+            if self.label == "memory":
+                secure_delete = await reader.execute("PRAGMA secure_delete=ON")
+                await secure_delete.close()
             foreign_keys = await reader.execute("PRAGMA foreign_keys=ON")
             await foreign_keys.close()
             timeout = await reader.execute("PRAGMA busy_timeout=5000")
@@ -105,8 +110,8 @@ class AsyncDatabase:
         if (
             self.label == "workspace"
             and app_id == self.application_id
-            and version in {6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21}
-            and self.schema_version == 22
+            and version in {6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23}
+            and self.schema_version == 24
         ):
             from .upgrades import upgrade_workspace_schema
 

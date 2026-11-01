@@ -44,6 +44,8 @@ class MailboxReceiver:
         self._has_more = False
         self._manual: set[str] = set()
         self._unacked: set[str] = set()
+        self._delivered_ids: set[str] = set()
+        self._historical_ids: set[str] = set()
         self._lock = asyncio.Lock()
         self._timer: asyncio.Task | None = None
         self._closed = False
@@ -63,18 +65,33 @@ class MailboxReceiver:
         return sum(m["message_kind"] in ACTIONABLE for m in self._pending)
 
     async def start(self) -> None:
+        self._delivered_ids = await self.receipts.delivered_ids(self.session_id)
         self._version = await self.registry.register(self.address)
         if self.service is not None:
             self.service.bind_mailbox_receiver(self.address, self)
         async with self._lock:
             await self._refresh_pending()
+            await self._load_historical()
             await self._receive(force=True)
         self._timer = asyncio.create_task(self._reconcile())
 
     async def _refresh_pending(self) -> None:
-        batch = await self.receipts.pending(self.session_id, self.run_id)
-        self._pending = list(batch["messages"])
-        self._has_more = self._has_more or bool(batch["has_more"])
+        self._pending = [
+            message for message in self._pending
+            if str(message["id"]) not in self._delivered_ids
+        ]
+
+    async def _load_historical(self) -> None:
+        rows = await self.receipts.historical_pending(self.session_id)
+        known = {str(message["id"]) for message in self._pending}
+        for message in rows:
+            identifier = str(message["id"])
+            self._historical_ids.add(identifier)
+            if identifier in self._delivered_ids:
+                await self.receipts.clear_historical(self.session_id, [identifier])
+            elif identifier not in known:
+                self._pending.append(message)
+                known.add(identifier)
 
     async def _reconcile(self) -> None:
         try:
@@ -97,6 +114,8 @@ class MailboxReceiver:
         if self._unacked:
             self.ack_retries += 1
             await self._ack()
+        if not self._pending:
+            await self._load_historical()
         if not (force or changed or due or (self._has_more and not self._pending)):
             return
         # Do not move unbounded source backlog into the recipient database.
@@ -116,10 +135,25 @@ class MailboxReceiver:
         if not incoming:
             self.empty_reads += 1
             return
-        await self.receipts.accept(self.session_id, self.run_id, incoming)
-        self._unacked.update(str(m["id"]) for m in incoming)
+        already_delivered = {
+            str(message["id"]) for message in incoming
+            if str(message["id"]) in self._delivered_ids
+        }
+        self._unacked.update(already_delivered)
         await self._ack()
-        await self._refresh_pending()
+        known = {str(message["id"]) for message in self._pending}
+        self._pending.extend(
+            message for message in incoming
+            if str(message["id"]) not in known | self._delivered_ids
+        )
+        if len(self._pending) > 32:
+            urgent = [m for m in self._pending if m["message_kind"] in ACTIONABLE]
+            passive = [m for m in self._pending if m["message_kind"] not in ACTIONABLE]
+            urgent.sort(key=lambda m: (m["created_at"], m["id"]))
+            passive.sort(key=lambda m: (m["created_at"], m["id"]))
+            priority = 24 if passive else 32
+            self._pending = (urgent[:priority] + passive + urgent[priority:])[:32]
+            self._has_more = True
         if any(m["message_kind"] in ACTIONABLE for m in incoming) and not changed:
             # Durable recovery may find mail whose original notification was lost.
             await self.registry.notify(self.address, actionable=True)
@@ -191,7 +225,13 @@ class MailboxReceiver:
                 {"messages": proposed, "mailbox_watermark": selected[-1]},
             )
             messages[:] = proposed
+            self._delivered_ids.update(selected)
             await self._refresh_pending()
+            await self.receipts.clear_historical(
+                self.session_id, [key for key in selected if key in self._historical_ids]
+            )
+            self._unacked.update(key for key in selected if key not in self._historical_ids)
+            await self._ack()
             await self._report("delivered")
             return len(selected)
 
@@ -222,8 +262,14 @@ class MailboxReceiver:
                 sorted(self._manual),
                 {"messages": messages, "mailbox_watermark": sorted(self._manual)[-1]},
             )
+            self._delivered_ids.update(self._manual)
+            await self.receipts.clear_historical(
+                self.session_id, [key for key in self._manual if key in self._historical_ids]
+            )
+            self._unacked.update(key for key in self._manual if key not in self._historical_ids)
             self._manual.clear()
             await self._refresh_pending()
+            await self._ack()
 
     async def wait_for_message(self, timeout=60, reply_to_message_id=None) -> bool:
         deadline = self.clock() + max(0, min(timeout, 60))

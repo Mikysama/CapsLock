@@ -1,4 +1,9 @@
-"""Receiver-owned durable mailbox receipts and atomic context checkpoints."""
+"""Bounded source-mailbox reads and receiver-owned context checkpoints.
+
+New message bodies live in the workspace agent_mailbox table. A mailbox run
+step records IDs already added to model context. Pending pre-v23 receipts are
+temporarily held in run steps until the receiver commits their delivery.
+"""
 
 from __future__ import annotations
 
@@ -8,8 +13,6 @@ import uuid
 from typing import Any
 
 from .core import Repository, now
-
-ACTIONABLE_KINDS = frozenset({"instruction", "question", "response", "cancel"})
 
 
 def bounded_messages(
@@ -33,101 +36,47 @@ def bounded_messages(
     return {"messages": selected, "has_more": len(selected) < len(messages)}
 
 
-class MailboxDeliveryRepository(Repository):
-    async def accept(
-        self, session_id: str, run_id: str, messages: list[dict[str, Any]]
-    ) -> list[dict[str, Any]]:
-        if not messages:
-            return []
-        async with self.database.transaction() as connection:
-            run = await (
-                await connection.execute(
-                    "SELECT session_id FROM runs WHERE id=?", (run_id,)
-                )
-            ).fetchone()
-            if run is None or run["session_id"] != session_id:
-                raise ValueError("mailbox run does not belong to recipient session")
-            for message in messages:
-                encoded = json.dumps(
-                    message, ensure_ascii=False, sort_keys=True, default=str
-                )
-                digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
-                existing = await (
-                    await connection.execute(
-                        "SELECT envelope_json FROM mailbox_deliveries WHERE recipient_session_id=? AND message_id=?",
-                        (session_id, message["id"]),
-                    )
-                ).fetchone()
-                if existing is not None:
-                    previous = json.loads(existing["envelope_json"])
-                    # Source delivery timestamps/status can change on retry; identity and body cannot.
-                    for key in (
-                        "payload_sha256",
-                        "sender_address",
-                        "recipient_address",
-                        "task_id",
-                        "message_kind",
-                        "reply_to_message_id",
-                    ):
-                        if previous.get(key) != message.get(key):
-                            raise ValueError("mailbox receipt identity does not match")
-                    continue
-                await connection.execute(
-                    """INSERT INTO mailbox_deliveries(recipient_session_id,run_id,message_id,task_id,message_kind,envelope_json,envelope_sha256,received_at)
-                    VALUES(?,?,?,?,?,?,?,?)""",
-                    (
-                        session_id,
-                        run_id,
-                        message["id"],
-                        message.get("task_id"),
-                        message["message_kind"],
-                        encoded,
-                        digest,
-                        now(),
-                    ),
-                )
-        return (await self.pending(session_id, run_id))["messages"]
-
-    async def pending(
-        self,
-        session_id: str,
-        run_id: str,
-        *,
-        limit: int = 32,
-        max_bytes: int = 65_536,
-        actionable_only: bool = False,
-    ) -> dict[str, Any]:
-        limit, max_bytes = (
-            min(max(int(limit), 1), 32),
-            min(max(int(max_bytes), 0), 65_536),
+class MailboxCheckpointRepository(Repository):
+    async def delivered_ids(self, session_id: str) -> set[str]:
+        """Find durable delivery evidence across all runs of this session."""
+        rows = await self.all(
+            """SELECT s.mailbox_ids_json FROM run_steps s JOIN runs r ON r.id=s.run_id
+               WHERE r.session_id=? AND s.kind='mailbox' AND s.status='completed'
+                 AND s.mailbox_ids_json IS NOT NULL ORDER BY s.started_at,s.id""",
+            (session_id,),
         )
-        groups = ["message_kind IN ('instruction','question','response','cancel')"]
-        if not actionable_only:
-            groups.append("message_kind IN ('progress','artifact_offer')")
-        batches = []
-        for group in groups:
-            batches.append(
-                await self.all(
-                    f"SELECT * FROM mailbox_deliveries WHERE recipient_session_id=? AND run_id=? AND status='received' AND {group} ORDER BY receipt_sequence LIMIT ?",
-                    (session_id, run_id, limit + 1),
-                )
-            )
-        active = batches[0]
-        passive = [] if actionable_only else batches[1]
-        priority = min(24, limit) if passive else limit
-        rows = active[:priority] + passive + active[priority:]
-        messages = []
+        delivered: set[str] = set()
         for row in rows:
-            encoded = str(row["envelope_json"])
-            if (
-                hashlib.sha256(encoded.encode("utf-8")).hexdigest()
-                != row["envelope_sha256"]
-            ):
-                raise ValueError("mailbox receipt digest does not match")
-            message = json.loads(encoded)
-            message["receipt_sequence"] = int(row["receipt_sequence"])
-            messages.append(message)
-        return bounded_messages(messages, limit=limit, max_bytes=max_bytes)
+            delivered.update(str(value) for value in json.loads(str(row["mailbox_ids_json"])))
+        return delivered
+
+    async def historical_pending(self, session_id: str) -> list[dict[str, Any]]:
+        """Drain pre-v23 receipts moved into run steps during migration."""
+        rows = await self.all(
+            """SELECT s.mailbox_pending_json,s.mailbox_pending_sha256 FROM run_steps s
+               JOIN runs r ON r.id=s.run_id
+               WHERE r.session_id=? AND s.mailbox_pending_json IS NOT NULL
+               ORDER BY s.started_at,s.id LIMIT 33""",
+            (session_id,),
+        )
+        messages = []
+        for row in rows[:32]:
+            encoded = str(row["mailbox_pending_json"])
+            if hashlib.sha256(encoded.encode("utf-8")).hexdigest() != row["mailbox_pending_sha256"]:
+                raise ValueError("pending mailbox receipt digest does not match")
+            messages.append(json.loads(encoded))
+        return messages
+
+    async def clear_historical(self, session_id: str, message_ids: list[str]) -> None:
+        if not message_ids:
+            return
+        placeholders = ",".join("?" for _ in message_ids)
+        await self.execute(
+            f"""DELETE FROM run_steps WHERE mailbox_pending_json IS NOT NULL
+                AND json_extract(mailbox_pending_json,'$.id') IN ({placeholders})
+                AND run_id IN (SELECT id FROM runs WHERE session_id=?)""",
+            (*message_ids, session_id),
+        )
 
     async def commit_delivery(
         self,
@@ -139,17 +88,15 @@ class MailboxDeliveryRepository(Repository):
         ids = list(dict.fromkeys(message_ids))
         if not ids:
             raise ValueError("mailbox delivery has no messages")
-        placeholders = ",".join("?" for _ in ids)
         step_id, timestamp = uuid.uuid4().hex, now()
         async with self.database.transaction() as connection:
-            rows = await (
+            run = await (
                 await connection.execute(
-                    f"SELECT message_id FROM mailbox_deliveries WHERE recipient_session_id=? AND run_id=? AND status='received' AND message_id IN ({placeholders})",
-                    (session_id, run_id, *ids),
+                    "SELECT session_id FROM runs WHERE id=?", (run_id,)
                 )
-            ).fetchall()
-            if len(rows) != len(ids):
-                raise ValueError("mailbox messages are not pending in this run")
+            ).fetchone()
+            if run is None or run["session_id"] != session_id:
+                raise ValueError("mailbox run does not belong to recipient session")
             ordinal = await (
                 await connection.execute(
                     "SELECT coalesce(max(ordinal),-1)+1 FROM run_steps WHERE run_id=?",
@@ -157,7 +104,8 @@ class MailboxDeliveryRepository(Repository):
                 )
             ).fetchone()
             await connection.execute(
-                """INSERT INTO run_steps(id,run_id,ordinal,kind,status,checkpoint_json,started_at,finished_at) VALUES(?,?,?,'mailbox','completed',?,?,?)""",
+                """INSERT INTO run_steps(id,run_id,ordinal,kind,status,checkpoint_json,started_at,finished_at,mailbox_ids_json)
+                   VALUES(?,?,?,'mailbox','completed',?,?,?,?)""",
                 (
                     step_id,
                     run_id,
@@ -165,65 +113,19 @@ class MailboxDeliveryRepository(Repository):
                     json.dumps(checkpoint, ensure_ascii=False),
                     timestamp,
                     timestamp,
+                    json.dumps(ids),
                 ),
             )
             await connection.execute(
-                f"UPDATE mailbox_deliveries SET status='delivered',delivered_at=? WHERE recipient_session_id=? AND run_id=? AND message_id IN ({placeholders})",
-                (timestamp, session_id, run_id, *ids),
-            )
-            await connection.execute(
-                """UPDATE run_steps AS previous SET checkpoint_json=NULL WHERE run_id=? AND id<>? AND checkpoint_json IS NOT NULL
-                AND status NOT IN ('waiting_approval','waiting_input') AND NOT EXISTS(SELECT 1 FROM runs r WHERE r.resume_from_step_id=previous.id)""",
+                """UPDATE run_steps AS previous SET checkpoint_json=NULL
+                   WHERE run_id=? AND id<>?
+                     AND checkpoint_json IS NOT NULL
+                     AND status NOT IN ('waiting_approval','waiting_input')
+                     AND NOT EXISTS(SELECT 1 FROM runs r WHERE r.resume_from_step_id=previous.id)""",
                 (run_id, step_id),
             )
         return step_id
 
-    async def rebind_pending(
-        self,
-        session_id: str,
-        from_run_ids: list[str],
-        run_id: str,
-        *,
-        task_ids: list[str] | None = None,
-        activate_historical: bool = False,
-    ) -> int:
-        if not from_run_ids:
-            return 0
-        target = await self.one("SELECT session_id FROM runs WHERE id=?", (run_id,))
-        if target is None or target["session_id"] != session_id:
-            raise ValueError("mailbox run does not belong to recipient session")
-        clause = ",".join("?" for _ in from_run_ids)
-        values: list[Any] = [run_id, session_id, *from_run_ids]
-        scope = ""
-        if task_ids is not None:
-            scope = (
-                " AND (task_id IS NULL OR task_id IN ("
-                + ",".join("?" for _ in task_ids)
-                + "))"
-            )
-            values.extend(task_ids)
-        states = "('received','historical')" if activate_historical else "('received')"
-        return await self.execute(
-            f"UPDATE mailbox_deliveries SET run_id=?,status='received' WHERE recipient_session_id=? AND run_id IN ({clause}) AND status IN {states}{scope}",
-            tuple(values),
-        )
 
-    async def rebind_task_pending(
-        self,
-        session_id: str,
-        task_id: str,
-        run_id: str,
-        *,
-        activate_historical: bool = False,
-    ) -> int:
-        rows = await self.all(
-            "SELECT DISTINCT run_id FROM mailbox_deliveries WHERE recipient_session_id=? AND task_id=?",
-            (session_id, task_id),
-        )
-        return await self.rebind_pending(
-            session_id,
-            [str(row["run_id"]) for row in rows],
-            run_id,
-            task_ids=[task_id],
-            activate_historical=activate_historical,
-        )
+# Keep the import name used by existing bootstrap integrations.
+MailboxDeliveryRepository = MailboxCheckpointRepository

@@ -2,7 +2,7 @@
 
 WORKSPACE_APPLICATION_ID = 0x434C4B32  # CLK2
 MEMORY_APPLICATION_ID = 0x434C4D32  # CLM2
-WORKSPACE_SCHEMA_VERSION = 22
+WORKSPACE_SCHEMA_VERSION = 24
 MEMORY_SCHEMA_VERSION = 6
 
 WORKSPACE_SCHEMA = """
@@ -86,6 +86,9 @@ CREATE TABLE run_steps (
   started_at TEXT NOT NULL,
   finished_at TEXT,
   error TEXT,
+  mailbox_ids_json TEXT CHECK(mailbox_ids_json IS NULL OR json_valid(mailbox_ids_json)),
+  mailbox_pending_json TEXT CHECK(mailbox_pending_json IS NULL OR json_valid(mailbox_pending_json)),
+  mailbox_pending_sha256 TEXT,
   UNIQUE(run_id,ordinal)
 ) STRICT;
 CREATE TABLE run_events (
@@ -742,22 +745,6 @@ CREATE INDEX idx_agent_mailbox_address_actionable ON agent_mailbox(recipient_add
   WHERE status IN ('queued','delivered') AND message_kind IN ('instruction','question','response','cancel');
 CREATE INDEX idx_agent_mailbox_address_passive ON agent_mailbox(recipient_address,created_at,id)
   WHERE status IN ('queued','delivered') AND message_kind IN ('progress','artifact_offer');
-CREATE TABLE mailbox_deliveries (
-  receipt_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-  recipient_session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-  run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-  message_id TEXT NOT NULL,
-  task_id TEXT,
-  message_kind TEXT NOT NULL,
-  envelope_json TEXT NOT NULL CHECK(json_valid(envelope_json)),
-  envelope_sha256 TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'received' CHECK(status IN ('received','delivered','historical')),
-  received_at TEXT NOT NULL,
-  delivered_at TEXT,
-  UNIQUE(recipient_session_id,message_id)
-) STRICT;
-CREATE INDEX idx_mailbox_deliveries_pending ON mailbox_deliveries(recipient_session_id,run_id,receipt_sequence)
-  WHERE status='received';
 CREATE TABLE agent_outputs (
   task_id TEXT PRIMARY KEY REFERENCES agent_tasks(id) ON DELETE CASCADE,
   attempt_id TEXT REFERENCES agent_attempts(id) ON DELETE SET NULL,

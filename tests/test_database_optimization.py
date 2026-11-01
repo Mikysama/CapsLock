@@ -21,11 +21,11 @@ from capslock.storage.schema import MEMORY_SCHEMA, WORKSPACE_SCHEMA
 from tests.helpers import workspace_run
 
 
-def test_final_schema_has_78_logical_tables_and_no_duplicate_indexes() -> None:
+def test_final_schema_has_77_logical_tables_and_no_duplicate_indexes() -> None:
     definitions = re.findall(
         r"(?m)^CREATE (?:VIRTUAL )?TABLE", WORKSPACE_SCHEMA + MEMORY_SCHEMA
     )
-    assert len(definitions) == 78
+    assert len(definitions) == 77
     for schema in (WORKSPACE_SCHEMA, MEMORY_SCHEMA):
         connection = sqlite3.connect(":memory:")
         try:
@@ -80,7 +80,7 @@ def test_index_regression_detects_automatic_and_formatted_duplicates(
 ):
     monkeypatch.setitem(globals(), "WORKSPACE_SCHEMA", WORKSPACE_SCHEMA + extra_index)
     with pytest.raises(AssertionError):
-        test_final_schema_has_78_logical_tables_and_no_duplicate_indexes()
+        test_final_schema_has_77_logical_tables_and_no_duplicate_indexes()
 
 
 def test_checkpoint_pruning_preserves_resume_and_current_pause(tmp_path: Path) -> None:

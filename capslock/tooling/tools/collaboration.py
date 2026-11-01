@@ -179,12 +179,12 @@ def child_mailbox_tools(
     async def acknowledge_parent_message(
         _context: ExecutionContext, arguments: dict[str, Any]
     ) -> ToolOutcome:
-        await collaboration.acknowledge_child_message(
+        acknowledged = await collaboration.acknowledge_child_message(
             str(arguments["message_id"]),
             task_id=contract.task_id,
             parent_run_id=contract.parent_run_id,
         )
-        return ToolOutcome.success({"acknowledged": True})
+        return ToolOutcome.success({"acknowledged": acknowledged})
 
     async def send_team_message(
         _context: ExecutionContext, arguments: dict[str, Any]
@@ -235,7 +235,7 @@ def child_mailbox_tools(
         ),
         define_tool(
             "ack_parent_message",
-            "Acknowledge one delivered parent mailbox message.",
+            "Check whether a parent message is acknowledged; manual reads are checkpointed after the tool round.",
             {
                 "type": "object",
                 "properties": {"message_id": {"type": "string"}},
@@ -452,7 +452,7 @@ def agent_control_tools() -> list[ToolDefinition]:
         ),
         define_tool(
             "ack_agent_message",
-            "Acknowledge one delivered child Agent mailbox message.",
+            "Check whether a child message is acknowledged; manual reads are checkpointed after the tool round.",
             {
                 "type": "object",
                 "properties": {"message_id": {"type": "string"}},
@@ -1034,10 +1034,10 @@ async def _ack_agent_message(
 ) -> ToolOutcome:
     if context.collaboration is None:
         return ToolOutcome.failure("multi-Agent collaboration is not configured")
-    await context.collaboration.acknowledge_message(
+    acknowledged = await context.collaboration.acknowledge_message(
         str(arguments["message_id"]), session_id=context.session_id
     )
-    return ToolOutcome.success({"acknowledged": True})
+    return ToolOutcome.success({"acknowledged": acknowledged})
 
 
 async def _publish_agent_artifact(

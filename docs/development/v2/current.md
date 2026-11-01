@@ -71,11 +71,13 @@ worker workspace 支持 `snapshot`、`worktree` 和 `shared_read`。snapshot/wor
 
 每次执行写入独立 attempt、预算 reserve/settle/release ledger、approval link 和 checkpoint。崩溃恢复必须复用原 attempt、child session/workspace 和已校验的 contract digest；只有标记为 resumable 的 checkpoint 可由 `resume_agent` 恢复，未知副作用不会自动重放。team mailbox 支持点对点或广播，但 payload 始终标记为 `untrusted_agent` 并继续受脱敏、大小、TTL、digest 和归属校验。Plan Mode 仍在普通权限之前拒绝所有 team mutation 与子 Agent 执行。
 
-活跃父子运行共用可靠信箱接收链：消息持久化后按 session/worker/task 地址通知，在完整工具轮或模型调用前投递；空闲和已结束运行不会因来信自动启动。接收端先保存唯一投递记录再批量 ACK 源信箱，消息进入上下文与 checkpoint 同事务提交。无变化时跳过每轮查库，活跃端每 30 秒只读兜底；每批最多 32 封、64 KiB，并受上下文预算约束。ACK 仅表示运行时可靠接收，不表示模型已处理。父端协作等待可被问题、回复、指令唤醒；前台子任务仍属于父运行完成依赖，预算不重复结算。详情及独立磁盘基准见 [Agent 通信与可靠投递](../../agent-communication.md)。
+活跃父子运行共用可靠信箱接收链：消息持久化后按 session/worker/task 地址通知，在完整工具轮或模型调用前投递；空闲和已结束运行不会因来信自动启动。消息进入上下文与 checkpoint 同事务提交，接收端仅保留已投递消息 ID，然后批量 ACK 父工作区源信箱。无变化时跳过每轮查库，活跃端每 30 秒只读兜底；每批最多 32 封、64 KiB，并受上下文预算约束。ACK 不表示模型已完成请求。父端协作等待可被问题、回复、指令唤醒；前台子任务仍属于父运行完成依赖，预算不重复结算。详情及独立磁盘基准见 [Agent 通信与可靠投递](../../agent-communication.md)。
+
+新信件只写父工作区 `agent_mailbox`；接收器从源表读取并校验摘要，在接收方 `run_steps` 的同一个事务中提交上下文 checkpoint 与 `mailbox_ids_json`，随后 ACK 源表。恢复时按 session 汇总已投递 ID，补 ACK 而不重复注入。v22 的已投递旧收据迁入 ID 记录；v22/v23 尚未交给模型的旧收据先校验摘要，再暂存于 `run_steps.mailbox_pending_json`，升级事务删除 `mailbox_deliveries`，交付后删除临时记录。新库没有该旧表。升级前执行 WAL checkpoint 和 SQLite backup；失败恢复备份，旧二进制回退需使用升级前数据库。
 
 ## 当前数据协议
 
-当前格式为 config 14、workspace schema 22、memory schema 6、portable archive 9、session export 9、JSONL schema 3、IDE Bridge protocol 1 和 plugin protocol 4。workspace 启动支持 backup-first 的 v6-v21→v22 升级；模型传输只使用 OpenAI Responses API，旧配置中的 Provider 会迁移为 `kind="openai_responses"`，不存在 Chat Completions 回退。重建表的迁移必须显式列出源、目标字段，禁止依赖物理列顺序。memory schema v3-v5 与 config v3-v13 自动备份并升级。迁移失败保留原库和备份，不继续部分升级。
+当前格式为 config 14、workspace schema 24、memory schema 6、portable archive 10、session export 10、JSONL schema 3、IDE Bridge protocol 1 和 plugin protocol 4。workspace 启动支持 backup-first 的 v6-v23→v24 升级；模型传输只使用 OpenAI Responses API，旧配置中的 Provider 会迁移为 `kind="openai_responses"`，不存在 Chat Completions 回退。重建表的迁移必须显式列出源、目标字段，禁止依赖物理列顺序。memory schema v3-v5 与 config v3-v13 自动备份并升级。迁移失败保留原库和备份，不继续部分升级。
 
 ## 外部评测兼容与诊断
 
